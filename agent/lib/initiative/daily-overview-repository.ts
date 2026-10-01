@@ -16,9 +16,11 @@ import type { MemoryAuthorization } from "../memory-context.js";
 import { sharedTaskRepository } from "../shared-task-repository.js";
 import { readActiveSpace } from "../spaces/active-space.js";
 import { readFamilySpaceMode } from "../spaces/family-space-mode.js";
+import { loadBoardProjects } from "../projects/project-board.js";
 import type { BoardTask } from "../task-board.js";
 import type { DailyOverview } from "./daily-overview.js";
 import type { DailyOverviewRecipient } from "./daily-overview-dispatch.js";
+import { unansweredCountSql } from "./initiative-unanswered.js";
 
 const DEFAULT_DAILY_LIMIT = 3;
 
@@ -62,22 +64,25 @@ export const dailyOverviewRepository = {
   async recipients(now: Date): Promise<DailyOverviewRecipient[]> {
     const { rows } = await database().query<RecipientRow>(
       `SELECT membership.family_id, person.id AS user_id, person.telegram_user_id,
-              COALESCE(settings.timezone, 'UTC') AS timezone,
+              COALESCE(settings.timezone, owner_settings.timezone, 'UTC') AS timezone,
               to_char(settings.quiet_start, 'HH24:MI') AS quiet_start,
               to_char(settings.quiet_end, 'HH24:MI') AS quiet_end,
               COALESCE(settings.initiative_enabled, true) AS enabled,
               COALESCE(settings.initiative_daily_limit, $2::smallint) AS daily_limit,
               (SELECT count(*) FROM initiative_messages AS sent
                 WHERE sent.user_id = person.id
-                  AND sent.sent_on = ($1::timestamptz AT TIME ZONE COALESCE(settings.timezone, 'UTC'))::date
+                  AND sent.sent_on = ($1::timestamptz AT TIME ZONE COALESCE(settings.timezone, owner_settings.timezone, 'UTC'))::date
               )::text AS sent_today,
-              (SELECT count(*) FROM initiative_messages AS sent
-                WHERE sent.user_id = person.id AND sent.answered_at IS NULL)::text AS unanswered,
+              ${unansweredCountSql("person.id", "$1")} AS unanswered,
               NOT EXISTS (SELECT 1 FROM initiative_messages AS sent
                 WHERE sent.user_id = person.id AND sent.kind = 'suggestion') AS first_ever
          FROM family_memberships AS membership
          JOIN users AS person ON person.id = membership.user_id
          LEFT JOIN user_notification_settings AS settings ON settings.user_id = person.id
+         LEFT JOIN family_memberships AS owner_membership
+           ON owner_membership.family_id = membership.family_id AND owner_membership.role = 'owner'
+         LEFT JOIN user_notification_settings AS owner_settings
+           ON owner_settings.user_id = owner_membership.user_id
         WHERE person.telegram_user_id IS NOT NULL
         ORDER BY membership.family_id, person.id`,
       [now, DEFAULT_DAILY_LIMIT],
@@ -136,7 +141,18 @@ export const dailyOverviewRepository = {
       if (!cursor) break;
     }
     const waiting = await sharedTaskRepository.execute(auth, { action: "list", view: "waiting", status: "proposed" }, "overview");
-    return { now: new Date(), tasks, timezone: recipient.settings.timezone, waiting: waiting.tasks ?? [] };
+    // Названия областей, которые человек ведёт: только имена, без числа дел и сравнения (Fair Play).
+    const owned = await database().query<{ title: string }>(
+      `SELECT title FROM care_areas
+        WHERE family_id = $1 AND owner_telegram_id = $2 AND status = 'accepted'
+        ORDER BY lower(title) LIMIT 8`,
+      [recipient.familyId, recipient.telegramUserId],
+    );
+    const projects = await loadBoardProjects(auth);
+    return {
+      areas: owned.rows.map((row) => row.title), now: new Date(), ...(projects ? { projects } : {}), tasks,
+      timezone: recipient.settings.timezone, waiting: waiting.tasks ?? [],
+    };
   },
 
   /** Заявка на сутки: повтор невозможен по уникальному индексу, а не по проверке в коде. */

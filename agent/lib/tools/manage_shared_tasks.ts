@@ -10,14 +10,31 @@ import { currentTimeRepository } from "../current-time-repository.js";
 import { requireMemoryAuthorization } from "../memory-context.js";
 import { sharedTaskInput } from "../shared-tasks.js";
 import { sharedTaskRepository } from "../shared-task-repository.js";
+import { loadBoardProjects } from "../projects/project-board.js";
 import { taskBoardReply, type BoardTask } from "../task-board.js";
+import { markTelegramKeepOpen } from "../telegram-keep-open-turns.js";
+import { progressNoticeKey } from "../telegram-progress-deferral.js";
+import { describeAdoptedClosures, describeFiling, type FiledTask } from "../task-filing.js";
+
+/** Записи, о месте которых нужно сказать: созданные и уточнённые, кроме повтора прежнего вызова. */
+const FILING_ACTIONS = new Set(["create", "clarify"]);
+
+function filingSubjects(input: { action?: unknown; items?: unknown }, result: unknown): FiledTask[] | null {
+  const outcome = result as { replayed?: boolean; task?: FiledTask; tasks?: FiledTask[] };
+  if (outcome.replayed) return null;
+  if (typeof input.action === "string" && FILING_ACTIONS.has(input.action)) return outcome.task ? [outcome.task] : null;
+  if (input.action !== "batch" || !Array.isArray(input.items) || !outcome.tasks) return null;
+  // Ответ пакета идёт в порядке пунктов: закрытия и правки в рассказ о месте записи не входят.
+  const subjects = outcome.tasks.filter((_, index) => FILING_ACTIONS.has(String((input.items as { action?: unknown }[])[index]?.action)));
+  return subjects.length > 0 ? subjects : null;
+}
 
 export default defineTool({
   description: [
     "Планировщик дел, идей и традиций.",
-    "Одно действие над несколькими делами это один batch, а не вызов на каждое: items до 20, в пункте action и поля этого действия, одно дело в пакете один раз. В пакет идёт всё, кроме чтений, передачи и release. Отказ пункта (AGENT_TASK_BATCH_REJECTED) отменяет весь пакет и называет его номер: исправь или спроси человека.",
+    "Одно действие над несколькими делами это один batch, а не вызов на каждое: items до 20, в пункте action и поля этого действия, одно дело в пакете один раз. В пакет идёт всё, кроме чтений, передачи и release. Отказ пункта отменяет весь пакет, причина в ответе.",
     "create: title, kind task|idea|ritual (по умолчанию task), listName, details; срок dueAt или dueOn только у task. Идея и традиция не обязательство участников.",
-    "В группе create с unassigned:true заводит свободное дело open без исполнителя; в личке свободных нет. claim с id берёт свободное, занятое взять нельзя.",
+    "create без assigneeRef пишет дело на автора принятым; unassigned:true заводит ничьё дело open, только в группе. claim берёт ничьё, занятое взять нельзя.",
     "reopen с id возвращает закрытое по ошибке в работу (id из ответа закрытия или list view done).",
     "Область выводится из чата, личное не публикуй в группе. В личке list показывает мои назначения и запланированные мной идеи/традиции, в группе только её область.",
     "list без status даёт только незакрытое, view done закрытые; строки краткие, полная запись с details через get с id. board в ответе list это готовая доска для человека: на просьбу показать дела отправь её как есть.",
@@ -26,21 +43,47 @@ export default defineTool({
     "update или clarify: id, version из list и изменения title/details/listName/dueAt/dueOn, null очищает поле. clarify по явной просьбе убирает из inbox, сохраняя originalText. Свободное правят читатели, принятое исполнитель. activate с id/version делает идею своим делом только по просьбе.",
     "careAreaRef связывает create с доступной областью заботы и сужает list до её дел.",
     "transfer: id, version, assigneeRef; до согласия отвечаю я, получатель в pendingAssignee. accept_transfer/decline_transfer отвечают, view transfers показывает входящие. release с id/version освобождает моё дело.",
-    "Поручить другому: participants, затем create с assigneeRef; получатель сам принимает или отклоняет proposed, чужое согласие не выдумывай. complete только после accept, cancel автору и исполнителю.",
+    "Поручить другому: participants, затем create с assigneeRef; получатель сам принимает или отклоняет proposed, чужое согласие не выдумывай. complete закрывает принятое тобой или ничьё (станет твоим, notice в ответе); чужое только исполнитель; cancel автору и исполнителю.",
     "record: id традиции, occurredOn, note только о явно сообщённом опыте; history. Пропуск традиции не долг.",
     "Срок не создаёт уведомление. По просьбе в личке manage_reminder create с taskId и content равным title напоминает о моём принятом деле/традиции или проверяет ответ на мою просьбу proposed; завершение и отмена гасят сигналы. Если инструмента нет, скажи об этом.",
   ].join(" "),
   inputSchema: sharedTaskInput,
   async execute(input, ctx) {
     const auth = requireMemoryAuthorization(ctx);
-    const result = await sharedTaskRepository.execute(auth, input, `${ctx.session.id}:${ctx.callId}`);
+    const operationKey = `${ctx.session.id}:${ctx.callId}`;
+    const result = await sharedTaskRepository.execute(auth, input, operationKey);
+    // Служебное поле не для модели: человеку о нём говорит готовая строка `notice`.
+    const { adopted: adoptedItems, ...visible } = result as typeof result & { adopted?: { title: string; assignee: string | null }[] };
+    const adopted = describeAdoptedClosures(adoptedItems ?? []);
+    // Итог записи или закрытия человек должен видеть, а не искать под «Полный ответ»: ход помечается,
+    // и канал сам добавит к ответу директиву (`telegram-keep-open-turns.ts`). В тексте ответа
+    // инструмента её нет: модель пересказывала такие строки или оборачивала их парой тегов.
+    const turn = (ctx as { session?: { id?: string; turn?: { id?: string } } }).session;
+    const keepOpen = () => {
+      if (typeof turn?.id === "string" && typeof turn.turn?.id === "string") markTelegramKeepOpen(progressNoticeKey(turn.id, turn.turn.id));
+    };
+    const notice = adopted === null ? {} : { notice: adopted };
+    const filedTasks = filingSubjects(input, visible);
+    if (filedTasks !== null) {
+      const timezone = await currentTimeRepository.findTurnTimezone(auth.userId, auth.familyId) ?? "UTC";
+      // Ни счётчика разбора, ни списка существующих списков наружу не отдаётся: в эвале 29 сентября
+      // модель читала любое из них как команду «спроси, куда положить» и допрашивала на «купить
+      // батарейки». Спрашивать ли, решает сама запись (расплывчатая или нет), а не подсказка в ответе.
+      keepOpen();
+      return { ...visible, ...notice, filed: describeFiling(filedTasks, timezone).filed };
+    }
+    if (adopted !== null) {
+      keepOpen();
+      return { ...visible, ...notice };
+    }
     // Доску собирает код: пересказанный моделью список приходил сплошным абзацем и прятался под кат.
     // Виды чужих обязательств (просьбы другим, входящие передачи) доской не оформляются: там
     // строки не про дела самого человека, и «Открытых дел: N» вводило бы в заблуждение.
     const ownList = input.action === "list" && !["transfers", "waiting"].includes(String(input.view ?? ""));
-    const tasks = ownList ? (result as { tasks?: readonly BoardTask[] }).tasks : undefined;
-    if (!tasks) return result;
+    const tasks = ownList ? (visible as { tasks?: readonly BoardTask[] }).tasks : undefined;
+    if (!tasks) return visible;
     const timezone = await currentTimeRepository.findTurnTimezone(auth.userId, auth.familyId) ?? "UTC";
-    return { ...result, board: taskBoardReply(tasks, new Date(), timezone) };
+    const projects = await loadBoardProjects(auth);
+    return { ...visible, board: taskBoardReply(tasks, new Date(), timezone, projects) };
   },
 });

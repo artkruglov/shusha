@@ -64,6 +64,60 @@ describeWithDatabase("familyRepository invitations", () => {
     await closeDatabase();
   });
 
+  it("lists family members for the owner even when the task registry never saw them", async () => {
+    // Прод 23–24 сентября 2026: Юля и Ирина в семье с 16 сентября, а метка родства не ставилась,
+    // потому что ref брался из списка участников реестра дел. В личном чате область personal, и
+    // тот список там пуст всегда — здесь он пуст так же, как был на проде.
+    const owner = await createOwner("members");
+    for (const [telegram, name] of [["wife-tg", "Супруга"], ["mother-tg", "Мама"]]) {
+      const person = await database().query<{ id: string }>(
+        "INSERT INTO users (telegram_user_id, display_name) VALUES ($1, $2) RETURNING id",
+        [telegram, name],
+      );
+      await database().query(
+        "INSERT INTO family_memberships (family_id, user_id, role) VALUES ($1, $2, 'member')",
+        [owner.familyId, person.rows[0]!.id],
+      );
+    }
+    expect((await database().query("SELECT 1 FROM shared_task_participants")).rowCount).toBe(0);
+
+    const members = await familyRepository.listMembers({
+      familyId: owner.familyId, ownerUserId: owner.ownerId,
+    });
+
+    // Владельца в списке нет: метку ставят другим, себе она не нужна.
+    expect(members.map((member) => member.name)).toEqual(["Мама", "Супруга"]);
+    expect(members.every((member) => member.relation === null)).toBe(true);
+
+    const wife = members.find((member) => member.name === "Супруга")!;
+    await expect(familyRepository.setRelation({
+      familyId: owner.familyId, ownerUserId: owner.ownerId,
+      participantRef: wife.participantRef, relation: "partner",
+    })).resolves.toEqual({ name: "Супруга", relation: "partner" });
+
+    // Повторный вызов не плодит строк и показывает уже поставленную метку.
+    const again = await familyRepository.listMembers({
+      familyId: owner.familyId, ownerUserId: owner.ownerId,
+    });
+    expect(again).toHaveLength(2);
+    expect(again.find((member) => member.name === "Супруга")!.relation).toBe("partner");
+  });
+
+  it("refuses the member list to anyone who is not the owner", async () => {
+    const owner = await createOwner("members-guard");
+    const person = await database().query<{ id: string }>(
+      "INSERT INTO users (telegram_user_id, display_name) VALUES ('guard-tg', 'Участница') RETURNING id",
+    );
+    await database().query(
+      "INSERT INTO family_memberships (family_id, user_id, role) VALUES ($1, $2, 'member')",
+      [owner.familyId, person.rows[0]!.id],
+    );
+
+    await expect(familyRepository.listMembers({
+      familyId: owner.familyId, ownerUserId: person.rows[0]!.id,
+    })).rejects.toThrow(/AGENT_FAMILY_OWNER_REQUIRED/u);
+  });
+
   it("labels who is who without giving anyone new rights", async () => {
     // Коуч спрашивает про традицию вдвоём партнёра, а маме этот вопрос не адресован вовсе.
     const owner = await createOwner("relations");

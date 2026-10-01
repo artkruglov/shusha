@@ -15,7 +15,9 @@ export interface TaskRow {
   occurrence_index: number; recurrence_anchor_on: string | null;
   recurrence_interval: number | null;
   recurrence_unit: "daily" | "weekly" | "monthly" | "after_completion" | null;
-  due_at: Date | null; due_on: string | null; kind: "task"|"idea"|"ritual"; list_name: string|null;
+  due_at: Date | null; due_on: string | null; kind: "task"|"idea"|"ritual"|"project"; list_name: string|null;
+  /** Проект дела: источник имени списка с миграции 161, `list_name` остался для отката образа. */
+  project_id?: string|null; project_title?: string|null;
   life_area: LifeArea | null;
   details: string|null; version: number; planned_from: string|null; planned_until: string|null;
   original_text?: { title: string; details: string | null };
@@ -81,32 +83,55 @@ function visible(scope: MemoryScope, view?: string): string {
 }
 
 /**
- * Имена списков — это не страница дел. Прежде они собирались из выданной страницы, поэтому при
- * непустом курсоре часть списков исчезала. Источник возвращается рядом с именем: одинаковое имя в
- * разных чатах это разные списки, и смешивать их нельзя.
+ * Проекты области с их счётом. Прежде имена собирались из дел, теперь список это запись-проект
+ * (миграция 161), а дела считаются по ссылке. Источник возвращается рядом с именем: одинаковое имя в
+ * разных чатах это разные проекты, и смешивать их нельзя. По умолчанию только живые проекты.
  */
-export async function listNames(
+export interface ProjectListing {
+  readonly projectId: string;
+  readonly listName: string;
+  readonly details: string | null;
+  readonly lifeArea: LifeArea | null;
+  readonly source: string;
+  readonly status: "accepted" | "completed" | "cancelled";
+  readonly version: number;
+  readonly itemCount: number;
+  readonly unfinishedItemCount: number;
+  readonly completedItemCount: number;
+}
+
+export async function readProjects(
   client: PoolClient, auth: MemoryAuthorization, scope: MemoryScope,
-): Promise<{ listName: string; source: string; itemCount: number; unfinishedItemCount: number }[]> {
-  const result = await client.query<{ group_id: string | null; list_name: string; source: string; item_count: number; unfinished_item_count: number }>(
-    `SELECT t.list_name, t.group_id, count(*)::integer AS item_count,
-        count(*) FILTER (WHERE t.status IN ('open','proposed','accepted'))::integer AS unfinished_item_count,
+  options: { id?: string; includeClosed?: boolean } = {},
+): Promise<ProjectListing[]> {
+  const result = await client.query<{ id: string; group_id: string | null; list_name: string; details: string | null; life_area: LifeArea | null; status: ProjectListing["status"]; version: number; source: string; item_count: number; unfinished_item_count: number; completed_item_count: number }>(
+    `SELECT t.id, t.title AS list_name, t.details, t.life_area, t.group_id, t.status, t.version,
+        (SELECT count(*) FROM shared_tasks c WHERE c.project_id=t.id)::integer AS item_count,
+        (SELECT count(*) FROM shared_tasks c WHERE c.project_id=t.id AND c.status IN ('open','proposed','accepted'))::integer AS unfinished_item_count,
+        (SELECT count(*) FROM shared_tasks c WHERE c.project_id=t.id AND c.status='completed')::integer AS completed_item_count,
         COALESCE(task_space.title, g.title, CASE WHEN t.scope='family' THEN 'Семья' ELSE 'Личное' END) AS source
        FROM shared_tasks t LEFT JOIN telegram_groups g ON g.id=t.group_id
      LEFT JOIN spaces task_space ON task_space.id=t.space_id AND task_space.family_id=t.family_id
        LEFT JOIN shared_task_plans pplan ON pplan.task_id=t.id AND pplan.telegram_user_id=$2
-      WHERE t.family_id=$1 AND t.list_name IS NOT NULL AND (${visible(scope)})
+      WHERE t.family_id=$1 AND t.kind='project' AND ($8::boolean OR t.status='accepted')
+        AND ($7::uuid IS NULL OR t.id=$7::uuid) AND (${visible(scope)})
         AND ($3::uuid IS NULL OR TRUE)
       AND ${spaceReadClause({alias:"t",parameters:{family:"$1",group:"$3",spaceId:"$4",version:"$5",user:"$6"}})}
-      GROUP BY t.list_name,t.group_id,t.scope,g.title,t.space_id,task_space.title
-      ORDER BY source, t.list_name LIMIT 200`,
-    [auth.familyId, auth.telegramUserId, auth.groupId, auth.space?.spaceId ?? null, auth.space?.policyVersion ?? null, auth.userId],
+      ORDER BY source, task_project_key(t.title), t.id LIMIT 200`,
+    [auth.familyId, auth.telegramUserId, auth.groupId, auth.space?.spaceId ?? null, auth.space?.policyVersion ?? null, auth.userId,
+      options.id ?? null, options.includeClosed ?? false],
   );
-  // Имя списка и название чата раскрывают не меньше, чем само дело, поэтому отзыв доступа
+  // Имя проекта и название чата раскрывают не меньше, чем само дело, поэтому отзыв доступа
   // действует здесь так же: без этой проверки вышедший из группы продолжал бы их видеть.
   const { rows } = await keepLiveGroupRows(client, auth, result.rows);
-  return rows.map((row) => ({ listName: row.list_name, source: row.source,
-    itemCount: row.item_count, unfinishedItemCount: row.unfinished_item_count }));
+  return rows.map((row) => ({ projectId: row.id, listName: row.list_name, details: row.details, lifeArea: row.life_area,
+    source: row.source, status: row.status, version: row.version, itemCount: row.item_count,
+    unfinishedItemCount: row.unfinished_item_count, completedItemCount: row.completed_item_count }));
+}
+
+/** Живые проекты области: имена для `lists` и для доски. */
+export function listNames(client: PoolClient, auth: MemoryAuthorization, scope: MemoryScope) {
+  return readProjects(client, auth, scope);
 }
 
 /**
@@ -149,6 +174,7 @@ export async function readTasks(client: PoolClient, auth: MemoryAuthorization, s
       COALESCE((SELECT jsonb_build_object('title',v.previous_record->'title','details',v.previous_record->'details')
         FROM shared_task_versions v WHERE v.task_id=t.id ORDER BY v.version LIMIT 1),
         jsonb_build_object('title',t.title,'details',t.details)) AS original_text,
+      proj.title AS project_title,
       date_trunc('milliseconds',t.created_at) AS created_at, EXISTS(SELECT 1 FROM reminders r JOIN users ru ON ru.id=r.author_user_id
        WHERE r.shared_task_id=t.id AND ru.telegram_user_id=$2 AND r.status IN ('active','leased')) AS reminder_created, t.due_on::text, pplan.planned_from::text, pplan.planned_until::text, g.telegram_chat_id,
       COALESCE(task_space.title, g.title, CASE WHEN t.scope='family' THEN 'Семья' ELSE 'Личное' END) AS source,
@@ -164,13 +190,14 @@ export async function readTasks(client: PoolClient, auth: MemoryAuthorization, s
      FROM shared_tasks t LEFT JOIN telegram_groups g ON g.id=t.group_id
      LEFT JOIN spaces task_space ON task_space.id=t.space_id AND task_space.family_id=t.family_id
      LEFT JOIN shared_task_plans pplan ON pplan.task_id=t.id AND pplan.telegram_user_id=$2
+     LEFT JOIN shared_tasks proj ON proj.id=t.project_id
      LEFT JOIN users u ON u.telegram_user_id=t.assignee_telegram_id
      LEFT JOIN shared_task_participants p ON p.family_id=t.family_id
        AND p.group_id IS NOT DISTINCT FROM t.group_id AND p.telegram_user_id=t.assignee_telegram_id
-     WHERE t.family_id=$1 AND (${visible(scope, input.view)}) AND ($4::uuid[] IS NULL OR t.id=ANY($4::uuid[]))
+     WHERE t.family_id=$1 AND t.kind <> 'project' AND (${visible(scope, input.view)}) AND ($4::uuid[] IS NULL OR t.id=ANY($4::uuid[]))
        AND ($5::text[] IS NULL OR t.status=ANY($5::text[]))
        AND ($3::uuid IS NULL OR TRUE) AND ($2::text IS NOT NULL)
-       AND ($6::text IS NULL OR t.list_name=$6)
+       AND ($6::text IS NULL OR task_project_key(proj.title)=task_project_key($6))
        AND ($20::text IS NULL OR t.life_area=$20)
        AND ($7::text IS NULL OR t.kind=$7)
        AND ($12::boolean=false OR pplan.task_id IS NOT NULL)
@@ -234,10 +261,11 @@ export async function keepLiveGroupRows<Row extends { group_id: string | null }>
 export function present(row: TaskRow, personalPlan=true) {
   return { id: row.id, title: row.title, status: row.status, dueAt: row.due_at?.toISOString() ?? null,
     source: row.source, assignee: row.kind === "task" ? row.assignee : null, curator:row.kind !== "task" ? row.assignee : null, scope: row.scope, reminderCreated: personalPlan ? row.reminder_created : null,
-    kind:row.kind, listName:row.list_name, lifeArea:row.life_area, details:row.details, dueOn:row.due_on,version:row.version,
+    kind:row.kind, listName:row.project_title ?? row.list_name, lifeArea:row.life_area, details:row.details, dueOn:row.due_on,version:row.version,
     originalText:row.original_text ?? {title:row.title,details:row.details},
     pendingAssignee:row.pending_assignee,
     careAreaRef:row.care_area_id ?? null,
+    projectId:row.project_id ?? null,
     repeat: row.recurrence_unit === null ? null
       : { interval: row.recurrence_interval, unit: row.recurrence_unit },
     plannedFrom:personalPlan ? row.planned_from : null,plannedUntil:personalPlan ? row.planned_until : null,
@@ -253,7 +281,7 @@ export function presentSummary(row: TaskRow, personalPlan=true) {
   const full = present(row, personalPlan);
   return { id: full.id, title: full.title, status: full.status, kind: full.kind, dueAt: full.dueAt,
     dueOn: full.dueOn, source: full.source, assignee: full.assignee, curator: full.curator,
-    listName: full.listName, lifeArea: full.lifeArea, version: full.version, repeat: full.repeat,
+    listName: full.listName, lifeArea: full.lifeArea, projectId: full.projectId, version: full.version, repeat: full.repeat,
     pendingAssignee: full.pendingAssignee, reminderCreated: full.reminderCreated,
     plannedFrom: full.plannedFrom, plannedUntil: full.plannedUntil };
 }

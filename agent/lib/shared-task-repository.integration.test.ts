@@ -197,6 +197,37 @@ suite('shared task repository',()=>{
     expect((await tasks.execute(familyMember,{action:'list',view:'mine'},'read')).tasks?.map(t=>t.title)).toContain('Кто заберёт посылку');
   });
 
+  it('lets whoever did an unowned task close it and reports that it became theirs',async()=>{
+    // Прод 1 октября 2026: «встретил мебельщиков» не закрылось, дело было ничьим, а закрыть могла
+    // только принявшая сторона. Закрывший становится исполнителем, ответ говорит об этом.
+    const open=await tasks.execute(familyGroup,{action:'create',title:'Встретить мебельщиков',unassigned:true},randomUUID());
+    const done=await tasks.execute(familyMember,{action:'complete',id:open.task!.id},randomUUID());
+    expect(done.task).toMatchObject({status:'completed',assignee:'Member'});
+    expect(done.adopted).toEqual([{title:'Встретить мебельщиков',assignee:'Member'}]);
+    // Своё принятое дело закрывается как раньше и ничьим не называется.
+    const own=await make(familyGroup,'Своё дело');
+    expect((await tasks.execute(familyGroup,{action:'complete',id:own.id},randomUUID())).adopted).toBeUndefined();
+  });
+
+  it('closes unowned tasks in a batch, and a refused item names why and changes nothing',async()=>{
+    const a=(await tasks.execute(familyGroup,{action:'create',title:'Заказать матрас',unassigned:true},randomUUID())).task!;
+    const b=(await tasks.execute(familyGroup,{action:'create',title:'Выкинуть мусор',unassigned:true},randomUUID())).task!;
+    const closed=await tasks.execute(familyGroup,{action:'batch',items:[{action:'complete',id:a.id},{action:'complete',id:b.id}]} as never,randomUUID());
+    expect(closed.tasks?.map(t=>t.status)).toEqual(['completed','completed']);
+    expect((closed.adopted ?? []).map(a=>a.title).sort()).toEqual(['Выкинуть мусор','Заказать матрас']);
+
+    const free=(await tasks.execute(familyGroup,{action:'create',title:'Найти мастеров',unassigned:true},randomUUID())).task!;
+    const recipients=(await tasks.execute(familyGroup,{action:'participants'},'read')).participants!;
+    const forMember=await make(familyGroup,'Для Member',recipients.find(p=>p.name==='Member')!.participantRef);
+    const mine=await make(familyMember,'Дело Member');
+    const rejected=tasks.execute(familyGroup,{action:'batch',items:[{action:'complete',id:free.id},{action:'complete',id:forMember.id},{action:'complete',id:mine.id}]} as never,randomUUID());
+    await expect(rejected).rejects.toThrow(/AGENT_TASK_BATCH_REJECTED/);
+    await expect(rejected).rejects.toThrow(/предложено другому человеку/);
+    await expect(rejected).rejects.toThrow(/другом исполнителе/);
+    // Откат полный: годный пункт пакета остался ничьим.
+    expect((await tasks.execute(familyGroup,{action:'get',id:free.id},'read')).task).toMatchObject({status:'open',assignee:null});
+  });
+
   it('refuses an unclaimed task where it would have no audience to take it',async()=>{
     await expect(tasks.execute(owner,{action:'create',title:'Личное без исполнителя',unassigned:true},randomUUID()))
       .rejects.toThrow(/AGENT_TASK_INPUT_INVALID|AGENT_TASK_ACCESS_DENIED/);
@@ -312,6 +343,24 @@ suite('shared task repository',()=>{
     await expect(tasks.execute(familyGroup,{action:'transfer',id:task.id,
       version:task.version,assigneeRef:memberRef},randomUUID()))
       .rejects.toThrow(/AGENT_TASK_ACCESS_DENIED/);
+  });
+
+  it('does not hand a timed task to a person whose personal time it falls into',async()=>{
+    // B02: личное время чужое. Барьер стоял только на создании дела, и передача обходила его: дело с
+    // точным временем можно было отдать человеку прямо в его окно.
+    const recipients=(await tasks.execute(familyGroup,{action:'participants'},'read')).participants!;
+    const ownerRef=recipients.find(p=>p.name==='Owner')!.participantRef;
+    await database().query(
+      "INSERT INTO personal_time_windows(family_id,user_id,title,starts_at,ends_at) VALUES($1,$2,'Рисование','00:00','23:59')",
+      [owner.familyId,owner.userId]);
+    const timed=(await tasks.execute(familyMember,{action:'create',title:'Забрать посылку',dueAt:'2026-10-05T12:00:00.000Z'},randomUUID())).task!;
+
+    await expect(tasks.execute(familyMember,{action:'transfer',id:timed.id,version:timed.version,assigneeRef:ownerRef},randomUUID()))
+      .rejects.toThrow(/AGENT_TASK_PERSONAL_TIME/u);
+    // Дело без точного времени в окно не попадает: передаётся как обычно.
+    const dateOnly=(await tasks.execute(familyMember,{action:'create',title:'Позвонить в школу',dueOn:'2026-10-05'},randomUUID())).task!;
+    await expect(tasks.execute(familyMember,{action:'transfer',id:dateOnly.id,version:dateOnly.version,assigneeRef:ownerRef},randomUUID()))
+      .resolves.toMatchObject({task:{pendingAssignee:'Owner'}});
   });
 
   it('closes a task that still has a transfer waiting for an answer',async()=>{

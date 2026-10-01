@@ -187,4 +187,36 @@ dbDescribe("care areas", () => {
     await expect(areas.execute(auth(fixture.owner), { action: "create", title: "машина" }))
       .rejects.toThrow(/AGENT_CARE_AREA_DUPLICATE/u);
   });
+  it("lets a person claim a new area for themselves in one step, without a proposal to anyone", async () => {
+    // Прод 29 сентября 2026: областей заботы ноль. Цепочка «создать, предложить себе, принять» это три
+    // вызова, и никто ей не пользовался. Взять область себе не назначение другого: согласие не нужно.
+    const claimed = (await areas.execute(auth(fixture.owner), { action: "claim", title: "Машина" })).area!;
+
+    expect(claimed).toMatchObject({ owner: "Владелец", pendingOwner: null, status: "accepted", title: "Машина" });
+    await expect(areas.execute(auth(fixture.owner), { action: "claim", title: "машина" }))
+      .rejects.toThrow(/AGENT_CARE_AREA_DUPLICATE/u);
+  });
+
+  it("lets a person take a free area, and never one somebody else holds or was offered", async () => {
+    const free = (await areas.execute(auth(fixture.owner), { action: "create", title: "Садик" })).area!;
+    const taken = (await areas.execute(auth(fixture.spouse), { action: "claim", id: free.id, version: free.version })).area!;
+    expect(taken).toMatchObject({ owner: "Супруга", status: "accepted" });
+
+    // Занятую область забрать нельзя: отказаться от неё может только хозяин.
+    await expect(areas.execute(auth(fixture.owner), { action: "claim", id: taken.id, version: taken.version }))
+      .rejects.toThrow(/AGENT_TASK_ACCESS_DENIED/u);
+
+    const offered = (await areas.execute(auth(fixture.owner), { action: "create", title: "Врачи" })).area!;
+    const proposed = (await areas.execute(auth(fixture.owner), {
+      action: "propose", id: offered.id, version: offered.version, ownerRef: await spouseRef(),
+    })).area!;
+    // Предложенную другому область не перехватывают: пока он не ответил, она за ним.
+    await expect(areas.execute(auth(fixture.owner), { action: "claim", id: proposed.id, version: proposed.version }))
+      .rejects.toThrow(/AGENT_TASK_ACCESS_DENIED/u);
+  });
+
+  it("wants either a title for a new area or the id and version of a free one", async () => {
+    await expect(areas.execute(auth(fixture.owner), { action: "claim" }))
+      .rejects.toThrow(/AGENT_CARE_AREA_INPUT_INVALID|AGENT_TASK_ACCESS_DENIED/u);
+  });
 });

@@ -32,4 +32,14 @@ describe("application database pool", () => {
     expect(line).not.toContain("super-secret-password");
     expect(line).not.toContain("db.internal");
   });
+  it("keeps a few idle connections open instead of reconnecting after every pause", () => {
+    vi.stubEnv("DATABASE_URL", "postgresql://agent:secret@db.internal:5432/agent");
+    const { options } = database() as unknown as { options: { max: number; min: number } };
+
+    // pg-pool closes an idle client after 10 seconds. Under memory pressure PostgreSQL could not
+    // start a new backend within the connect timeout while open connections kept working
+    // (upstream nyxandro d4ff4aa, #285).
+    expect(options.min).toBeGreaterThan(0);
+    expect(options.min).toBeLessThanOrEqual(options.max);
+  });
 });

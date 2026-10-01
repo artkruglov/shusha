@@ -1,6 +1,6 @@
-# Как запустить свою Хомку: пошаговая инструкция
+# Как запустить свою Шушу: пошаговая инструкция
 
-Хомка живёт на вашем сервере и разговаривает с семьёй через Telegram. Ниже путь от пустой
+Шуша живёт на вашем сервере и разговаривает с семьёй через Telegram. Ниже путь от пустой
 виртуальной машины до бота, который отвечает в личке и в семейной группе. На всё уходит около
 часа, из них 20–30 минут — первая сборка образов.
 
@@ -18,17 +18,17 @@
 ## 1. Создайте бота в Telegram
 
 1. Откройте [@BotFather](https://t.me/BotFather) и отправьте `/newbot`.
-2. Придумайте имя (его видят люди, например «Хомка») и username, оканчивающийся на `bot`.
+2. Придумайте имя (его видят люди, например «Шуша») и username, оканчивающийся на `bot`.
 3. Сохраните **токен** вида `123456789:AA…` и **username без @**.
 4. Там же выполните:
    - `/setprivacy` → выберите бота → **Disable**. Иначе в группах бот увидит только команды и
-     прямые обращения через @, а не «Хомка, напомни…» и не историю разговора.
+     прямые обращения через @, а не «Шуша, напомни…» и не историю разговора.
    - `/setjoingroups` → **Enable**, чтобы бота можно было добавить в группу.
 
 ## 2. Получите ключи моделей
 
 **DeepSeek (обязательно).** На [platform.deepseek.com](https://platform.deepseek.com) создайте
-API key и пополните баланс. Когда баланс опускается ниже $2, Хомка сама предупредит владельца;
+API key и пополните баланс. Когда баланс опускается ниже $2, Шуша сама предупредит владельца;
 при нуле модель отвечает ошибкой и бот замолкает, пока счёт не пополнят.
 
 **Голос (по желанию).** Ключ [Groq](https://console.groq.com/keys). Если голос не нужен, откройте
@@ -47,8 +47,8 @@ API key и пополните баланс. Когда баланс опуска
 # Docker и Compose v2, если их ещё нет (Ubuntu/Debian)
 curl -fsSL https://get.docker.com | sh
 
-git clone https://github.com/artkruglov/homka.git
-cd homka
+git clone https://github.com/artkruglov/shusha.git
+cd shusha
 cp .env.example .env
 ```
 
@@ -80,7 +80,7 @@ OPENROUTER_VIDEO_API_KEY=<ключ OpenRouter>
 ```
 
 `DATABASE_URL` для `compose.yaml` оставьте пустым: адрес базы собирается из `POSTGRES_PASSWORD`.
-Имя бота меняется строкой `TELEGRAM_AGENT_NAME` (по умолчанию Хомка).
+Имя бота меняется строкой `TELEGRAM_AGENT_NAME` (по умолчанию Шуша).
 
 ## 4. Запустите
 
@@ -101,12 +101,12 @@ curl -s http://localhost:8080/eve/v1/health   # {"ok":true,"status":"ready"}
 
 ```bash
 sudo tee /etc/caddy/Caddyfile >/dev/null <<'EOF'
-homka.example.com {
+shusha.example.com {
   reverse_proxy localhost:8080
 }
 EOF
 sudo systemctl reload caddy
-curl -s https://homka.example.com/eve/v1/health
+curl -s https://shusha.example.com/eve/v1/health
 ```
 
 Наружу проксируются только маршрут Telegram, проверка здоровья и callback Google; базу и
@@ -118,7 +118,7 @@ curl -s https://homka.example.com/eve/v1/health
 source .env
 curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
   -H 'content-type: application/json' \
-  -d "{\"url\":\"https://homka.example.com/eve/v1/telegram\",\"secret_token\":\"${TELEGRAM_WEBHOOK_SECRET_TOKEN}\",\"allowed_updates\":[\"message\",\"callback_query\"]}"
+  -d "{\"url\":\"https://shusha.example.com/eve/v1/telegram\",\"secret_token\":\"${TELEGRAM_WEBHOOK_SECRET_TOKEN}\",\"allowed_updates\":[\"message\",\"callback_query\"]}"
 curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo"
 ```
 
@@ -137,7 +137,7 @@ docker compose run --rm --no-deps --entrypoint node agent .runtime/scripts/creat
 
 ## 8. Позовите семью
 
-1. В личке с ботом напишите: «создай приглашение в семью» и нажмите «Да, подтвердить». Хомка
+1. В личке с ботом напишите: «создай приглашение в семью» и нажмите «Да, подтвердить». Шуша
    пришлёт одноразовую ссылку на 24 часа — перешлите её.
 2. Приглашённый открывает ссылку и нажимает «Старт». Бот отвечает, что заявка отправлена владельцу.
    Отдельного уведомления владельцу не приходит.
@@ -167,7 +167,7 @@ docker compose run --rm --no-deps --entrypoint node agent .runtime/scripts/creat
 - «Мой часовой пояс Москва, тихие часы с 23 до 8» — без часового пояса напоминания не создаются.
 - «Напомни мне через 2 минуты выпить воды» — после кнопки подтверждения напоминание придёт через 2 минуты.
 - «Найди, во сколько сегодня закрывается ближайший ИКЕА» — ответ со ссылкой на источник.
-- Голосовое сообщение — Хомка его расшифрует (если включён голос).
+- Голосовое сообщение — Шуша его расшифрует (если включён голос).
 - Фото чека: «что здесь купили и на сколько?»
 - «Нарисуй открытку ко дню рождения бабушки» (если настроены картинки).
 - «Запомни, что у Маши аллергия на орехи» → через день «на что у Маши аллергия?».

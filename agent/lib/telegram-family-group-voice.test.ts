@@ -43,7 +43,7 @@ describe("family group voice", () => {
       toolAllowlist: [], type: "family_private",
     });
     repository.telegram.findIdentity.mockResolvedValue({ familyId: "family-1", role: "member", userId: "user-1" });
-    const transcribed = { ...groupMessage("Хомка, запиши купить батарейки"), raw: { date: 1_700_000_000, voice: { file_id: "v" } } };
+    const transcribed = { ...groupMessage("Шуша, запиши купить батарейки"), raw: { date: 1_700_000_000, voice: { file_id: "v" } } };
 
     const result = await createTelegramMessageHandler(repository)(telegramContext().context, transcribed);
 

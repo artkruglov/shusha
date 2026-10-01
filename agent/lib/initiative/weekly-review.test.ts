@@ -1,7 +1,7 @@
 /** Недельный обзор молчит, когда пересматривать нечего, и никогда не советует и не считает вклад. */
 import { describe, expect, it } from "vitest";
 
-import type { BoardTask } from "../task-board.js";
+import type { BoardProject, BoardTask } from "../task-board.js";
 import { formatWeeklyReview, WEEKLY_REVIEW_QUESTIONS, type WeeklyReviewInput } from "./weekly-review.js";
 
 // Воскресенье 27 сентября 2026, 19:00 по Москве.
@@ -82,5 +82,38 @@ describe("weekly review", () => {
     expect(text).toContain("Просрочено · 8");
     expect(text).toContain("…и ещё 3");
     expect(text).not.toContain("Дело 6");
+  });
+
+  const project = (extra: Partial<BoardProject> = {}): BoardProject => ({
+    completed: 0, hasNextStep: false, id: "p1", open: 0, source: "Личное", status: "accepted", title: "Отпуск", total: 0, ...extra,
+  });
+
+  it("names a project that has no next step, which alone is a reason to write", () => {
+    const text = formatWeeklyReview(review({ projects: [project()] }))!;
+
+    expect(text).toContain("Проекты без следующего шага · 1\n• Отпуск");
+    expect(text).toContain("Скажи первый шаг");
+  });
+
+  it("asks whether to close a project where everything is done", () => {
+    const text = formatWeeklyReview(review({
+      projects: [project({ completed: 4, title: "Переезд", total: 4 })],
+    }))!;
+
+    expect(text).toContain("Проекты, где всё сделано · 1\n• Переезд");
+    expect(text).toContain("Закрыть?");
+  });
+
+  it("ignores a project that still has an open task or is already closed", () => {
+    expect(formatWeeklyReview(review({
+      projects: [project({ completed: 1, hasNextStep: true, open: 2, total: 3 }), project({ id: "p2", status: "completed", title: "Старое" })],
+    }))).toBeNull();
+  });
+
+  it("keeps the same questions and still never counts or advises", () => {
+    const text = formatWeeklyReview(review({ projects: [project()] }))!;
+
+    for (const question of WEEKLY_REVIEW_QUESTIONS) expect(text).toContain(question);
+    expect(text).not.toMatch(/подряд|рекомендую|советую|вклад/u);
   });
 });

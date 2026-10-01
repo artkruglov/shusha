@@ -148,7 +148,13 @@ export function createTelegramMemoryContextBuilder(dependencies: TelegramMemoryC
       }
       // Per-turn cost of memory on a small server: retrieval (FTS + E5 + pgvector) and profile view.
       console.info(JSON.stringify({
+        authorCardSuppressed: suppressCurrentAuthor,
         code: "AGENT_MEMORY_CONTEXT",
+        // Что фильтры блока убрали: показанное недавно не возвращается, потому что патч контекста
+        // выкидывает блок прошлого хода из промпта. Если эти числа велики при пустом блоке, окно
+        // показов (MEMORY_EXPOSURE_WINDOW_TURNS) оставляет ответы без памяти.
+        droppedFaded: context.dropped?.faded ?? 0,
+        droppedRecentlyShown: context.dropped?.recentlyShown ?? 0,
         memories: context.memories.length,
         profile: profile !== null,
         profileMs: Math.round(performance.now() - retrievedAt),

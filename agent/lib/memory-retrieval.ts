@@ -14,6 +14,7 @@ import type { ModelMessage } from "ai";
 import { MEMORY_RETRIEVAL_LIMIT, MEMORY_TURN_RETRIEVAL_CANDIDATE_LIMIT, MEMORY_TURN_RETRIEVAL_LIMIT } from "./memory-config.js";
 import { memoryContextExposureRepository } from "./memory-context-exposure-repository.js";
 import { embedMemoryQuery } from "./memory-embedding-client.js";
+import { prepareMemoryQuery } from "./memory-query-preparation.js";
 import { isRetainedForAutomaticContext } from "./memory-retention-score.js";
 import type { MemoryAuthorization } from "./memory-context.js";
 import type { ModelMemory } from "./model-memory.js";
@@ -70,6 +71,8 @@ export function formatRetrievedMemoryInstructions(
 }
 
 export interface MemoryTurnContext {
+  /** Сколько найденных записей выбросили фильтры блока; в заглушках тестов поля нет. */
+  dropped?: { faded: number; recentlyShown: number };
   memories: ModelMemoryContextItem[];
   retrievedClaimIds: string[];
   threads: MemoryThreadContext;
@@ -122,8 +125,10 @@ export async function retrieveRelevantMemories(
   exposure?: MemorySearchExposure,
   window: MemoryRetrievalWindow = {},
 ): Promise<ModelMemoryContextItem[]> {
-  const embedding = await embedMemoryQuery(query);
-  const retrieval = await memoryRetrievalRepository.searchWithConflictClosure(auth, query, embedding, MEMORY_RETRIEVAL_LIMIT, window);
+  // Один очищенный текст и для слов, и для вектора: ветки видят один и тот же вопрос.
+  const prepared = prepareMemoryQuery(query);
+  const embedding = await embedMemoryQuery(prepared);
+  const retrieval = await memoryRetrievalRepository.searchWithConflictClosure(auth, prepared, embedding, MEMORY_RETRIEVAL_LIMIT, window);
   const memories = retrieval.results.map((result) => toModelMemory(result.memory, result.sourceEvidence));
   // Explicit search shows records too: only a shown ref may later be reinforced as used.
   if (exposure && memories.length > 0) {
@@ -151,22 +156,26 @@ export async function retrieveMemoryTurnContext(
   skillHints: readonly string[],
   options: MemoryTurnContextOptions = {},
 ): Promise<MemoryTurnContext> {
-  const embedding = await embedMemoryQuery(query);
+  const prepared = prepareMemoryQuery(query);
+  const embedding = await embedMemoryQuery(prepared);
   // Automatic context is deliberately narrower than `search_memories`, which the model can call.
   // The block limit applies after the filters below: with the limit in SQL, a top made of faded
   // or recently shown records left the block empty while fitting records sat just below it.
   const retrieval = await memoryRetrievalRepository.searchWithConflictClosure(
     auth,
-    query,
+    prepared,
     embedding,
     MEMORY_TURN_RETRIEVAL_CANDIDATE_LIMIT,
   );
   const exclude = options.excludeMemoryRefs ?? new Set<string>();
-  const admitted = retrieval.results
-    // A faded record stays searchable but no longer enters the block on its own.
-    .filter((result) => isRetainedForAutomaticContext(result.retention))
-    .filter((result) => !exclude.has(result.memory.memoryRef))
-    .slice(0, MEMORY_TURN_RETRIEVAL_LIMIT);
+  // A faded record stays searchable but no longer enters the block on its own.
+  const retained = retrieval.results.filter((result) => isRetainedForAutomaticContext(result.retention));
+  const unseen = retained.filter((result) => !exclude.has(result.memory.memoryRef));
+  const admitted = unseen.slice(0, MEMORY_TURN_RETRIEVAL_LIMIT);
+  const dropped = {
+    faded: retrieval.results.length - retained.length,
+    recentlyShown: retained.length - unseen.length,
+  };
   const memories: ModelMemoryContextItem[] = [
     ...admitted.map((result) => toModelMemory(result.memory, result.sourceEvidence)),
     ...retrieval.conflicts.map((conflict) => ({ ...conflict, type: "unresolved_conflict" as const })),
@@ -177,5 +186,5 @@ export async function retrieveMemoryTurnContext(
     retrievedClaimIds: admitted.map((result) => result.memory.id),
     skillHints,
   });
-  return { memories, retrievedClaimIds: retrieval.relatedClaimIds, threads };
+  return { dropped, memories, retrievedClaimIds: retrieval.relatedClaimIds, threads };
 }

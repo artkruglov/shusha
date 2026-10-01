@@ -22,6 +22,8 @@ export interface BoardTask {
   /** Сфера жизни, если человек её назвал: она становится заголовком вместо имени списка. */
   readonly lifeArea?: LifeArea | null;
   readonly status: string;
+  /** Кому предложено дело или кто его ведёт: имя называет, чьего ответа ждёт предложение. */
+  readonly assignee?: string | null;
   readonly kind: string;
   readonly listName: string | null;
   readonly source: string;
@@ -29,6 +31,20 @@ export interface BoardTask {
   readonly dueAt: string | null;
   readonly plannedFrom?: string | null;
   readonly plannedUntil?: string | null;
+  /** Проект дела (миграция 161): по нему доска находит прогресс. */
+  readonly projectId?: string | null;
+}
+
+/** Проект области со счётом дел: прогресс в заголовке раздела и разделы без шага и «всё сделано». */
+export interface BoardProject {
+  readonly completed: number;
+  readonly hasNextStep: boolean;
+  readonly id: string;
+  readonly open: number;
+  readonly source: string;
+  readonly status: string;
+  readonly title: string;
+  readonly total: number;
 }
 
 export interface TaskBoardInput {
@@ -41,6 +57,8 @@ export interface TaskBoardInput {
   /** plain для служебных сообщений без разметки, rich для ответа модели. */
   readonly style: "plain" | "rich";
   readonly perGroup?: number;
+  /** Живые проекты области; без них доска остаётся прежней, без прогресса и новых разделов. */
+  readonly projects?: readonly BoardProject[];
 }
 
 export const OPEN_TASK_STATUSES: ReadonlySet<string> = new Set(["open", "proposed", "accepted"]);
@@ -48,6 +66,15 @@ export const OPEN_TASK_STATUSES: ReadonlySet<string> = new Set(["open", "propose
 export const TASK_BOARD_MAX_CHARACTERS = 3500;
 const TASK_BOARD_MAX_TITLE = 120;
 const NO_LIST = "Без списка";
+const UNSORTED_HINT = "Скажи, куда положить или какой первый шаг.";
+// Ничьё дело не обещание: на проде 1 октября 2026 их было 19, и они висели рядом с делами, которые
+// кто-то ведёт. Раздел называет это прямо и говорит человеку, что с этим сделать.
+const UNOWNED_SECTION_LIMIT = 10;
+const NO_STEP_HINT = "Скажи первый шаг.";
+const ALL_DONE_HINT = "Закрыть?";
+/** Прогресс показывается, когда он что-то говорит: от трёх дел в проекте и хотя бы одного сделанного. */
+const PROGRESS_MIN_TOTAL = 3;
+const UNOWNED_HINT = "Никто не взял. Скажи «беру» или назови, кому.";
 const PERSONAL_SOURCE = "Личное";
 
 export function localDate(timezone: string, at: Date): string {
@@ -87,8 +114,8 @@ export function cleanTaskTitle(title: string, style: TaskBoardInput["style"]): s
 }
 
 function note(task: BoardTask): string {
-  if (task.status === "open") return " · свободное";
-  if (task.status === "proposed") return " · ждёт согласия";
+  if (task.status === "open") return " · ничьё";
+  if (task.status === "proposed") return task.assignee ? ` · ждёт согласия: ${task.assignee}` : " · ждёт согласия";
   return "";
 }
 
@@ -101,47 +128,78 @@ export function formatTaskBoard(input: TaskBoardInput): string | null {
   // поэтому там настоящий список `-` и пустая строка после заголовка. Служебное сообщение
   // (утренний обзор) уходит без разметки, и ему нужен ровно обратный, дословный вид.
   const rich = input.style === "rich";
-  const item = (task: BoardTask, suffix = "") =>
-    `${rich ? "-" : "•"} ${cleanTaskTitle(task.title, input.style)}${suffix}${note(task)}`;
+  const item = (task: BoardTask, suffix = "", withNote = true) =>
+    `${rich ? "-" : "•"} ${cleanTaskTitle(task.title, input.style)}${suffix}${withNote ? note(task) : ""}`;
 
   const open = input.tasks.filter((task) => OPEN_TASK_STATUSES.has(task.status));
   const commitments = open.filter((task) => task.kind === "task");
   const overdue = commitments.filter((task) => isOverdue(task, input.now, today));
   const todays = commitments.filter((task) => !overdue.includes(task) && isToday(task, today, input.timezone));
-  const rest = commitments.filter((task) => !overdue.includes(task) && !todays.includes(task));
+  const later = commitments.filter((task) => !overdue.includes(task) && !todays.includes(task));
+  // Ничьё и ещё не принятое видно отдельно от дел, которые кто-то ведёт: по списку их не отличить,
+  // и свободное дело лежало среди живых как такое же (прод 1 октября 2026: 19 ничьих из 29 семейных).
+  const unowned = later.filter((task) => task.status === "open");
+  const unaccepted = later.filter((task) => task.status === "proposed");
+  const owned = later.filter((task) => !unowned.includes(task) && !unaccepted.includes(task));
+  // Что ещё нигде не лежит и ничего не обещает по времени: раньше это уходило в «Без списка»
+  // последним разделом, и никто не просил его разобрать (прод 29 сентября 2026: 21 дело из 56).
+  const unsorted = owned.filter((task) => !task.listName && !task.lifeArea && dueDay(task, input.timezone) === null && !task.plannedFrom);
+  const rest = owned.filter((task) => !unsorted.includes(task));
   const ideas = open.filter((task) => task.kind === "idea");
   const rituals = open.filter((task) => task.kind === "ritual");
   const waiting = (input.waiting ?? []).filter((task) => OPEN_TASK_STATUSES.has(task.status));
 
   const sections: string[][] = [];
-  const section = (title: string, tasks: readonly BoardTask[], line: (task: BoardTask) => string) => {
-    if (tasks.length === 0) return;
-    const shown = tasks.slice(0, perGroup).map(line);
-    const more = tasks.length - shown.length;
-    // Хвост «…и ещё N» это отдельный абзац: без пустой строки разметка считает его продолжением
-    // последнего пункта списка и печатает его внутри пункта.
-    sections.push([heading(`${title} · ${tasks.length}`), ...(rich ? [""] : []), ...shown,
-      ...(more > 0 ? [...(rich ? [""] : []), `…и ещё ${more}`] : [])]);
+  const section = <Row>(title: string, rows: readonly Row[], line: (row: Row) => string, hint?: string, limit = perGroup, progress = "") => {
+    if (rows.length === 0) return;
+    const shown = rows.slice(0, limit).map(line);
+    const more = rows.length - shown.length;
+    // Хвост «…и ещё N» и подсказка это отдельные абзацы: без пустой строки разметка считает их
+    // продолжением последнего пункта списка и печатает внутри пункта.
+    sections.push([heading(`${title} · ${rows.length}${progress}`), ...(rich ? [""] : []), ...shown,
+      ...(more > 0 ? [...(rich ? [""] : []), `…и ещё ${more}`] : []),
+      ...(hint ? [...(rich ? [""] : []), hint] : [])]);
   };
 
   section("⚠️ Просрочено", overdue, (task) => item(task, ` — срок ${shortDate(dueDay(task, input.timezone)!)}`));
   section("Сегодня", todays, (task) => item(task));
+  section("Ничьи", unowned, (task) => item(task, task.listName ? ` · ${cleanTaskTitle(task.listName, input.style)}` : "", false), UNOWNED_HINT,
+    // Ничьё это то, что нужно разобрать, а не фон: полный десяток, а не пять строк и «ещё N».
+    Math.max(perGroup, UNOWNED_SECTION_LIMIT));
+  section("Ждут согласия", unaccepted, (task) => item(task, task.assignee ? ` — ${task.assignee}` : "", false));
+  section("Разобрать", unsorted, (task) => item(task), UNSORTED_HINT);
   // Сфера жизни говорит о деле больше, чем имя списка, поэтому при метке заголовком становится
   // она. Список это группа дел по смыслу; одинаковое имя в разных областях это разные списки.
   const groups = new Map<string, BoardTask[]>();
   for (const task of rest) {
-    const name = task.lifeArea ? lifeAreaTitle(task.lifeArea) : task.listName ?? NO_LIST;
-    const key = task.lifeArea || task.source === PERSONAL_SOURCE ? name : `${name} (${task.source})`;
-    groups.set(key, [...(groups.get(key) ?? []), task]);
+    // Проект называет раздел первым: сфера жизни говорит о деле, но имя проекта не должно из-за неё
+    // пропадать. Источник отделяет одноимённые проекты разных областей, сфера идёт рядом в скобках.
+    const sphere = task.lifeArea ? lifeAreaTitle(task.lifeArea) : null;
+    const tags = task.listName
+      ? [...(task.source === PERSONAL_SOURCE ? [] : [task.source]), ...(sphere ? [sphere] : [])]
+      : [];
+    const name = `${task.listName ?? sphere ?? NO_LIST}${tags.length > 0 ? ` (${tags.join(", ")})` : ""}`;
+    groups.set(name, [...(groups.get(name) ?? []), task]);
   }
   const ordered = [...groups.entries()].sort(([a], [b]) =>
-    (a === NO_LIST ? 1 : 0) - (b === NO_LIST ? 1 : 0) || a.localeCompare(b, "ru"));
+    (a.startsWith(NO_LIST) ? 1 : 0) - (b.startsWith(NO_LIST) ? 1 : 0) || a.localeCompare(b, "ru"));
+  const stats = new Map((input.projects ?? []).map((project) => [project.id, project]));
   for (const [name, tasks] of ordered) {
+    const project = tasks[0]?.projectId ? stats.get(tasks[0].projectId) : undefined;
+    const progress = project && project.total >= PROGRESS_MIN_TOTAL && project.completed >= 1
+      ? ` · сделано ${project.completed} из ${project.total}` : "";
     section(name, tasks, (task) => {
       const day = dueDay(task, input.timezone);
       return item(task, day ? ` — до ${shortDate(day)}` : "");
-    });
+    }, undefined, perGroup, progress);
   }
+  // Проект без открытого дела это не «пусто», а вопрос человеку: нет следующего шага или всё сделано.
+  const projectLine = (project: BoardProject) => `${rich ? "-" : "•"} ${cleanTaskTitle(project.title, input.style)}`;
+  const live = (input.projects ?? []).filter((project) => project.status === "accepted" && project.open === 0);
+  const stalled = live.filter((project) => project.completed === 0);
+  const finished = live.filter((project) => project.completed > 0);
+  section("Проекты без шага", stalled, projectLine, NO_STEP_HINT);
+  section("Проекты, где всё сделано", finished, projectLine, ALL_DONE_HINT);
   section("Жду ответа", waiting, (task) => item(task));
   section("Когда-нибудь", ideas, (task) => item(task));
   section("Традиции", rituals, (task) => item(task));
@@ -171,7 +229,9 @@ export function formatTaskBoard(input: TaskBoardInput): string | null {
  * Доска для ответа в чате: с жирными заголовками и директивой, которая не даёт автокату свернуть
  * её в «Полный ответ». Модель пересылает это поле как есть.
  */
-export function taskBoardReply(tasks: readonly BoardTask[], now: Date, timezone: string): string | null {
-  const board = formatTaskBoard({ now, style: "rich", tasks, timezone });
+export function taskBoardReply(
+  tasks: readonly BoardTask[], now: Date, timezone: string, projects?: readonly BoardProject[],
+): string | null {
+  const board = formatTaskBoard({ now, style: "rich", tasks, timezone, ...(projects ? { projects } : {}) });
   return board === null ? null : `${TELEGRAM_KEEP_OPEN_DIRECTIVE}\n${board}`;
 }

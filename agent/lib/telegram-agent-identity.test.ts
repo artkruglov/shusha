@@ -12,14 +12,14 @@ describe("Telegram installation identity", () => {
   });
   afterEach(() => vi.unstubAllEnvs());
 
-  it.each(["Хомка", "ХОМКА", "Хомки", "Хомке", "Хомку", "Хомкой", "Homka", "Khomka"])(
+  it.each(["Шуша", "ШУША", "Шуши", "Шуше", "Шушу", "Шушей", "Shusha", "Shusha"])(
     "addresses the default bot as %s", (name) => {
       expect(isMessageAddressedToBot({ ...group, text: `${name}, покажи дела` }, "family_bot"))
         .toBe(true);
     },
   );
 
-  it.each(["Мия, привет", "Mia, help", "Хомкам", "_Хомка", "Хомка\u200Ds", "хомяк", "Осинара, привет"])(
+  it.each(["Мия, привет", "Mia, help", "Шушам", "_Шуша", "Шуша\u200Ds", "хомяк", "Осинара, привет"])(
     "does not wake on another bot or a name embedded in a Unicode word: %s", (text) => {
       expect(isAgentNameMentioned(text)).toBe(false);
     },
@@ -30,7 +30,16 @@ describe("Telegram installation identity", () => {
     for (const text of ["Осинара, помоги", "Передай Осинаре", "Сделано Осинарой", "Osinara, help", "Сена, ответь"]) {
       expect(isAgentNameMentioned(text), text).toBe(true);
     }
-    expect(isAgentNameMentioned("Хомка, привет")).toBe(false);
+    expect(isAgentNameMentioned("Шуша, привет")).toBe(false);
+  });
+
+  it("keeps the old Хомка name set for an installation that still names itself Хомка", () => {
+    vi.stubEnv("TELEGRAM_AGENT_NAME", "Хомка");
+    for (const text of ["Хомка, помоги", "Передай Хомке", "Сделано Хомкой", "Homka, help"]) {
+      expect(isAgentNameMentioned(text), text).toBe(true);
+    }
+    // Новое имя по умолчанию такой установке не принадлежит.
+    expect(isAgentNameMentioned("Шуша, привет")).toBe(false);
   });
 
   it("replaces the default names for another installation without changing username/reply routing", () => {
@@ -49,8 +58,8 @@ describe("Telegram installation identity", () => {
 
   it("can disable short aliases explicitly", () => {
     vi.stubEnv("TELEGRAM_AGENT_ALIASES", "[]");
-    expect(isAgentNameMentioned("Хомка, привет")).toBe(true);
-    expect(isAgentNameMentioned("Хомке привет")).toBe(false);
+    expect(isAgentNameMentioned("Шуша, привет")).toBe(true);
+    expect(isAgentNameMentioned("Шуше привет")).toBe(false);
   });
 
   it("matches a configured Unicode name and its literal alias", () => {

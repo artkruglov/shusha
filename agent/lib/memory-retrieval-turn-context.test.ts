@@ -127,4 +127,23 @@ describe("automatic memory block admission", () => {
     expect(vi.mocked(memoryRetrievalRepository.searchWithConflictClosure).mock.calls.at(-1)?.[4])
       .toEqual({ occurredAfter: "2026-08-01", occurredBefore: "2026-08-31" });
   });
+  it("counts what the filters removed so the exposure window can be judged from the log", async () => {
+    // Патч контекста убирает блок прошлого хода из промпта, а показанная запись ещё N ходов не
+    // возвращается в автоподборку: без счёта не видно, сколько ответов из-за этого осталось без памяти.
+    const { memoryRetrievalRepository } = await import("./memory-retrieval-repository.js");
+    const { retrieveMemoryTurnContext } = await import("./memory-retrieval.js");
+    vi.mocked(memoryRetrievalRepository.searchWithConflictClosure).mockResolvedValue({
+      conflicts: [],
+      relatedClaimIds: [],
+      results: [scored("mem_seen", 0.9), scored("mem_faded", 0.1), scored("mem_new", 0.9)],
+    });
+
+    const context = await retrieveMemoryTurnContext(auth, "марафон", [], {
+      excludeMemoryRefs: new Set(["mem_seen"]),
+    });
+
+    expect(context.dropped).toEqual({ faded: 1, recentlyShown: 1 });
+    expect(context.memories.flatMap((memory) => "memoryRef" in memory ? [memory.memoryRef] : []))
+      .toEqual(["mem_new"]);
+  });
 });

@@ -31,14 +31,19 @@ export async function lockTaskForChange(
   return task;
 }
 
+/**
+ * Меняет состояние дела. Возвращает `adoptedUnowned`, когда ничьё дело закрыто и исполнителем
+ * стал закрывший: ответ называет это человеку, молча записать чужое дело на него нельзя.
+ */
 export async function applyTaskStatus(
   client: PoolClient, auth: MemoryAuthorization, task: TaskRow, action: StatusAction,
-): Promise<void> {
+): Promise<{ adoptedUnowned: boolean }> {
   if (task.kind !== "task" && action !== "cancel" && action !== "reopen") denied();
   const status = nextSharedTaskStatus(task.status, action,
     task.assignee_telegram_id === auth.telegramUserId, task.creator_telegram_id === auth.telegramUserId);
   // Исполнитель появляется ровно один раз и только у свободного дела: строка уже под
   // блокировкой, поэтому второй «беру» видит занятое дело, а не переписывает его.
+  const adoptedUnowned = action === "complete" && task.status === "open";
   await client.query(
     `UPDATE shared_tasks SET status=$2, version=version+1, updated_at=now(),
         assignee_telegram_id = CASE WHEN $3::text IS NULL THEN assignee_telegram_id ELSE $3 END,
@@ -47,7 +52,7 @@ export async function applyTaskStatus(
         pending_assignee_telegram_id = CASE WHEN $4::boolean THEN NULL ELSE pending_assignee_telegram_id END,
         transfer_requested_at = CASE WHEN $4::boolean THEN NULL ELSE transfer_requested_at END
       WHERE id=$1`,
-    [task.id, status, action === "claim" ? auth.telegramUserId : null,
+    [task.id, status, action === "claim" || adoptedUnowned ? auth.telegramUserId : null,
       ["cancelled", "completed", "declined"].includes(status)],
   );
   await recordTaskVersion(client, task, action, auth.telegramUserId!);
@@ -85,4 +90,5 @@ export async function applyTaskStatus(
       [task.id],
     );
   }
+  return { adoptedUnowned };
 }

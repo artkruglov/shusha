@@ -46,6 +46,7 @@ const EXPECTED_TOOL_MODULES = [
   "manage_memory_thread.ts",
   "manage_personal_time.ts",
   "manage_profile_projection.ts",
+  "manage_projects.ts",
   "manage_reminder.ts",
   "manage_shared_tasks.ts",
   "manage_shopping_list.ts",

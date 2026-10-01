@@ -11,19 +11,17 @@ import type { ToolContext } from "eve/tools";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-const { configureNotifications, getNotificationSettings, setCoach, setWeeklyReview } = vi.hoisted(() => ({
+const { configureNotifications, getNotificationSettings, requireAuthorization, setCoach, setGroupOverview, setWeeklyReview } = vi.hoisted(() => ({
   configureNotifications: vi.fn(),
   getNotificationSettings: vi.fn(),
+  requireAuthorization: vi.fn(),
   setCoach: vi.fn(),
+  setGroupOverview: vi.fn(),
   setWeeklyReview: vi.fn(),
 }));
 
-vi.mock("./reminders/reminder-context.js", () => ({
-  requireReminderAuthorization: vi.fn(() => ({
-    telegramChatType: "private",
-    userId: "user-1",
-  })),
-}));
+vi.mock("./reminders/reminder-context.js", () => ({ requireReminderAuthorization: requireAuthorization }));
+vi.mock("./initiative/group-overview-repository.js", () => ({ groupOverviewRepository: { setEnabled: setGroupOverview } }));
 vi.mock("./reminders/reminder-repository.js", () => ({
   reminderRepository: { configureNotifications, getNotificationSettings, setCoach, setWeeklyReview },
 }));
@@ -41,6 +39,9 @@ function approvalFor(input: Record<string, unknown>) {
 describe("notification_settings model input", () => {
   beforeEach(() => {
     configureNotifications.mockReset();
+    setGroupOverview.mockReset();
+    requireAuthorization.mockReset();
+    requireAuthorization.mockReturnValue({ familyId: "family-1", role: "member", telegramChatType: "private", userId: "user-1" });
     getNotificationSettings.mockReset();
     getNotificationSettings.mockResolvedValue({ timezone: "Europe/Moscow" });
   });
@@ -54,7 +55,7 @@ describe("notification_settings model input", () => {
 
     expect(schema.type).toBe("object");
     expect(schema.required).toContain("action");
-    expect(schema.properties.action?.enum).toEqual(["get", "set", "coach", "weekly_review"]);
+    expect(schema.properties.action?.enum).toEqual(["get", "set", "coach", "weekly_review", "group_overview"]);
   });
 
   it("turns the coach on or off without a button and only with an explicit value", async () => {
@@ -133,5 +134,22 @@ describe("notification_settings model input", () => {
       '"action":"weekly_review"',
       "weeklyReviewEnabled",
     ]) expect(description).toContain(fragment);
+  });
+  it("lets only the owner switch the family group's morning overview, without a button", async () => {
+    setGroupOverview.mockResolvedValue(1);
+    const input = { action: "group_overview", groupOverviewEnabled: false };
+
+    expect(approvalFor(input)).toBe("not-applicable");
+    await expect(notificationSettings.execute(input as never, context))
+      .rejects.toMatchObject({ code: "AGENT_GROUP_OVERVIEW_OWNER_ONLY" });
+    expect(setGroupOverview).not.toHaveBeenCalled();
+
+    requireAuthorization.mockReturnValue({ familyId: "family-1", role: "owner", telegramChatType: "private", userId: "user-1" });
+    await expect(notificationSettings.execute(input as never, context))
+      .resolves.toEqual({ groupOverviewEnabled: false, groups: 1 });
+    expect(setGroupOverview).toHaveBeenCalledWith("family-1", false);
+    expect(() => approvalFor({ action: "group_overview" })).toThrowError(/AGENT_NOTIFICATION_SETTINGS_INPUT_INVALID.*groupOverviewEnabled/u);
+    expect(() => approvalFor({ action: "group_overview", groupOverviewEnabled: true, timezone: "UTC" }))
+      .toThrowError(/AGENT_NOTIFICATION_SETTINGS_INPUT_INVALID/u);
   });
 });

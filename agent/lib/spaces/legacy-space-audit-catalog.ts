@@ -197,6 +197,10 @@ add("partner_alert_claims", {
   action: "control",
   reason: "Which addressed item a person was already told about; a per-person receipt that prevents a repeat, not the content of any area",
 });
+add("group_overview_claims", {
+  action: "control",
+  reason: "Which day the family group already got its morning overview; a per-group receipt that prevents a repeat, not the content of any area",
+});
 add("software_update_proposals owner_health_digests owner_balance_alerts memory_exports", {
   action: "control", reason: "Retain operation receipts under operator/requester checks; cutover does not revive or replay requests",
 });

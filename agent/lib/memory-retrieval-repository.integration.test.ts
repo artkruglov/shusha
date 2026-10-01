@@ -6,6 +6,8 @@
  * - Personal and family authorization is applied before ranking.
  * - Unresolved conflict closure loads both authorized versions even when one has no retrieval score.
  * - Conflict closure withholds base results when authorization changes between repository queries.
+ * - The word branches match on any word of a live question, not on all of them at once, and need
+ *   two of its words (or the whole question when it is a single word).
  */
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -368,5 +370,79 @@ describeWithDatabase("memoryRetrievalRepository", () => {
     } finally {
       querySpy.mockRestore();
     }
+  });
+  describe("word branches on a live question", () => {
+    // Вектор запроса ортогонален векторам записей: находить может только словесная ветка.
+    const away = () => vector(0, 1);
+    const stored = () => vector(1, 0);
+
+    async function remember(content: string, key: string): Promise<string> {
+      const memory = await database().query<{ id: string }>(
+        `INSERT INTO memory_items
+           (family_id, owner_user_id, author_user_id, author_telegram_user_id, scope, kind,
+            content, source, confirmation, sensitivity, operation_key, embedding_status)
+         VALUES ($1, $2, $2, $3, 'personal', 'fact', $4, 'test:words',
+                 'user_confirmed', 'normal', $5, 'indexed')
+         RETURNING id`,
+        [auth.familyId, auth.userId, auth.telegramActorId, content, key],
+      );
+      await database().query(
+        `INSERT INTO memory_embedding_chunks
+           (memory_item_id, chunk_index, content, start_offset, end_offset, embedding, embedding_model)
+         VALUES ($1, 0, $2, 0, $3, $4::vector, $5)`,
+        [memory.rows[0]!.id, content, content.length, `[${stored().join(",")}]`, MEMORY_EMBEDDING_MODEL_VERSION],
+      );
+      return memory.rows[0]!.id;
+    }
+
+    it("finds records for a multi-topic question that no single record fully contains", async () => {
+      // Прежнее условие И требовало все слова вопроса в одной записи, и ветка молчала.
+      const duty = await remember("Ближайшее дежурство у Артёма в субботу", "duty");
+      const tyres = await remember("Резину меняем в октябре на шиномонтаже", "tyres");
+      await remember("Любимый транспорт — поезд", "noise");
+
+      const results = await memoryRetrievalRepository.search(
+        auth, "Проверь, когда у меня ближайшее дежурство, и когда мы меняем резину", away(),
+      );
+      const ids = results.map((result) => result.memory.id);
+
+      expect(ids).toContain(duty);
+      expect(ids).toContain(tyres);
+      expect(results.find((result) => result.memory.id === duty)!.evidence.simpleLexicalRank).not.toBeNull();
+    });
+
+    it("does not let one shared word carry a long question", async () => {
+      await remember("Курс доллара не связан с этой записью", "coincidence");
+
+      const results = await memoryRetrievalRepository.search(
+        auth, "Какой сегодня курс валюты и что нового в Москве на выходных", away(),
+      );
+
+      expect(results).toEqual([]);
+    });
+
+    it("matches a single-word question on that one word", async () => {
+      const code = await remember("Код домофона 4271", "code");
+
+      const results = await memoryRetrievalRepository.search(auth, "4271", away());
+
+      expect(results.map((result) => result.memory.id)).toEqual([code]);
+    });
+
+    it("ignores stop words that would match every record", async () => {
+      await remember("Врач принимает у нас во вторник", "stop-words");
+
+      const results = await memoryRetrievalRepository.search(auth, "и у за на", away());
+
+      expect(results).toEqual([]);
+    });
+
+    it("finds a record written with «ё» by a question typed with «е»", async () => {
+      const yo = await remember("Пётр и Алёна приедут в пятницу", "yo");
+
+      const results = await memoryRetrievalRepository.search(auth, "когда приедут Петр и Алена", away());
+
+      expect(results.map((result) => result.memory.id)).toContain(yo);
+    });
   });
 });

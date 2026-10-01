@@ -5,6 +5,7 @@
  * - `TelegramMessageRepositories`: explicit repository surface consumed by authorization handling.
  * - `productionTelegramMessageRepositories`: PostgreSQL, attachment, notice, and workspace adapters.
  */
+import { buildTaskProjectsContext } from "./projects/project-context.js";
 import type { TelegramMessage } from "eve/channels/telegram";
 
 import { downloadTelegramAttachment } from "./attachments/telegram-attachment-download.js";
@@ -86,6 +87,8 @@ export interface TelegramMessageRepositories {
     "failInteractivePreparation" | "observePassiveMessage" | "prepareInteractiveTurn"
   >;
   proactiveDeliveries: Pick<typeof proactiveDeliveryRepository, "listPendingContext">;
+  /** Проекты области как справка в контексте хода; во внешней группе блока нет. */
+  taskProjects: { contextBlock: typeof buildTaskProjectsContext };
   session: Pick<typeof sessionRepository, "hasRoute" | "prepareTurn">;
   spaces: {
     resolveTelegramChatMode: typeof resolveTelegramChatMode;
@@ -113,6 +116,7 @@ export const productionTelegramMessageRepositories = {
   journal: telegramGroupJournalRepository,
   memoryReview: memoryReviewRepository,
   proactiveDeliveries: proactiveDeliveryRepository,
+  taskProjects: { contextBlock: buildTaskProjectsContext },
   session: sessionRepository,
   spaces: { resolveTelegramChatMode, resolveTurnSpace },
   telegram: telegramRepository,

@@ -137,7 +137,7 @@ describeWithDatabase("unified Telegram group timeline repository", () => {
     });
     expect(entries.map((entry) => [entry.sequenceId, entry.actorKind, entry.replyToSequenceId]))
       .toEqual([["1", "user", null], ["2", "agent_self", "1"], ["3", "user", "2"]]);
-    expect(entries[1]?.senderDisplayName).toBe("Хомка");
+    expect(entries[1]?.senderDisplayName).toBe("Шуша");
   });
 
   it("records an agent-delivered attachment without an inbound Telegram file ID", async () => {

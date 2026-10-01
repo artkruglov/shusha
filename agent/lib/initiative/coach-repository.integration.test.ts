@@ -145,6 +145,8 @@ dbDescribe("coach data", () => {
     const again = await coachRepository.claim(recipient, "2026-09-24", touch, NOW);
     expect(again).not.toBeNull();
     expect((await ownerRecipient())!.facts.invited).toBe(true);
+    // Две заявки на приглашение в разные дни это два отправленных приглашения: по ним считается повтор.
+    expect((await ownerRecipient())!.facts.invitesSent).toBe(2);
 
     const session = await database().query<{ id: string }>(
       `INSERT INTO conversation_sessions
@@ -165,6 +167,6 @@ dbDescribe("coach data", () => {
       scope: "personal", telegramChatId: fixture.owner.telegramUserId,
     });
     expect(pending?.context).toContain('"sourceKind":"coach"');
-    expect(pending?.context).toContain("Без коуча");
+    expect(pending?.context).toContain("без коуча");
   });
 });

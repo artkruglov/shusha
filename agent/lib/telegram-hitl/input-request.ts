@@ -28,6 +28,7 @@ import {
 } from "../sessions/session-context.js";
 import { sessionRepository } from "../sessions/session-repository.js";
 import { telegramTurnReplyParameters } from "../telegram-reply.js";
+import { retainTurnAttributes } from "./approval-auth.js";
 import { postTelegramMessageWithoutContinuationChange } from "../telegram-stable-delivery.js";
 import {
   telegramHitlApprovalRepository,
@@ -295,6 +296,7 @@ export function createTelegramInputRequestHandler(dependencies: InputRequestDepe
           toolCallId: member.action.callId,
           toolInputHash: memoryOperationHash(member.action.input),
           toolName: member.action.toolName,
+          turnAttributes: retainTurnAttributes(caller.attributes),
         });
       }
       if (rendered.freeformRequestId) {

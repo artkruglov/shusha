@@ -353,6 +353,56 @@ describeWithDatabase("Telegram HITL approval repository", () => {
     });
   });
 
+  it("restores the requesting turn's context, and never its policy, after the tap", async () => {
+    // Без видимых записей таймлайна привязка источников памяти падала (turn_attributes_invalid) на
+    // каждом ходе после кнопки, а без sandbox-сессии не работали браузерные инструменты.
+    const { sessionId } = await fixture();
+    await telegramHitlApprovalRepository.register({
+      applicationSessionId: sessionId,
+      kind: "tool-approval",
+      callbackData: ["eve:0", "eve:1"],
+      callbackOptions: [
+        { callbackData: "eve:0", label: "Да", optionId: "approve" },
+        { callbackData: "eve:1", label: "Нет", optionId: "deny" },
+      ],
+      eveSessionId: "wrun_hitl",
+      requestId: "approval-request-1",
+      promptText: "Подтвердите тестовое действие",
+      telegramChatId: "-1001",
+      telegramChatType: "supergroup",
+      telegramMessageId: "88",
+      telegramMessageThreadId: "55",
+      telegramUserId: OWNER_TELEGRAM_ID,
+      toolCallId: "call-1",
+      toolInputHash: "b".repeat(64),
+      toolName: "test_tool",
+      turnAttributes: {
+        sandboxSessionId: "sandbox-of-turn", telegramTimelineSequence: "412",
+        telegramTimelineVisibleEntryIds: ["entry-0", "entry-1"], telegramTurnStartedAt: "2026-09-26T08:50:00.000Z",
+        role: "owner", toolAllowlist: ["bash"],
+      },
+    });
+
+    const claimed = await telegramHitlApprovalRepository.claimCallback({
+      baseContinuationToken: "-1001:55:88",
+      callbackData: "eve:0",
+      telegramChatId: "-1001",
+      telegramMessageId: "88",
+      telegramUserId: OWNER_TELEGRAM_ID,
+    });
+
+    expect(claimed).toMatchObject({
+      auth: { attributes: {
+        sandboxSessionId: "sandbox-of-turn", telegramTimelineSequence: "412",
+        telegramTimelineVisibleEntryIds: ["entry-0", "entry-1"], telegramTurnStartedAt: "2026-09-26T08:50:00.000Z",
+      } },
+      status: "authorized",
+    });
+    if (claimed.status !== "authorized") throw new Error("expected an authorized claim");
+    expect(claimed.auth.attributes).not.toHaveProperty("toolAllowlist");
+    expect(claimed.auth.attributes.role).not.toBe(undefined);
+  });
+
   it("keeps a callback claimable after the Eve turn pauses for approval", async () => {
     const current = await fixture();
 

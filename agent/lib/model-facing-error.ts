@@ -62,6 +62,11 @@ function categoryForCode(code: string): ModelFacingErrorCategory {
 function correctionFor(category: ModelFacingErrorCategory, code: string, toolName: string): string {
   const notFound = NOT_FOUND_CORRECTIONS[code];
   if (notFound) return notFound;
+  // Пакет отменён целиком, ничего не изменено: безопасно повторить без плохих пунктов, а человеку
+  // назвать причину каждого, а не придумывать «нет прав».
+  if (code === "AGENT_TASK_BATCH_REJECTED") {
+    return "Ничего не изменено. Назови человеку причину каждого отклонённого пункта своими словами, один раз повтори вызов без отклонённых пунктов и больше не повторяй.";
+  }
   if (category === "input") {
     return `Исправьте аргументы ${toolName} по его schema и повторите вызов один раз.`;
   }

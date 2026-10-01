@@ -1,9 +1,12 @@
 /** Installation-owned name shared by inbound routing and model context. */
 import { z } from "zod";
 
-const DEFAULT_NAME = "Хомка";
+const DEFAULT_NAME = "Шуша";
 // Case forms the bot answers to when TELEGRAM_AGENT_ALIASES is empty.
 const KNOWN_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  "шуша": ["Шуши", "Шуше", "Шушу", "Шушей", "Шушею", "Shusha"],
+  // The project was called Хомка until 1 October 2026: an installation that still names itself so
+  // keeps the name set it had.
   "хомка": ["Хомки", "Хомке", "Хомку", "Хомкой", "Хомкою", "Homka", "Khomka"],
   // An installation that still names itself Osinara keeps the name set it had before Хомка.
   "осинара": [

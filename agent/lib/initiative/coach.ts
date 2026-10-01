@@ -15,8 +15,11 @@
  * напоминателем. Нагрузку не считает: число дел не мера вклада. Пропущенную традицию не ставит в
  * вину: вопрос предлагает отметить, пропустить или снять её.
  *
- * Включается только явным «да»: пока человек не ответил на приглашение, вопросов нет, молчание
- * это «не включено», а не пауза.
+ * Включён по умолчанию (29 сентября 2026, решение владельца): пока приглашение требовало явного
+ * «да», коуч молчал у всех, потому что «да» никто не сказал, а жалоба была именно в том, что бот
+ * ничего не спрашивает. Теперь человек один раз получает объявление, что вопросы будут, и как их
+ * выключить («без коуча», «не пиши мне первым»); после него молчание значит «можно». Выключенное
+ * не включается само: `coach_enabled = false` никогда не пересматривается.
  *
  * Поводы делятся по отношениям (22 сентября 2026): традиции вдвоём и первая совместная практика
  * обращены к партнёру, а время для себя, тёплый вопрос недели и адресованное решение годятся
@@ -32,7 +35,9 @@ export type CoachReason =
   | "ritual_checkin"
   | "week_warm"
   | "rest_window_missing"
-  | "ritual_none";
+  | "ritual_none"
+  | "care_area_offer"
+  | "situation_followup";
 
 export interface CoachFacts {
   /** `null`: приглашения ещё не было или на него не ответили; `false`: «без коуча». */
@@ -40,15 +45,24 @@ export interface CoachFacts {
   /** Кто человек владельцу семьи. Пока не сказано — только нейтральные вопросы. */
   readonly relation: "child" | "other" | "parent" | "partner" | null;
   readonly invited: boolean;
+  /** Сколько объявлений уже отправлено; только для лога, повторов у объявления нет. */
+  readonly invitesSent: number;
   readonly lastTouchAt: Date | null;
   readonly touchesLastWeek: number;
   readonly lastByReason: Partial<Record<CoachReason, Date>>;
   /** Предложение партнёра, на которое человек ещё не ответил и о котором коуч не спрашивал. */
   readonly openDecision: { readonly id: string; readonly title: string; readonly proposer: string } | null;
+  /**
+   * Личное событие человека (приём, экзамен, трудный разговор) с датой в последние дни, о котором
+   * коуч ещё не спрашивал. Текст записи выходит только к самому человеку в его личный чат.
+   */
+  readonly openSituation: { readonly id: string; readonly text: string } | null;
   /** Традиция человека без отметок две недели, о которой коуч не спрашивал две недели. */
   readonly quietRitual: { readonly id: string; readonly title: string } | null;
   readonly personalWindows: number;
   readonly familyRituals: number;
+  /** Сколько областей заботы человек ведёт (принятых). Ноль значит, что о них с ним ещё не говорили. */
+  readonly ownedCareAreas: number;
   /** Включён недельный обзор: он сам спрашивает про неделю, и коуч про неё молчит. */
   readonly weeklyReviewEnabled: boolean;
 }
@@ -77,10 +91,11 @@ const WEEK_WARM_GAP_MS = 5 * DAY_MS;
 const WEEK_WARM_FIRST_HOUR = 18;
 
 export const COACH_INVITE_TEXT = [
-  "Можно я иногда, не чаще пары раз в неделю, буду задавать один короткий вопрос не про дела?",
+  "Скажу заранее: иногда, не чаще пары раз в неделю, я буду задавать один короткий вопрос не про дела.",
   "Про время для себя, про то, что порадовало или было тяжело, про ваши семейные традиции.",
-  "Отвечать не обязательно. Скажи «да» — начну. «Без коуча» — не буду спрашивать,",
+  "Отвечать не обязательно. Напиши «без коуча» — не буду спрашивать,",
   "«не пиши мне первым» — замолчу совсем.",
+  "По воскресеньям вечером буду присылать разбор недели, если есть что пересмотреть; «хватит обзоров» выключит его.",
 ].join(" ");
 
 function quote(title: string): string {
@@ -95,8 +110,9 @@ function olderThan(at: Date | undefined, gap: number, now: Date): boolean {
 export function chooseCoachTouch(facts: CoachFacts, clock: CoachClock, now: Date): CoachTouch | null {
   if (facts.enabled === false) return null;
   if (clock.hour < COACH_FIRST_HOUR || clock.hour >= COACH_LAST_HOUR) return null;
-  if (facts.enabled === null) {
-    return facts.invited ? null : { reason: "invite", subject: null, text: COACH_INVITE_TEXT };
+  // Объявление уходит один раз и без вопроса; после него `null` значит то же, что `true`.
+  if (facts.enabled === null && !facts.invited) {
+    return { reason: "invite", subject: null, text: COACH_INVITE_TEXT };
   }
   if (facts.lastTouchAt !== null && now.getTime() - facts.lastTouchAt.getTime() < COACH_MIN_GAP_MS) return null;
   if (facts.touchesLastWeek >= COACH_WEEKLY_LIMIT) return null;
@@ -110,6 +126,15 @@ export function chooseCoachTouch(facts: CoachFacts, clock: CoachClock, now: Date
       reason: "decision_open", subject: id,
       text: `${proposer} предлагает: «${quote(title)}». Ты за, против или хочется обсудить? `
         + "Решаешь только ты, молчание я согласием не считаю.",
+    };
+  }
+  // Забота раньше традиций: событие устаревает за дни, а традиция подождёт.
+  if (facts.openSituation) {
+    const { id, text } = facts.openSituation;
+    return {
+      reason: "situation_followup", subject: id,
+      text: `Ты писал: «${quote(text)}». Чем кончилось, как ты сейчас? `
+        + "Если не хочется это обсуждать, так и скажи, спрашивать не буду.",
     };
   }
   if (partner && facts.quietRitual) {
@@ -129,11 +154,22 @@ export function chooseCoachTouch(facts: CoachFacts, clock: CoachClock, now: Date
       text: "Что на этой неделе порадовало? И если хочется, одно, что было тяжело.",
     };
   }
+  // Fair Play: область ведут целиком и по своей воле. Спрашивается только о факте, что у человека
+  // нет ни одной, дела и нагрузка не читаются и не считаются.
+  if (facts.ownedCareAreas === 0 && olderThan(facts.lastByReason.care_area_offer, SLOW_REASON_GAP_MS, now)) {
+    return {
+      reason: "care_area_offer", subject: null,
+      text: "Есть направление, которое ты ведёшь целиком: садик, машина, врачи, платежи? Назови одно, "
+        + "запишу как твою область, и всё, что к ней относится, будет приходить к тебе. "
+        + "Если пока нет, так и скажи.",
+    };
+  }
+  // Личное время это не только тишина: вопрос про желание, потом про время (Unicorn Space).
   if (facts.personalWindows === 0 && olderThan(facts.lastByReason.rest_window_missing, SLOW_REASON_GAP_MS, now)) {
     return {
       reason: "rest_window_missing", subject: null,
-      text: "Есть в неделе час, который только твой? Назови день и время — поставлю окно "
-        + "личного времени, и в него я писать не буду.",
+      text: "Если бы у тебя был час только для себя, что бы ты в нём сделал? И когда он мог бы быть? "
+        + "Назови день и время, поставлю окно личного времени, и в него я писать не буду.",
     };
   }
   if (partner && facts.familyRituals === 0 && olderThan(facts.lastByReason.ritual_none, SLOW_REASON_GAP_MS, now)) {

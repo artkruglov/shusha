@@ -25,19 +25,108 @@ describe("task board", () => {
         task("Венчур", { kind: "idea" }),
         task("Уже сделано", { status: "completed", listName: "Работа" }),
       ],
-      waiting: [task("Саша забирает посылку", { status: "proposed" })],
+      waiting: [task("Саша забирает посылку", { assignee: "Саша", status: "proposed" })],
     })!;
 
     expect(board.split("\n\n")).toEqual([
       "⚠️ Просрочено · 2\n• Договориться с мастером — срок 15.09\n• Встреча в Zoom — срок 16.09",
       "Сегодня · 1\n• Позвонить в банк",
+      "Ничьи · 1\n• Найти мастеров для штор · Дом\nНикто не взял. Скажи «беру» или назови, кому.",
       "Дом · 1\n• Отвезти машину",
-      "Дом (Семья) · 1\n• Найти мастеров для штор · свободное",
       "Работа · 2\n• Продвинуться по продаже\n• Написать отзыв",
-      "Жду ответа · 1\n• Саша забирает посылку · ждёт согласия",
+      "Жду ответа · 1\n• Саша забирает посылку · ждёт согласия: Саша",
       "Когда-нибудь · 1\n• Венчур",
       "Открытых дел: 7",
     ]);
+  });
+
+  it("shows what nobody took and what waits for someone's yes apart from tasks somebody is doing", () => {
+    // Прод 1 октября 2026: 19 ничьих дел висели среди живых, и «записано» читалось как «делается».
+    const board = formatTaskBoard({
+      now: NOW, style: "plain", timezone: "UTC",
+      tasks: [
+        task("Заказать матрас", { listName: "Переезд", status: "open" }),
+        task("Выкинуть мусор", { status: "open" }),
+        task("Купить щёточку", { assignee: "Юля", listName: "Дом", status: "proposed" }),
+        task("Отвезти машину", { listName: "Дом" }),
+        task("Старое ничьё", { dueOn: "2026-09-15", status: "open" }),
+      ],
+    })!;
+
+    expect(board).toContain("Ничьи · 2\n• Заказать матрас · Переезд\n• Выкинуть мусор\nНикто не взял. Скажи «беру» или назови, кому.");
+    expect(board).toContain("Ждут согласия · 1\n• Купить щёточку — Юля");
+    expect(board).toContain("Дом · 1\n• Отвезти машину");
+    // С просроченным сроком ничьё дело идёт в просроченные и помечено, чтобы не потеряться.
+    expect(board).toContain("⚠️ Просрочено · 1\n• Старое ничьё — срок 15.09 · ничьё");
+    expect(board.indexOf("Ничьи")).toBeLessThan(board.indexOf("Дом · 1"));
+  });
+
+  it("shows up to ten unowned tasks, because they are what needs sorting", () => {
+    const tasks = Array.from({ length: 12 }, (_, index) => task(`Ничьё ${index + 1}`, { status: "open" }));
+    const board = formatTaskBoard({ now: NOW, style: "plain", timezone: "UTC", tasks })!;
+
+    expect(board).toContain("• Ничьё 10\n…и ещё 2\nНикто не взял.");
+  });
+
+  it("names the project even when the task has a life area, and shows its progress", () => {
+    // Прод 1 октября 2026: у личных дел «Переезд» стояла сфера «Дом и забота», заголовок брал сферу, и
+    // проект на доске не было видно вовсе.
+    const board = formatTaskBoard({
+      now: NOW, style: "plain", timezone: "UTC",
+      projects: [{ completed: 3, hasNextStep: true, id: "p1", open: 2, source: "Личное", status: "accepted", title: "Переезд", total: 5 }],
+      tasks: [
+        task("Заказать матрас", { lifeArea: "home", listName: "Переезд", projectId: "p1" }),
+        task("Сдать ключи", { lifeArea: "home", listName: "Переезд", projectId: "p1" }),
+        task("Записаться на йогу", { lifeArea: "self" }),
+      ],
+    })!;
+
+    expect(board).toContain("Переезд (Дом и забота) · 2 · сделано 3 из 5\n• Заказать матрас\n• Сдать ключи");
+    // Без проекта заголовком остаётся сфера, как раньше.
+    expect(board).toContain("Для себя · 1\n• Записаться на йогу");
+  });
+
+  it("keeps progress off a small or untouched project", () => {
+    const board = formatTaskBoard({
+      now: NOW, style: "plain", timezone: "UTC",
+      projects: [
+        { completed: 0, hasNextStep: true, id: "a", open: 3, source: "Личное", status: "accepted", title: "Ремонт", total: 3 },
+        { completed: 1, hasNextStep: true, id: "b", open: 1, source: "Личное", status: "accepted", title: "Отпуск", total: 2 },
+      ],
+      tasks: [
+        task("Один", { listName: "Ремонт", projectId: "a" }), task("Два", { listName: "Ремонт", projectId: "a" }),
+        task("Три", { listName: "Ремонт", projectId: "a" }), task("Билеты", { listName: "Отпуск", projectId: "b" }),
+      ],
+    })!;
+
+    expect(board).toContain("Ремонт · 3\n");
+    expect(board).toContain("Отпуск · 1\n");
+  });
+
+  it("lists projects with no next step and projects where everything is done, each with its way out", () => {
+    const board = formatTaskBoard({
+      now: NOW, style: "plain", timezone: "UTC",
+      projects: [
+        { completed: 0, hasNextStep: false, id: "x", open: 0, source: "Семья", status: "accepted", title: "Отпуск в августе", total: 0 },
+        { completed: 4, hasNextStep: false, id: "y", open: 0, source: "Личное", status: "accepted", title: "Переезд", total: 4 },
+        { completed: 1, hasNextStep: true, id: "z", open: 2, source: "Личное", status: "accepted", title: "Ремонт", total: 3 },
+      ],
+      tasks: [task("Позвонить мастеру", { listName: "Ремонт", projectId: "z" })],
+    })!;
+
+    expect(board).toContain("Проекты без шага · 1\n• Отпуск в августе\nСкажи первый шаг.");
+    expect(board).toContain("Проекты, где всё сделано · 1\n• Переезд\nЗакрыть?");
+    expect(board).not.toContain("Ремонт · 1\n• Позвонить мастеру\nСкажи");
+  });
+
+  it("separates a family project from a personal one of the same name", () => {
+    const board = formatTaskBoard({
+      now: NOW, style: "plain", timezone: "UTC",
+      tasks: [task("Своё", { listName: "Дом", source: "Личное" }), task("Общее", { listName: "Дом", source: "Семья" })],
+    })!;
+
+    expect(board).toContain("Дом · 1\n• Своё");
+    expect(board).toContain("Дом (Семья) · 1\n• Общее");
   });
 
   it("folds a long list into its first items and a count, never into a hidden block", () => {
@@ -113,19 +202,58 @@ describe("task board", () => {
     expect(taskBoardReply([], NOW, "UTC")).toBeNull();
   });
 
-  it("groups by a named life area instead of the list name", () => {
+  it("keeps the list name in the heading and puts the life area next to it", () => {
+    // До 1 октября 2026 сфера вытесняла имя списка из заголовка, и проект «Переезд» на доске не было видно.
     const board = formatTaskBoard({
       now: NOW, style: "plain", timezone: "UTC",
       tasks: [
         task("Записаться на йогу", { lifeArea: "self", listName: "Здоровье" }),
         task("Купить фильтры", { lifeArea: "home", listName: "Дом" }),
         task("Отвезти машину", { listName: "Дом" }),
+        task("Позвонить маме", { lifeArea: "couple" }),
       ],
     })!;
 
-    expect(board).toContain("Для себя · 1\n• Записаться на йогу");
-    expect(board).toContain("Дом и забота · 1\n• Купить фильтры");
+    expect(board).toContain("Здоровье (Для себя) · 1\n• Записаться на йогу");
+    expect(board).toContain("Дом (Дом и забота) · 1\n• Купить фильтры");
     // Дело без метки остаётся в своём списке: сферу проставляет только человек.
     expect(board).toContain("Дом · 1\n• Отвезти машину");
+    // Без списка заголовком остаётся сама сфера.
+    expect(board).toContain("Мы вдвоём · 1\n• Позвонить маме");
+  });
+  it("puts what nobody sorted yet into its own section, with the way out", () => {
+    // 29 сентября 2026 на проде 21 из 56 открытых дел лежали «Без списка» последним разделом, и никто
+    // не просил их разобрать. Теперь они видны отдельно и с подсказкой, что сказать.
+    const board = formatTaskBoard({
+      now: NOW, style: "plain", timezone: "UTC",
+      tasks: [
+        task("Разобраться с кружком"), task("Решить про отпуск"),
+        task("Отвезти машину", { listName: "Дом" }),
+        task("Оплатить штраф", { dueOn: "2026-10-05" }),
+        task("Керамика", { kind: "idea" }),
+      ],
+    })!;
+
+    expect(board).toContain("Разобрать · 2\n• Разобраться с кружком\n• Решить про отпуск\nСкажи, куда положить или какой первый шаг.");
+    // Без списка, но со сроком: дело уже распланировано, разбирать его не нужно.
+    expect(board).toContain("Без списка · 1\n• Оплатить штраф — до 05.10");
+    expect(board).not.toContain("Разобрать · 3");
+    // Идея ничего не обещает и разбора не требует.
+    expect(board).toContain("Когда-нибудь · 1\n• Керамика");
+  });
+
+  it("keeps the hint as its own paragraph in a model answer, where a lone newline is a space", () => {
+    const rich = formatTaskBoard({ now: NOW, style: "rich", timezone: "UTC", tasks: [task("Разобраться с кружком")] })!;
+
+    expect(rich).toContain("**Разобрать · 1**\n\n- Разобраться с кружком\n\nСкажи, куда положить или какой первый шаг.");
+  });
+
+  it("does not ask to sort a task that has a life area or a plan", () => {
+    const board = formatTaskBoard({
+      now: NOW, style: "plain", timezone: "UTC",
+      tasks: [task("Записаться на йогу", { lifeArea: "self" }), task("Собрать документы", { plannedFrom: "2026-09-25", plannedUntil: "2026-09-26" })],
+    })!;
+
+    expect(board).not.toContain("Разобрать");
   });
 });

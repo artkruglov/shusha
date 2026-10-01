@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="docs/assets/homka.png" alt="Хомка" width="160" height="160">
+  <img src="docs/assets/shusha.png" alt="Шуша" width="160" height="160">
 </p>
 
-<h1 align="center">Хомка</h1>
+<h1 align="center">Шуша</h1>
 
 <p align="center">
-  <strong>Семейная помощница в Telegram, которая, как хомяк, прячет за щёки всё важное: людей, договорённости, дела, списки и файлы — и не путает личное с семейным.</strong>
+  <strong>Семейная помощница в Telegram: помнит людей и договорённости, ведёт дела, проекты, списки и файлы — и не путает личное с семейным.</strong>
 </p>
 
 <p align="center">
@@ -17,7 +17,7 @@
   <img alt="Telegram" src="https://img.shields.io/badge/Telegram-bot-26A5E4?style=flat-square&logo=telegram&logoColor=white">
 </p>
 
-> **English.** Homka is a self-hosted family assistant for Telegram built on [eve](https://github.com/vercel/eve),
+> **English.** Shusha is a self-hosted family assistant for Telegram built on [eve](https://github.com/vercel/eve),
 > PostgreSQL + pgvector and DeepSeek. It remembers people and agreements, keeps shared tasks, shopping lists,
 > reminders and files, searches the web, reads receipts and photos, draws pictures and makes short videos —
 > while personal, family and group data stay strictly apart: identity, family, role and scope always come from
@@ -28,7 +28,7 @@
 
 ## Что это
 
-Хомка — бот одной семьи на вашем собственном сервере. Она живёт в личке у каждого члена семьи, в
+Шуша — бот одной семьи на вашем собственном сервере. Она живёт в личке у каждого члена семьи, в
 закрытой семейной группе и, если нужно, в рабочих или дружеских чатах. Говорит по-русски, на «ты»,
 с юмором и собственным мнением, понимает голосовые и фото.
 
@@ -39,11 +39,11 @@
 ## Что можно поручить: сценарии семьи
 
 **Утро и дела**
-> — Хомка, что у нас сегодня?
+> — Шуша, что у нас сегодня?
 > — Сегодня садик до 17:00 (забирает Лёша), в 19:30 родительское собрание, и ты хотела записать кота к ветеринару.
 
 - Общий список дел семьи и личный у каждого: принять, отказаться, передать другому, отметить.
-- «Жду ответа»: попросили мужа купить подарок — Хомка напомнит проверить, согласился ли.
+- «Жду ответа»: попросили мужа купить подарок — Шуша напомнит проверить, согласился ли.
 - Утренний обзор дня, тихие часы: ночью не разбудит.
 
 **Напоминания и расписания**
@@ -108,7 +108,7 @@
 **Свои навыки**
 > — Сделай себе навык: по пятницам собирай, что семья купила за неделю, и сколько потратили.
 
-- Хомка пишет себе навык из своих инструментов, прогоняет на примере и публикует по кнопке владельца.
+- Шуша пишет себе навык из своих инструментов, прогоняет на примере и публикует по кнопке владельца.
 
 **Порядок в хозяйстве для владельца**
 - Утренняя сводка здоровья: сбои, место на диске, расход на модель в долларах, баланс DeepSeek.
@@ -132,7 +132,7 @@
 (голос) и [OpenRouter](https://openrouter.ai/keys) (картинки и видео).
 
 ```bash
-git clone https://github.com/artkruglov/homka.git && cd homka
+git clone https://github.com/artkruglov/shusha.git && cd shusha
 cp .env.example .env        # токен бота, ключи, секреты
 docker compose up -d --build
 ```
@@ -158,6 +158,6 @@ Docker Compose · Telegram.
 
 ## Происхождение и лицензия
 
-Хомка выросла из [Osinara](https://github.com/nyxandro/osinara) (nyxandro) и форка ilkruglov.
+Шуша выросла из [Osinara](https://github.com/nyxandro/osinara) (nyxandro) и форка ilkruglov.
 Код распространяется по лицензии Apache 2.0 — см. [LICENSE](LICENSE); авторы и изменённые фрагменты
 eve, Workflow и других компонентов перечислены в [NOTICE](NOTICE). Уязвимости — по [SECURITY.md](SECURITY.md).

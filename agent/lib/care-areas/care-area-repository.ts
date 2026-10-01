@@ -10,7 +10,9 @@
  * целиком.
  *
  * Хозяин появляется только через явное согласие: предложить можно кому угодно, назначить нельзя
- * никого. Отказ и отказ от ведения возвращают область в свободные, и её бесхозность видна всем.
+ * никого. Взять область себе (`claim`) можно одним шагом: это выбор самого человека, а не назначение
+ * другого, поэтому согласия не нужно; занятую или предложенную другому область не забрать. Отказ и
+ * отказ от ведения возвращают область в свободные, и её бесхозность видна всем.
  * Рейтинга вклада здесь нет: сравнение «кто больше сделал» это то, ради чего семьи ботом
  * пользоваться перестают.
  */
@@ -26,7 +28,7 @@ import { authorizeRecordSpaceAction } from "../spaces/space-access.js";
 import { CARE_AREA_VISIBILITY, careAreaSpaceValues } from "./care-area-access.js";
 
 export const careAreaInput = z.object({
-  action: z.enum(["list", "create", "propose", "accept", "decline", "release", "retire"]),
+  action: z.enum(["list", "create", "claim", "propose", "accept", "decline", "release", "retire"]),
   details: z.string().trim().min(1).max(1000).optional(),
   id: z.uuid().optional(),
   ownerRef: z.uuid().optional(),
@@ -122,6 +124,26 @@ export const careAreaRepository = {
         return { area: row };
       }
 
+      if (input.action === "claim" && !input.id) {
+        // Новая область сразу за тем, кто её называет: цепочка «создать, предложить себе, принять» на
+        // проде 29 сентября 2026 не использовалась ни разу (областей заботы ноль).
+        if (!input.title) throw new AppError("AGENT_CARE_AREA_INPUT_INVALID", "Для claim нужны title новой области или id и version свободной");
+        const created = await client.query<{ id: string }>(
+          `INSERT INTO care_areas(family_id,space_id,group_id,scope,title,details,creator_telegram_id,
+             owner_telegram_id,status,accepted_at)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$7,'accepted',now()) RETURNING id`,
+          [auth.familyId, spaceId, groupId, chatScope, input.title, input.details ?? null, actor],
+        ).catch((error: unknown) => {
+          if (error instanceof Error && error.message.includes("care_areas_title")) {
+            throw new AppError("AGENT_CARE_AREA_DUPLICATE", "Область с таким названием уже есть");
+          }
+          throw error;
+        });
+        const row = await this.read(client, auth, created.rows[0]!.id, chatScope, groupId);
+        await client.query("COMMIT");
+        return { area: row };
+      }
+
       if (!input.id || !input.version) {
         throw new AppError(
           "AGENT_CARE_AREA_INPUT_INVALID",
@@ -174,6 +196,14 @@ export const careAreaRepository = {
              pending_owner_telegram_id=$2, proposed_at=now(),
              version=version+1, updated_at=now() WHERE id=$1`,
           [locked.id, candidate.telegram_user_id],
+        );
+      } else if (input.action === "claim") {
+        // Свободную область берут себе; занятую и предложенную другому забрать нельзя.
+        if (locked.owner_telegram_id !== null || locked.pending_owner_telegram_id !== null) denied();
+        await client.query(
+          `UPDATE care_areas SET status='accepted', owner_telegram_id=$2,
+             accepted_at=now(), version=version+1, updated_at=now() WHERE id=$1`,
+          [locked.id, actor],
         );
       } else if (input.action === "accept") {
         // Принимает только тот, кому предложили: область берут целиком и по своей воле.

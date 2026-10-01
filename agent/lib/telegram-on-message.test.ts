@@ -629,7 +629,7 @@ describe("createTelegramMessageHandler", () => {
     const handler = createTelegramMessageHandler(repository as never);
 
     const context = await handler(telegramContext().context, {
-      ...groupMessage("Хомка, посмотри"),
+      ...groupMessage("Шуша, посмотри"),
       raw: { date: 1_700_000_000, osinara_series: { role: "context" } },
     });
 
@@ -728,7 +728,7 @@ describe("createTelegramMessageHandler", () => {
 
     const result = await createTelegramMessageHandler(repository)(
       telegramContext().context,
-      groupMessage("Хомка сегодня хорошо сработала"),
+      groupMessage("Шуша сегодня хорошо сработала"),
     );
 
     expect(result?.auth?.attributes).toMatchObject({

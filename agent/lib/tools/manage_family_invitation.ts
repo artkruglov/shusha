@@ -26,7 +26,7 @@ import {
 } from "../tool-input-validation.js";
 
 const INPUT_ERROR_CODE = "AGENT_FAMILY_INVITATION_INPUT_INVALID";
-const TOOL_ACTIONS = ["create", "approve", "set_relation"] as const;
+const TOOL_ACTIONS = ["create", "approve", "members", "set_relation"] as const;
 const RELATIONS = ["partner", "parent", "child", "other"] as const;
 const TOP_LEVEL_FIELDS = [
   "action",
@@ -71,7 +71,7 @@ function requireManageFamilyInvitationInput(input: unknown) {
 
   // MiniMax may materialize known approve-only siblings for create. Creation ignores them and
   // cannot bind a candidate accidentally; unpublished fields still fail in the global guard.
-  if (action === "create") return { action } as const;
+  if (action === "create" || action === "members") return { action } as const;
   if (action === "set_relation") {
     requireOnlyFields(payload, ["action", "participantRef", "relation"], "action=set_relation", INPUT_ERROR_CODE);
     const relation = payload["relation"];
@@ -80,7 +80,7 @@ function requireManageFamilyInvitationInput(input: unknown) {
     }
     return {
       action,
-      participantRef: requiredUuid(payload, "participantRef", INPUT_ERROR_CODE, "участник из participants"),
+      participantRef: requiredUuid(payload, "participantRef", INPUT_ERROR_CODE, "участник из members"),
       relation: relation as typeof RELATIONS[number],
     } as const;
   }
@@ -89,14 +89,16 @@ function requireManageFamilyInvitationInput(input: unknown) {
 
 const TOOL_DESCRIPTION = [
   "Создать одноразовое семейное приглашение или подтвердить кандидата; оба action требуют подтверждения. Create: {\"action\":\"create\"} без полей кандидата.",
-  "Set_relation: сначала возьми participantRef вызовом manage_shared_tasks {\"action\":\"participants\"}, имя в ref не превращай; затем {\"action\":\"set_relation\",\"participantRef\":\"<uuid оттуда>\",\"relation\":\"partner|parent|child|other\"} по явным словам владельца о том, кто ему кто. Кнопки не требует, прав не меняет; нужна, чтобы вопросы про пару не уходили родителю.",
+  "Members: {\"action\":\"members\"} отдаёт участников семьи с participantRef и текущей меткой; в личном чате это единственный источник ref, потому что manage_shared_tasks участников там не собирает.",
+  "Set_relation: сначала возьми participantRef вызовом members, имя в ref не превращай; затем {\"action\":\"set_relation\",\"participantRef\":\"<uuid оттуда>\",\"relation\":\"partner|parent|child|other\"} по явным словам владельца о том, кто ему кто. Кнопки не требует, прав не меняет; нужна, чтобы вопросы про пару не уходили родителю.",
   "Approve: {\"action\":\"approve\",\"invitationId\":\"<UUID из list_pending_family_invitations>\",\"candidateTelegramUserId\":\"123456789\",\"candidateDisplayName\":\"Анна\"}; все три значения берутся точно из list_pending_family_invitations, иначе запроси список снова или спроси владельца.",
 ].join(" ");
 
 export default defineTool({
   approval: ({ toolInput }) => {
     // Метка родства обратима и прав не меняет, поэтому кнопка нужна только приглашениям.
-    return requireManageFamilyInvitationInput(toolInput).action === "set_relation"
+    // Чтение списка и обратимая метка кнопки не требуют; приглашение и подтверждение требуют.
+    return ["members", "set_relation"].includes(requireManageFamilyInvitationInput(toolInput).action)
       ? "not-applicable"
       : "user-approval";
   },
@@ -106,6 +108,10 @@ export default defineTool({
     const parsed = requireManageFamilyInvitationInput(input);
     const owner = requirePrivateTelegramOwner(ctx);
     const space=readSpaceAttributes(ctx.session.auth.current?.attributes);
+    if (parsed.action === "members") {
+      return { members: await familyRepository.listMembers({
+        familyId: owner.familyId, ownerUserId: owner.userId }) };
+    }
     if (parsed.action === "set_relation") {
       return await familyRepository.setRelation({
         familyId: owner.familyId,

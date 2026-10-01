@@ -2,7 +2,7 @@
  * Содержание утреннего обзора берётся тем же путём, которым человек читает свои дела сам.
  *
  * Проверяется: просроченное отделено от сегодняшнего; чужое в обзор не попадает; заявка на сутки
- * выдаётся один раз и возвращается целиком.
+ * выдаётся один раз и возвращается целиком; часовой пояс человека без настроек берётся у владельца.
  */
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -56,7 +56,7 @@ function recipientOf(person: TwoSpaceFixture["owner"]): DailyOverviewRecipient {
 dbDescribe("daily overview data", () => {
   beforeEach(async () => {
     await database().query(
-      "TRUNCATE shared_tasks, initiative_messages, spaces, telegram_groups, family_memberships, users, families CASCADE",
+      "TRUNCATE care_areas, shared_tasks, initiative_messages, spaces, telegram_groups, family_memberships, users, families CASCADE",
     );
     fixture = await createTwoSpaceFixture("daily-overview");
   });
@@ -125,5 +125,43 @@ dbDescribe("daily overview data", () => {
         userId: fixture.owner.userId,
       }),
     ]));
+  });
+  it("gives a member without settings the owner's timezone, like every other initiative", async () => {
+    // На проде 29 сентября у жены не было ни одной настройки, и обзор ей уходил в 08:00 UTC, то есть
+    // в 11:00 по Москве, а остальным в 08:00 местного: пояс наследовал только коуч.
+    await database().query(
+      "INSERT INTO user_notification_settings(user_id, timezone) VALUES ($1, 'Europe/Moscow')",
+      [fixture.owner.userId],
+    );
+
+    const recipients = await dailyOverviewRepository.recipients(NOW);
+    const zoneOf = (person: TwoSpaceFixture["owner"]) =>
+      recipients.find((recipient) => recipient.userId === person.userId)?.settings.timezone;
+
+    expect(zoneOf(fixture.owner)).toBe("Europe/Moscow");
+    expect(zoneOf(fixture.spouse)).toBe("Europe/Moscow");
+
+    await database().query(
+      "INSERT INTO user_notification_settings(user_id, timezone) VALUES ($1, 'Asia/Vladivostok')",
+      [fixture.spouse.userId],
+    );
+    const own = await dailyOverviewRepository.recipients(NOW);
+    expect(own.find((recipient) => recipient.userId === fixture.spouse.userId)?.settings.timezone)
+      .toBe("Asia/Vladivostok");
+  });
+  it("brings the names of the areas the person leads, and no one else's", async () => {
+    await personalTask(fixture.owner, "Дело", TODAY);
+    const insert = (title: string, owner: string | null, status: string) => database().query(
+      `INSERT INTO care_areas(family_id, scope, title, creator_telegram_id, owner_telegram_id, status, accepted_at)
+       VALUES($1, 'family', $2, $3, $4, $5, CASE WHEN $5 = 'accepted' THEN now() END)`,
+      [fixture.familyId, title, fixture.owner.telegramUserId, owner, status],
+    );
+    await insert("Машина", fixture.owner.telegramUserId, "accepted");
+    await insert("Садик", fixture.spouse.telegramUserId, "accepted");
+    await insert("Врачи", null, "open");
+
+    const overview = await dailyOverviewRepository.overview(recipientOf(fixture.owner));
+
+    expect(overview.areas).toEqual(["Машина"]);
   });
 });

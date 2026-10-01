@@ -23,6 +23,18 @@ describe("ModelFacingError", () => {
     expect(error.contract.reason).toContain(`HTTP ${status}`);
   });
 
+  it("lets the model resend a rejected task batch without the refused items instead of giving up", () => {
+    // 1 октября 2026 общий запрет «не повторяйте» заставил бота бросить пакет из десяти закрытий
+    // из-за двух отказов и написать человеку выдуманное «у меня нет прав».
+    const error = normalizeModelFacingError(
+      new AppError("AGENT_TASK_BATCH_REJECTED", "Пакет не применён. Не прошли пункты: #3 AGENT_TASK_TRANSITION_DENIED (Дело на другом исполнителе)"),
+      { toolName: "manage_shared_tasks" },
+    );
+    expect(error.contract.correction).toContain("без отклонённых пунктов");
+    expect(error.contract.correction).toContain("причину каждого");
+    expect(error.contract.correction).not.toContain("Не повторяйте вызов автоматически");
+  });
+
   it.each([
     ["web_fetch", "Request failed with status code: 403; token=secret"],
     ["generate_image", "Request failed with status code: 403"],

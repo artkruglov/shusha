@@ -426,7 +426,7 @@ describe("createTelegramDurableIngress", () => {
 
   it("fails a turn whose session goes silent for a lease and rotates that session", async () => {
     const storage = repository();
-    Object.assign(storage.claim, { payload: seriesRaw(6001, "Хомка, ты тут?"), updateId: "6001", voice: null });
+    Object.assign(storage.claim, { payload: seriesRaw(6001, "Шуша, ты тут?"), updateId: "6001", voice: null });
     const cancel = vi.fn();
     const dispatch = vi.fn().mockResolvedValue({
       // The turn started but never reports waiting, completion or failure.
@@ -467,7 +467,7 @@ describe("createTelegramDurableIngress", () => {
 
   it("rotates the session when its stream closes without a boundary", async () => {
     const storage = repository();
-    Object.assign(storage.claim, { payload: seriesRaw(6002, "Хомка, привет"), updateId: "6002", voice: null });
+    Object.assign(storage.claim, { payload: seriesRaw(6002, "Шуша, привет"), updateId: "6002", voice: null });
     const dispatch = vi.fn().mockResolvedValue({
       getEventStream: async () => new ReadableStream({ start(c) { c.close(); } }),
       id: "session-closed",
@@ -576,7 +576,7 @@ describe("createTelegramDurableIngress", () => {
     const storage = repository();
     const turnClaim = (updateId: string, chatId: number) => ({
       ...storage.claim,
-      payload: { ...seriesRaw(Number(updateId), "Хомка, подумай"), message: { ...seriesRaw(Number(updateId), "Хомка, подумай").message, chat: { id: chatId, type: "private" } } },
+      payload: { ...seriesRaw(Number(updateId), "Шуша, подумай"), message: { ...seriesRaw(Number(updateId), "Шуша, подумай").message, chat: { id: chatId, type: "private" } } },
       queueId: `123e4567-e89b-42d3-a456-4266141740${updateId.slice(-2)}`,
       updateId,
       voice: null,
@@ -741,7 +741,7 @@ describe("createTelegramDurableIngress", () => {
 
   it("answers consecutive messages of one author in a single turn started by the last one", async () => {
     const storage = repository();
-    const head = seriesClaim(storage, 2001, "Хомка, смотри");
+    const head = seriesClaim(storage, 2001, "Шуша, смотри");
     const second = seriesClaim(storage, 2002, "вот первый пункт");
     const third = seriesClaim(storage, 2003, "и второй");
     storage.claim.payload = head.payload;
@@ -793,7 +793,7 @@ describe("createTelegramDurableIngress", () => {
     }));
     expect(dispatch).toHaveBeenCalledTimes(3);
     expect(dispatch.mock.calls.map((call) => call[0].message.text)).toEqual([
-      "Хомка, смотри",
+      "Шуша, смотри",
       "вот первый пункт",
       "и второй",
     ]);
@@ -812,7 +812,7 @@ describe("createTelegramDurableIngress", () => {
 
   it("hands the turn the queue tail that arrived after its message", async () => {
     const storage = repository();
-    const head = seriesClaim(storage, 4001, "Хомка, что скажешь?");
+    const head = seriesClaim(storage, 4001, "Шуша, что скажешь?");
     storage.claim.payload = head.payload;
     storage.claim.updateId = head.updateId;
     storage.claim.voice = null as never;
@@ -859,7 +859,7 @@ describe("createTelegramDurableIngress", () => {
   it("stops a series member's heartbeat before its completion so a long last turn survives", async () => {
     const storage = repository();
     const head = seriesClaim(storage, 5001, "первое");
-    const second = seriesClaim(storage, 5002, "Хомка, второе");
+    const second = seriesClaim(storage, 5002, "Шуша, второе");
     storage.claim.payload = head.payload;
     storage.claim.updateId = head.updateId;
     storage.claim.voice = null as never;
@@ -921,7 +921,7 @@ describe("createTelegramDurableIngress", () => {
     const storage = repository();
     const head = seriesClaim(storage, 3001, "первое");
     const second = seriesClaim(storage, 3002, "второе");
-    const third = seriesClaim(storage, 3003, "Хомка, третье");
+    const third = seriesClaim(storage, 3003, "Шуша, третье");
     storage.value.claimNext = vi.fn().mockResolvedValueOnce(head).mockResolvedValueOnce(null);
     storage.value.claimFollowing = vi.fn().mockResolvedValue([second, third]);
     const dispatch = vi.fn()
@@ -949,7 +949,7 @@ describe("createTelegramDurableIngress", () => {
 
   it("leaves a message alone while the chat has an unanswered confirmation", async () => {
     const storage = repository();
-    const head = seriesClaim(storage, 4001, "Хомка, да");
+    const head = seriesClaim(storage, 4001, "Шуша, да");
     storage.value.claimNext = vi.fn().mockResolvedValueOnce(head).mockResolvedValueOnce(null);
     storage.value.hasPendingApprovalsInChat = vi.fn().mockResolvedValue(true);
     const dispatch = vi.fn().mockResolvedValue(undefined);

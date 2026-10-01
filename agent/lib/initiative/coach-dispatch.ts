@@ -25,6 +25,31 @@ export interface CoachDispatcherDependencies {
   record(delivery: InitiativeDelivery): Promise<void>;
 }
 
+/** Диспетчер создаётся на каждый тик, поэтому память о записанных причинах живёт в модуле. */
+const reportedSkips = new Set<string>();
+const REPORTED_SKIPS_LIMIT = 2000;
+
+export function resetCoachSkipLog(): void {
+  reportedSkips.clear();
+}
+
+function reportSkip(recipient: CoachRecipient, date: string, reason: string): void {
+  const key = `${recipient.userId}:${date}:${reason}`;
+  if (reportedSkips.has(key)) return;
+  if (reportedSkips.size >= REPORTED_SKIPS_LIMIT) reportedSkips.clear();
+  reportedSkips.add(key);
+  console.info(JSON.stringify({
+    code: "AGENT_COACH_SKIPPED",
+    enabled: recipient.facts.enabled,
+    familyId: recipient.familyId,
+    invitesSent: recipient.facts.invitesSent,
+    reason,
+    relation: recipient.facts.relation,
+    unanswered: recipient.state.unanswered,
+    userId: recipient.userId,
+  }));
+}
+
 function localClock(timezone: string, now: Date): { date: string; hour: number; weekday: number } {
   const parts = new Intl.DateTimeFormat("en-US", {
     day: "2-digit", hour: "2-digit", hour12: false, month: "2-digit",
@@ -44,10 +69,20 @@ export function createCoachDispatcher(dependencies: CoachDispatcherDependencies)
     let sent = 0;
     for (const recipient of await dependencies.recipients()) {
       const clock = localClock(recipient.settings.timezone, now);
-      if (!decideInitiative(recipient.settings, recipient.state, now).allowed) continue;
+      const decision = decideInitiative(recipient.settings, recipient.state, now);
+      if (!decision.allowed) {
+        if (decision.reason !== "quiet_hours") reportSkip(recipient, clock.date, decision.reason);
+        continue;
+      }
       const touch = chooseCoachTouch(recipient.facts, clock, now);
-      if (touch === null) continue;
-      if (await dependencies.personalTime(recipient, now) !== null) continue;
+      if (touch === null) {
+        reportSkip(recipient, clock.date, "no_reason");
+        continue;
+      }
+      if (await dependencies.personalTime(recipient, now) !== null) {
+        reportSkip(recipient, clock.date, "personal_time");
+        continue;
+      }
       const deliveryRef = await dependencies.claim(recipient, clock.date, touch, now);
       if (deliveryRef === null) continue;
       let messageId: string;

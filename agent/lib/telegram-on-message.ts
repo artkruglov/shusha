@@ -568,9 +568,26 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
     });
     // What the chat said after this message and still waits in the queue, from the durable ingress.
     const pendingBlock = formatPendingMessagesContext(readTelegramPendingMarker(message.raw));
-    const memoryContext = pendingBlock === null
-      ? retrievedMemoryContext
-      : [...retrievedMemoryContext, pendingBlock];
+    // Проекты области: справка, по которой агент выбирает проект для дела. Сбой блока ход не роняет.
+    let projectsBlock: string | null = null;
+    if (group?.type !== "external") {
+      try {
+        projectsBlock = await repositories.taskProjects.contextBlock({
+          access, actor: { id: actor.id, kind: actor.kind },
+          ...(appSession.spacePolicy === undefined ? {} : { space: appSession.spacePolicy }),
+        });
+      } catch (error) {
+        console.error(JSON.stringify({
+          code: "AGENT_TASK_PROJECTS_CONTEXT_FAILED",
+          error: error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160),
+        }));
+      }
+    }
+    const memoryContext = [
+      ...retrievedMemoryContext,
+      ...(pendingBlock === null ? [] : [pendingBlock]),
+      ...(projectsBlock === null ? [] : [projectsBlock]),
+    ];
     const turnResult = buildTelegramTurnResult({
       access,
       actor,

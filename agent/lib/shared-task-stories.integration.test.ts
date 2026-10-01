@@ -103,8 +103,11 @@ suite('planner user stories',()=>{
     ]} as never,'stale-edit');
     await expect(stale).rejects.toThrow(/AGENT_TASK_BATCH_REJECTED/);
     await expect(stale).rejects.toThrow(/#1 AGENT_TASK_VERSION_CONFLICT/);
-    expect((await database().query("SELECT title FROM shared_tasks ORDER BY title")).rows.map(r=>r.title))
+    expect((await database().query("SELECT title FROM shared_tasks WHERE kind='task' ORDER BY title")).rows.map(r=>r.title))
       .toEqual(['Зарядить аккумулятор опеля','Отвезти матрас']);
+    // Имя списка из правки стало проектом области, и дело ссылается на него.
+    expect((await database().query(`SELECT p.title FROM shared_tasks t JOIN shared_tasks p ON p.id=t.project_id
+      WHERE t.id=$1 AND p.kind='project'`,[a.id])).rows.map(r=>r.title)).toEqual(['Переезд']);
   });
   it('rejects the whole batch and names every failing item when one change is not allowed',async()=>{
     const own=await makeTask(owner,'Моё дело');

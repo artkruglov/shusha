@@ -38,7 +38,20 @@ const CORE_CHARACTER_BUDGET = 12_900;
 // that it is never added afterwards, and that a view of the same name filters by it.
 // Raised by 300 on 24 September 2026: a request to show tasks always calls list again; the model
 // answered "список тот же, что утром" and retyped the morning board with its stale numbers.
-const PRIVATE_CHARACTER_BUDGET = 17_000;
+// Raised by 1 000 on 29 September 2026 for the care section: return to what the person said was
+// unfinished (illness, a doctor, an exam) with one short question, via an episode and a reminder.
+// Raised by 700 on 29 September 2026 for "record at once, sort after": the tool now returns where a
+// record went (`filed`), and an unsorted obligation gets one question with two or three options.
+// Raised by another 100 the same day: the eval showed the rule needs its exceptions (a concrete
+// action, "просто запиши", an unaddressed group message) stated outright.
+// Raised by 700 on 29 September 2026 (stage 2): how the coach's answers on a whole direction and on
+// an hour for oneself are handled, and "name the person's areas, never count or compare".
+// Raised by 500 on 30 September 2026 for the heavy-week scenario in the care section (B06): a warm
+// line, at most three ways out, nothing moved until the person chooses.
+// Raised by 300 on 1 October 2026 for the same unowned-task rule (the planning section is shared).
+// Raised by 700 on 1 October 2026 for the projects rule (GTD: project vs action, the `<task_projects>`
+// block, tidy-up proposals) and the weekly-review reply line.
+const PRIVATE_CHARACTER_BUDGET = 21_000;
 // Raised by 400 on 5 September 2026 for the memory selection criterion and slot guidance, then by
 // 300 on 6 September for the addressing section with the explicit silence directive, then by
 // 300 the same day for the pending-messages rule in that section, then by 200 on 7 September for
@@ -52,7 +65,13 @@ const PRIVATE_CHARACTER_BUDGET = 17_000;
 // Raised by 500 on 22 September 2026 for the same routing sentence in the family block.
 // Raised by 400 on 23 September 2026 for the same life-area sentence in the family block.
 // Raised by 300 on 24 September 2026 for the same always-read-the-registry rule.
-const FAMILY_CHARACTER_BUDGET = 18_100;
+// Raised by 600 on 29 September 2026 for the same "record at once, sort after" rule.
+// Raised by 700 on 29 September 2026 for the same stage 2 rules.
+// Raised by 500 on 30 September 2026 for the same heavy-week rule (the care section is shared).
+// Raised by 300 on 1 October 2026: record on the author unless asked for "someone take it", say
+// unowned and unaccepted plainly, and name the reason a closure was refused.
+// Raised by 700 on 1 October 2026 for the same projects rule.
+const FAMILY_CHARACTER_BUDGET = 21_000;
 // Raised by 400 on 6 September 2026 for the addressing section with the explicit silence directive,
 // then by 2 200 on 7 September for the participants section ported from upstream v0.21.2: opinions
 // about behaviour on request, comparisons by a stated criterion, no diagnoses, no template refusal,

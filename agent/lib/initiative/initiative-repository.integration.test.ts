@@ -2,7 +2,8 @@
  * Журнал начатых ботом разговоров.
  *
  * Проверяется: предел считается сутками человека, а не сервера; его слово снимает паузу целиком;
- * человек без настроек живёт по умолчанию, а не остаётся без правила.
+ * человек без настроек живёт по умолчанию, а не остаётся без правила; молчание старше двух недель
+ * паузу больше не держит.
  */
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -79,5 +80,21 @@ describeWithDatabase("initiative journal", () => {
     const answered = (await initiativeRepository.read(userId, now))!;
     expect(answered.state.unanswered).toBe(0);
     expect(decideInitiative(answered.settings, answered.state, now)).toEqual({ allowed: true });
+  });
+  it("forgets silence older than two weeks so the pause does not last forever", async () => {
+    const now = new Date("2026-09-28T09:00:00.000Z");
+    for (const days of [15, 16, 17]) {
+      await initiativeRepository.record({
+        familyId, kind: "suggestion", now: new Date(now.getTime() - days * 86_400_000), userId,
+      });
+    }
+    const old = (await initiativeRepository.read(userId, now))!;
+    expect(old.state.unanswered).toBe(0);
+    expect(decideInitiative(old.settings, old.state, now)).toEqual({ allowed: true });
+
+    // Свежее молчание по-прежнему считается: окно двигает счёт, а не отключает правило.
+    await initiativeRepository.record({ familyId, kind: "suggestion", now: new Date(now.getTime() - 13 * 86_400_000), userId });
+    await initiativeRepository.record({ familyId, kind: "suggestion", now: new Date(now.getTime() - 86_400_000), userId });
+    expect((await initiativeRepository.read(userId, now))!.state.unanswered).toBe(2);
   });
 });
