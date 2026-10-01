@@ -56,4 +56,13 @@ describe("formatDailyOverview", () => {
       ],
     })).toBeNull();
   });
+  it("names the areas the person leads, and leaves the line out when there are none", () => {
+    // Fair Play: область, которую человек ведёт целиком, видна ему каждое утро. Без чисел и сравнения.
+    const base = { now: new Date("2026-09-29T06:00:00Z"), timezone: "UTC", waiting: [],
+      tasks: [{ dueAt: null, dueOn: null, kind: "task", listName: "Дом", source: "Личное", status: "accepted", title: "Дело" }] };
+
+    expect(formatDailyOverview({ ...base, areas: ["Машина", "Платежи"] })).toContain("Твои области: Машина, Платежи.");
+    expect(formatDailyOverview(base)).not.toContain("области");
+    expect(formatDailyOverview({ ...base, areas: [] })).not.toContain("области");
+  });
 });

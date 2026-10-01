@@ -48,6 +48,8 @@ export interface RegisterTelegramHitlApprovalInput {
   toolCallId: string;
   toolInputHash: string;
   toolName: string;
+  /** Context of the requesting turn (`retainTurnAttributes`), restored into the resumed auth. */
+  turnAttributes?: Record<string, unknown>;
 }
 
 export interface ClaimTelegramHitlCallbackInput {
@@ -160,12 +162,13 @@ export const telegramHitlApprovalRepository: TelegramHitlApprovalRepository = {
            telegram_chat_id, telegram_chat_type, telegram_message_id,
            telegram_message_thread_id, expected_telegram_user_id, callback_data,
             prompt_text, callback_options, tool_call_id, tool_name, tool_input_hash,
-            request_kind, telegram_conversation_id, telegram_timeline_entry_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            request_kind, telegram_conversation_id, telegram_timeline_entry_id, turn_attributes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb)
        ON CONFLICT (application_session_id, eve_session_id, request_id) DO UPDATE
          SET telegram_chat_id = EXCLUDED.telegram_chat_id,
              telegram_conversation_id = EXCLUDED.telegram_conversation_id,
              telegram_timeline_entry_id = EXCLUDED.telegram_timeline_entry_id,
+             turn_attributes = EXCLUDED.turn_attributes,
              telegram_chat_type = EXCLUDED.telegram_chat_type,
              telegram_message_id = EXCLUDED.telegram_message_id,
              telegram_message_thread_id = EXCLUDED.telegram_message_thread_id,
@@ -204,6 +207,7 @@ export const telegramHitlApprovalRepository: TelegramHitlApprovalRepository = {
         input.kind,
         input.telegramConversationId ?? null,
         input.telegramTimelineEntryId ?? null,
+        input.turnAttributes === undefined ? null : JSON.stringify(input.turnAttributes),
       ],
     );
   },

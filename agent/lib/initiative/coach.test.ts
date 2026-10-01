@@ -1,4 +1,4 @@
-/** Коуч пишет только по поводу, только после согласия и никогда о делах, сроках или счёте. */
+/** Коуч пишет только по поводу, объявляется один раз, выключается словом человека и никогда не говорит о делах, сроках или счёте. */
 import { describe, expect, it } from "vitest";
 
 import { chooseCoachTouch, COACH_INVITE_TEXT, type CoachFacts } from "./coach.js";
@@ -7,19 +7,41 @@ const NOW = new Date("2026-09-25T15:00:00Z");
 const DAY = 24 * 60 * 60 * 1000;
 const ago = (days: number) => new Date(NOW.getTime() - days * DAY);
 const facts = (extra: Partial<CoachFacts> = {}): CoachFacts => ({
-  enabled: true, familyRituals: 1, invited: true, lastByReason: {}, lastTouchAt: null,
-  openDecision: null, personalWindows: 1, quietRitual: null, relation: "partner", touchesLastWeek: 0,
+  enabled: true, familyRituals: 1, invited: true, invitesSent: 1, lastByReason: {}, lastTouchAt: null, ownedCareAreas: 1,
+  openDecision: null, openSituation: null, personalWindows: 1, quietRitual: null, relation: "partner", touchesLastWeek: 0,
   weeklyReviewEnabled: false, ...extra,
 });
 const afternoon = { hour: 15, weekday: 3 };
 
 describe("coach touch", () => {
-  it("invites once and asks nothing until the person says yes", () => {
-    expect(chooseCoachTouch(facts({ enabled: null, invited: false }), afternoon, NOW))
+  it("announces itself once, and after that silence means yes", () => {
+    // Пока нужно было явное «да», коуч молчал у всех: «да» никто не сказал (29 сентября 2026).
+    expect(chooseCoachTouch(facts({ enabled: null, invited: false, invitesSent: 0 }), afternoon, NOW))
       .toEqual({ reason: "invite", subject: null, text: COACH_INVITE_TEXT });
-    expect(chooseCoachTouch(facts({ enabled: null, invited: true, personalWindows: 0 }), afternoon, NOW)).toBeNull();
+    // Объявление уже было, ответа нет: коуч работает как включённый и ищет повод.
+    const announced = facts({ enabled: null, invited: true, lastByReason: { invite: ago(3) }, personalWindows: 0 });
+    expect(chooseCoachTouch(announced, afternoon, NOW)?.reason).toBe("rest_window_missing");
+    expect(COACH_INVITE_TEXT).toContain("без коуча");
+    expect(COACH_INVITE_TEXT).not.toMatch(/можно я|скажи «да»/iu);
+  });
+
+  it("never revives a coach the person turned off", () => {
     expect(chooseCoachTouch(facts({ enabled: false, personalWindows: 0 }), afternoon, NOW)).toBeNull();
-    expect(COACH_INVITE_TEXT).toContain("Без коуча");
+    expect(chooseCoachTouch(facts({ enabled: false, invited: false, invitesSent: 0 }), afternoon, NOW)).toBeNull();
+  });
+
+  it("keeps two days between the announcement and the first question", () => {
+    const fresh = facts({ enabled: null, invited: true, lastTouchAt: ago(1), lastByReason: { invite: ago(1) }, personalWindows: 0 });
+    expect(chooseCoachTouch(fresh, afternoon, NOW)).toBeNull();
+  });
+
+  it("asks how a recorded personal event ended, once, before rituals", () => {
+    const touch = chooseCoachTouch(facts({
+      openSituation: { id: "m1", text: "Завтра иду к врачу с больной спиной" }, quietRitual: { id: "r1", title: "Прогулка" },
+    }), afternoon, NOW)!;
+    expect(touch).toMatchObject({ reason: "situation_followup", subject: "m1" });
+    expect(touch.text).toContain("Завтра иду к врачу");
+    expect(touch.text).toContain("спрашивать не буду");
   });
 
   it("stays silent without a reason: the ceiling is not a schedule", () => {
@@ -34,7 +56,7 @@ describe("coach touch", () => {
   });
 
   it("writes neither early in the morning nor at night", () => {
-    const due = facts({ enabled: null, invited: false });
+    const due = facts({ enabled: null, invited: false, invitesSent: 0 });
     expect(chooseCoachTouch(due, { hour: 9, weekday: 3 }, NOW)).toBeNull();
     expect(chooseCoachTouch(due, { hour: 21, weekday: 3 }, NOW)).toBeNull();
   });
@@ -105,5 +127,42 @@ describe("coach touch", () => {
       afternoon, NOW)?.reason).toBe("decision_open");
     // Пока родство не названо, парные вопросы тоже молчат.
     expect(chooseCoachTouch(facts({ relation: null, familyRituals: 0 }), afternoon, NOW)).toBeNull();
+  });
+  it("asks who leads a whole direction, once in two weeks, to someone who leads none", () => {
+    // Прод 29 сентября 2026: областей заботы ноль, потому что никто не начинал разговор об этом.
+    const none = facts({ ownedCareAreas: 0 });
+    const touch = chooseCoachTouch(none, afternoon, NOW)!;
+
+    expect(touch).toMatchObject({ reason: "care_area_offer", subject: null });
+    expect(touch.text).toContain("ведёшь целиком");
+    expect(touch.text).toContain("пока нет");
+    expect(chooseCoachTouch(facts({ ownedCareAreas: 1 }), afternoon, NOW)).toBeNull();
+    expect(chooseCoachTouch(facts({ ownedCareAreas: 0, lastByReason: { care_area_offer: ago(13) } }), afternoon, NOW)).toBeNull();
+    expect(chooseCoachTouch(facts({ ownedCareAreas: 0, lastByReason: { care_area_offer: ago(14) } }), afternoon, NOW)?.reason)
+      .toBe("care_area_offer");
+  });
+
+  it("asks about a direction after the week's warm question and before the free-hour question", () => {
+    const friday = { hour: 19, weekday: 5 };
+    const both = facts({ ownedCareAreas: 0, personalWindows: 0 });
+
+    expect(chooseCoachTouch(both, friday, NOW)?.reason).toBe("week_warm");
+    expect(chooseCoachTouch({ ...both, lastByReason: { week_warm: ago(1) } }, friday, NOW)?.reason).toBe("care_area_offer");
+    expect(chooseCoachTouch({ ...both, lastByReason: { care_area_offer: ago(3) } }, afternoon, NOW)?.reason)
+      .toBe("rest_window_missing");
+  });
+
+  it("asks what the person would do with an hour for themselves, not only when to stay silent", () => {
+    const touch = chooseCoachTouch(facts({ personalWindows: 0 }), afternoon, NOW)!;
+
+    expect(touch.reason).toBe("rest_window_missing");
+    expect(touch.text).toMatch(/час только для себя/u);
+    expect(touch.text).toMatch(/что бы ты/u);
+    expect(touch.text).toContain("писать не буду");
+  });
+
+  it("tells about the weekly review in the announcement and how to stop it", () => {
+    expect(COACH_INVITE_TEXT).toContain("разбор недели");
+    expect(COACH_INVITE_TEXT).toContain("хватит обзоров");
   });
 });

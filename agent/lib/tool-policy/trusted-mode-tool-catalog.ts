@@ -44,6 +44,7 @@ import manageReminder from "../tools/manage_reminder.js";
 import manageCareAreas from "../tools/manage_care_areas.js";
 import manageJointDecision from "../tools/manage_joint_decision.js";
 import managePersonalTime from "../tools/manage_personal_time.js";
+import manageProjects from "../tools/manage_projects.js";
 import manageSharedTasks from "../tools/manage_shared_tasks.js";
 import manageShoppingList from "../tools/manage_shopping_list.js";
 import manageSpace from "../tools/manage_space.js";
@@ -95,6 +96,7 @@ export const TRUSTED_MODE_TOOLS: ToolMap = {
   ...(VIDEO_GENERATION_AVAILABLE?{generate_video:generateVideo as AnyToolDefinition,sleep:sleep() as AnyToolDefinition}:{}),
   manage_joint_decision: manageJointDecision as unknown as AnyToolDefinition,
   manage_care_areas: manageCareAreas as unknown as AnyToolDefinition,
+  manage_projects: manageProjects as unknown as AnyToolDefinition,
   manage_shared_tasks: manageSharedTasks as unknown as AnyToolDefinition,
   manage_shopping_list: manageShoppingList as unknown as AnyToolDefinition,
   manage_space: manageSpace as unknown as AnyToolDefinition,

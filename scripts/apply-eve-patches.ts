@@ -18,6 +18,8 @@
  * - Telegram topic normalization: accepts thread IDs only on explicit forum-topic updates.
  * - Telegram public types: exposes only the reviewed application seams.
  * - Provider web search: dynamic provider models select the native backend by provider prefix.
+ * - Compaction: a tool result already truncated is never truncated again, and every compaction
+ *   check is logged with its session and turn.
  */
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -191,6 +193,33 @@ await replaceExact(
   runtimePaths.toolLoop,
   "w=[...r,...C===void 0?[]:[{content:C,role:`user`}]],re=getAdvertisedTools",
   "w=(()=>{let e=[...r];if(S.length>0)while(g[0]?.role===`tool`)e.push(g.shift());return[...e,...C===void 0?[]:[{content:C,role:`user`}]]})(),re=getAdvertisedTools",
+);
+
+// Every compaction check reports the numbers it decided on and names its session and turn, so a
+// growing prompt with no compaction event can be explained from the log instead of guessed at
+// (upstream nyxandro 14a014d, 58d28c4). The optional chaining keeps a missing field from ever
+// failing the turn: the log only reads them.
+await replaceExact(
+  runtimePaths.compaction,
+  "function shouldCompact(e,t){return e.length>0&&getInputTokenCount(e,t)+COMPACTION_PROMPT_OVERHEAD_TOKENS>t.threshold}",
+  "function shouldCompact(e,t,i){let n=getInputTokenCount(e,t),r=e.length>0&&n+COMPACTION_PROMPT_OVERHEAD_TOKENS>t.threshold;console.info(JSON.stringify({code:\"AGENT_COMPACTION_CHECK\",sessionId:i?.sessionId??null,turnId:i?.turnId??null,compact:r,estimatedInputTokens:Math.round(n),lastKnownInputTokens:t.lastKnownInputTokens??null,lastKnownPromptMessageCount:t.lastKnownPromptMessageCount??null,messages:e.length,overheadTokens:Math.round(COMPACTION_PROMPT_OVERHEAD_TOKENS),threshold:t.threshold}));return r}",
+);
+await replaceExact(
+  runtimePaths.toolLoop,
+  "if(e.force!==!0&&!shouldCompact(r,i.compaction))",
+  "if(e.force!==!0&&!shouldCompact(r,i.compaction,{sessionId:i?.sessionId,turnId:n?.turnId}))",
+);
+
+// Compaction truncates an old tool result to 2 000 characters of its JSON behind a marker, and the
+// wrapped value is longer than 2 000 again, so every later compaction truncated the truncation.
+// Every repeated compaction then rewrote all old tool results: the provider prompt cache broke at
+// the first of them (a 76k-token miss after each of 67 compactions in a week upstream) and after
+// nine passes the model saw nested markers instead of any content. A result that already carries
+// the marker is left byte-identical.
+await replaceExact(
+  runtimePaths.compaction,
+  "n=e.content.map(e=>{if(e.type!==`tool-result`)return e;let n=stubContentOutputFileParts(e.output)",
+  "n=e.content.map(e=>{if(e.type!==`tool-result`)return e;if(e.output?.type===`text`&&typeof e.output.value==`string`&&e.output.value.startsWith(`[Truncated by eve:`))return e;let n=stubContentOutputFileParts(e.output)",
 );
 
 // Compaction may shrink the local recent window, but it may not buy another summary model call.

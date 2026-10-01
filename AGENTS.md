@@ -226,7 +226,7 @@ Abort signal проверяется до и после live-авторизаци
 
 Authored model context внешней группы не должен содержать длинное или короткое типографское тире и кавычки-ёлочки. Permanent core, external mode fragments, model-facing descriptors и все файлы grantable skill packages должны быть очищены непосредственно в исходниках; runtime-нормализация и post-processing ответов запрещены. Пользовательские сообщения, история, память, файлы и tool data никогда не переписываются этой политикой.
 Eve `0.40.0` materializes dynamic skill packages и supporting files в sandbox. Стабильные trusted Google Workspace skills выдаются на `session.started`, чтобы не загружать 19 пакетов перед каждым ходом, и только при заданных `GOOGLE_OAUTH_CLIENT_ID`/`GOOGLE_OAUTH_CLIENT_SECRET` (`GOOGLE_WORKSPACE_AVAILABLE`, тот же gate прячет три Google-инструмента); внешний capability-coupled `imagegen` остаётся на `turn.started`, поскольку grant может измениться между репликами. Trusted HOME хранится в persistent tools volume, поэтому `agent/sandbox.ts` на session lifecycle удаляет только точный legacy package path `.agents/skills/pohuy`; не расширять этот cleanup на соседние skills.
-Авторские навыки (`agent/lib/authored-skills/`, миграция 086): Хомка пишет себе навыки из доступных
+Авторские навыки (`agent/lib/authored-skills/`, миграция 086): Шуша пишет себе навыки из доступных
 инструментов, одна библиотека на семью. `manage_skill` (list, read, publish, rollback, retire,
 record_outcome) выдаётся только владельцу в личном чате и семейной группе, не в scheduled, не
 subagent, не во внешней группе; publish, rollback и retire идут через HITL с повторной проверкой
@@ -241,7 +241,7 @@ subagent, не во внешней группе; publish, rollback и retire и�
 (40 навыков, markdown 8000, до 4 файлов по 6000). Хук `agent/hooks/skill-signals.ts` пишет
 `authored_skill_usage` по `load_skill` и после хода с 4+ вызовами инструментов (без служебных)
 кладёт строку в `conversation_skill_hints`; сборка контекста следующего хода показывает её один
-раз (TTL 24 ч), и только по ней Хомка предлагает навык. Мета-навык `agent/skills/skill-authoring/`
+раз (TTL 24 ч), и только по ней Шуша предлагает навык. Мета-навык `agent/skills/skill-authoring/`
 задаёт процедуру и справочники под DeepSeek Flash и Flux. В trusted scheduled-ходах доступны
 `generate_image` и skill `imagegen`; внешние scheduled-ходы их не получают.
 Restricted group sandbox держит `$HOME` на Docker tmpfs. Docker `putArchive` не пишет надёжно прямо в mount target, поэтому runner file I/O загружает bytes во временный rootfs path и переносит их внутрь контейнера; не возвращать прямой archive write без реального tmpfs smoke.

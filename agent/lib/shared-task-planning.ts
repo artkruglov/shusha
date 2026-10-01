@@ -5,6 +5,7 @@ import type { MemoryAuthorization } from "./memory-context.js";
 import type { SharedTaskInput } from "./shared-tasks.js";
 import { denied, type TaskRow } from "./shared-task-access.js";
 import { recordTaskVersion } from "./shared-task-handover.js";
+import { findOrCreateProject } from "./projects/project-resolver.js";
 
 export async function mutateTaskPlan(client:PoolClient,auth:MemoryAuthorization,task:TaskRow,input:SharedTaskInput) {
   const actor=auth.telegramUserId!;
@@ -46,11 +47,20 @@ export async function mutateTaskPlan(client:PoolClient,auth:MemoryAuthorization,
     if ((dueAt && dueOn) || task.kind !== "task" && (dueAt || dueOn)) {
       throw new AppError("AGENT_TASK_DEADLINE_INVALID","Идеи и традиции без срока; у задачи выберите дату или точное время");
     }
+    // Имя списка это проект области: `null` снимает дело с проекта, строка находит или заводит проект.
+    // Идея и дело входят в проект, традиция нет.
+    const lifeArea=input.lifeArea === undefined ? task.life_area : input.lifeArea;
+    let projectId=task.project_id ?? null;
+    let listName=task.list_name;
+    if (input.listName === null) { projectId=null; listName=null; }
+    else if (input.listName !== undefined && task.kind !== "ritual") {
+      projectId=await findOrCreateProject(client,{familyId:task.family_id,groupId:task.group_id,scope:task.scope,spaceId:task.space_id,
+        ownerTelegramId:task.assignee_telegram_id},actor,input.listName,lifeArea);
+      listName=input.listName;
+    }
     await client.query(`UPDATE shared_tasks SET title=$2,details=$3,list_name=$4,due_at=$5,due_on=$6,
-      life_area=$7,version=version+1,updated_at=now() WHERE id=$1`,[task.id,input.title ?? task.title,
-      input.details === undefined ? task.details : input.details,
-      input.listName === undefined ? task.list_name : input.listName,dueAt,dueOn,
-      input.lifeArea === undefined ? task.life_area : input.lifeArea]);
+      life_area=$7,project_id=$8,version=version+1,updated_at=now() WHERE id=$1`,[task.id,input.title ?? task.title,
+      input.details === undefined ? task.details : input.details,listName,dueAt,dueOn,lifeArea,projectId]);
     // Linked notifications describe the same task, never stale or private appended notes.
     if (input.title !== undefined) await client.query("UPDATE reminders SET content=$2,updated_at=now() WHERE shared_task_id=$1 AND status='active'",[task.id,input.title]);
   }

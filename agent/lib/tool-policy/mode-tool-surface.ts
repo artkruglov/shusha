@@ -401,6 +401,7 @@ const BACKGROUND_DENIED_TOOLS = [
   "manage_behavior_preference",
   "manage_care_areas",
   "manage_personal_time",
+  "manage_projects",
   "manage_shared_tasks",
   "manage_shopping_list",
   "manage_skill",

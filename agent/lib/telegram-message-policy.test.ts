@@ -54,12 +54,12 @@ describe("isMessageAddressedToBot", () => {
   });
 
   it.each([
-    "Хомка, помоги",
-    "Хомке это понравится",
-    "Позови Хомку",
-    "Сделано Хомкой",
-    "Homka, help us",
-    "Хомка и Мия, привет",
+    "Шуша, помоги",
+    "Шуше это понравится",
+    "Позови Шушу",
+    "Сделано Шушей",
+    "Shusha, help us",
+    "Шуша и Мия, привет",
   ])("accepts the default name variant in ordinary group text: %s", (text) => {
     expect(isMessageAddressedToBot({ ...groupMessage, text }, "family_agent")).toBe(true);
   });

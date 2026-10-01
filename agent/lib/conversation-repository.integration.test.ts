@@ -113,7 +113,7 @@ describeWithDatabase("conversationRepository", () => {
 
     expect(stored.rows[0]).toEqual({
       actor_id: "agent:osinara",
-      sender_display_name: "Хомка",
+      sender_display_name: "Шуша",
     });
   });
 });

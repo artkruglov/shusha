@@ -272,6 +272,17 @@ describe("keep-open directive", () => {
     expect(delivered).toContain("<telegram-keep-open>");
   });
 
+  it("drops a closing tag the model adds around the marked block, instead of showing it", () => {
+    // Эвал 1 октября 2026: модель обернула итог записи в <telegram-keep-open> … </telegram-keep-open>.
+    const answer = `Записала.\n\n<telegram-keep-open>\n• «Купить батарейки» → пока без списка\n</telegram-keep-open>\n\n${"строка. ".repeat(120)}`;
+
+    const delivered = formatTelegramFinalPresentation(answer).map((chunk) => chunk.text).join("\n");
+
+    expect(delivered).not.toContain("telegram-keep-open");
+    expect(delivered).not.toContain("Полный ответ");
+    expect(stripTelegramAsideDirectives("<telegram-keep-open>\nДоска\n</telegram-keep-open>")).toBe("Доска");
+  });
+
   it("never stores the directive in the durable projection", () => {
     expect(stripTelegramAsideDirectives("<telegram-keep-open>\nДоска")).toBe("Доска");
     expect(stripTelegramAsideDirectives("Вот твои дела.\n\n<telegram-keep-open>\nДоска"))

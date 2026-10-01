@@ -6,15 +6,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MemoryReviewOwnerAlertTransportError } from "../memory-review/memory-review-owner-alert-transport.js";
 import { COACH_INVITE_TEXT } from "./coach.js";
-import { createCoachDispatcher, type CoachDispatcherDependencies } from "./coach-dispatch.js";
+import { createCoachDispatcher, resetCoachSkipLog, type CoachDispatcherDependencies } from "./coach-dispatch.js";
 import type { CoachRecipient } from "./coach-repository.js";
 
 // Среда 23 сентября 2026, 15:00 по Москве.
 const NOW = new Date("2026-09-23T12:00:00Z");
 const person: CoachRecipient = {
   facts: {
-    enabled: null, familyRituals: 0, invited: false, lastByReason: {}, lastTouchAt: null,
-    openDecision: null, personalWindows: 0, quietRitual: null, relation: "partner", touchesLastWeek: 0,
+    enabled: null, familyRituals: 0, invited: false, invitesSent: 0, lastByReason: {}, lastTouchAt: null, ownedCareAreas: 1,
+    openDecision: null, openSituation: null, personalWindows: 0, quietRitual: null, relation: "partner", touchesLastWeek: 0,
     weeklyReviewEnabled: false,
   },
   coachEnabled: true,
@@ -39,7 +39,7 @@ function dependencies(overrides: Partial<CoachDispatcherDependencies> = {}) {
 }
 
 describe("coach dispatcher", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => { vi.restoreAllMocks(); resetCoachSkipLog(); });
 
   it("invites a person with a private chat and journals the invitation", async () => {
     vi.spyOn(console, "info").mockImplementation(() => undefined);
@@ -94,5 +94,27 @@ describe("coach dispatcher", () => {
     const lost = dependencies({ send: vi.fn().mockRejectedValue(new Error("socket hang up")) });
     await createCoachDispatcher(lost)(NOW);
     expect(error.mock.calls.at(-1)![0]).toContain("AGENT_COACH_TOUCH_AMBIGUOUS");
+  });
+  it("says why nobody was asked, once a day per person and reason", async () => {
+    // Молчание коуча снаружи неотличимо от поломки, поэтому причина пропуска попадает в лог.
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const codes = () => info.mock.calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>)
+      .filter((entry) => entry.code === "AGENT_COACH_SKIPPED");
+
+    const paused = dependencies({ recipients: vi.fn().mockResolvedValue([{ ...person, state: { sentToday: 0, unanswered: 3 } }]) });
+    await createCoachDispatcher(paused)(NOW);
+    await createCoachDispatcher(paused)(new Date(NOW.getTime() + 10 * 60_000));
+    expect(codes()).toEqual([expect.objectContaining({ reason: "unanswered", userId: "user-1" })]);
+
+    const idle = dependencies({ recipients: vi.fn().mockResolvedValue([{
+      ...person, facts: { ...person.facts, enabled: true, invited: true, invitesSent: 1, personalWindows: 1, familyRituals: 1 },
+    }]) });
+    await createCoachDispatcher(idle)(NOW);
+    expect(codes().at(-1)).toMatchObject({ reason: "no_reason", enabled: true, invitesSent: 1 });
+
+    // Тихие часы ожидаемы каждую ночь и в лог не попадают.
+    const before = codes().length;
+    await createCoachDispatcher(dependencies())(new Date("2026-09-22T22:00:00Z"));
+    expect(codes()).toHaveLength(before);
   });
 });

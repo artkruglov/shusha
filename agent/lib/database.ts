@@ -18,7 +18,9 @@ export function database(): Pool {
     );
   }
   if (pool === null) {
-    pool = new Pool({ connectionString, max: 10 });
+    // `min` keeps a few connections open: pg-pool closes an idle client after 10 seconds, and under
+    // memory pressure PostgreSQL may not start a new backend in time after a quiet pause.
+    pool = new Pool({ connectionString, max: 10, min: 3 });
     // pg-pool re-emits an idle client's socket failure on the pool. Without a listener Node turns
     // that event into an uncaught exception and the whole agent process exits; the broken client is
     // already discarded by the pool, so the next checkout reconnects. Only the code is logged:

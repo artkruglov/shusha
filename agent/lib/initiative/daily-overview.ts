@@ -18,7 +18,7 @@
  * Поэтому день, в котором открыты только идеи и традиции, тоже проходит молча: идея не создаёт
  * напоминаний (история B01), а увидеть её можно в ответ на «покажи дела».
  */
-import { formatTaskBoard, type BoardTask } from "../task-board.js";
+import { formatTaskBoard, type BoardProject, type BoardTask } from "../task-board.js";
 
 export interface DailyOverview {
   /** Открытые дела, идеи и традиции человека из всех его областей. */
@@ -28,6 +28,10 @@ export interface DailyOverview {
   readonly now: Date;
   /** Пояс человека: «сегодня» и «просрочено» считаются в его дне. */
   readonly timezone: string;
+  /** Области заботы, которые человек ведёт целиком: названия, без счёта и сравнения. */
+  readonly areas?: readonly string[];
+  /** Живые проекты человека со счётом дел: прогресс на доске и проекты без шага. */
+  readonly projects?: readonly BoardProject[];
 }
 
 /**
@@ -57,10 +61,12 @@ export function formatDailyOverview(
   const board = formatTaskBoard({
     now: overview.now, style: "plain", tasks: overview.tasks,
     timezone: overview.timezone, waiting: overview.waiting,
+    ...(overview.projects ? { projects: overview.projects } : {}),
   });
   if (board === null) return null;
   return [
     "Доброе утро. Вот твои дела.", "", board,
+    ...(overview.areas && overview.areas.length > 0 ? ["", `Твои области: ${overview.areas.join(", ")}.`] : []),
     ...(options.first === true ? ["", FIRST_TIME_EXPLANATION] : []),
   ].join("\n");
 }

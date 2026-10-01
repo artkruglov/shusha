@@ -4,6 +4,13 @@
  * Exports:
  * - `ApprovalAuthRow`: approval/session fields required to rebuild trusted Eve auth.
  * - `resolveCurrentApprovalAuth`: revalidates identity, membership, group, and scopes.
+ * - `retainTurnAttributes`: the context of the requesting turn that the approval row keeps.
+ *
+ * The turn resumed after a tap gets freshly read policy (role, scopes, group) but, without the
+ * requesting turn's context, no sandbox session, no visible timeline entries and no turn start:
+ * memory sources could not bind (`turn_attributes_invalid` on every such turn) and browser tools had
+ * no container. The approval row keeps that context and the resume restores it UNDER the fresh
+ * policy; nothing that authorizes is ever taken from the row (upstream nyxandro 84d04ee).
  */
 import type { SessionAuthContext } from "eve/context";
 import type { PoolClient } from "pg";
@@ -32,6 +39,41 @@ export interface ApprovalAuthRow {
   telegram_message_id: string;
   telegram_message_thread_id: string | null;
   telegram_timeline_entry_id?: string | null;
+  /** The session's current sandbox thread; the resumed turn works in the same container. */
+  thread_id?: string | null;
+  /** The requesting turn's context (`retainTurnAttributes`), restored under fresh policy. */
+  turn_attributes?: unknown;
+}
+
+/**
+ * Context of the requesting turn that the resumed turn needs and that carries no authorization:
+ * where the sandbox is, which message and timeline position the turn answers, what it saw.
+ * Policy attributes (role, scopes, group, allowlist, identity) are never taken from here.
+ */
+export const RETAINED_TURN_ATTRIBUTES = [
+  "memoryReviewBatchId", "memoryReviewMode", "memoryReviewSourceEntryIds", "proactiveDeliveryCursor", "sandboxSessionId",
+  "telegramConversationId", "telegramForumTopicId", "telegramMessageThreadId", "telegramProfileMentionUserIds",
+  "telegramProfileReplyTimelineSequence", "telegramProfileReplyUserId", "telegramReplyToMessageId", "telegramTimelineEntryId",
+  "telegramTimelineOmittedBeforeSequence", "telegramTimelineSequence", "telegramTimelineVisibleEntryIds", "telegramTurnStartedAt",
+] as const;
+
+export function retainTurnAttributes(attributes: Record<string, unknown> | undefined): Record<string, unknown> {
+  const retained: Record<string, unknown> = {};
+  for (const key of RETAINED_TURN_ATTRIBUTES) {
+    const value = attributes?.[key];
+    if (value !== undefined) retained[key] = value;
+  }
+  return retained;
+}
+
+function restoredTurnAttributes(row: ApprovalAuthRow): Record<string, unknown> {
+  const stored = row.turn_attributes && typeof row.turn_attributes === "object" && !Array.isArray(row.turn_attributes)
+    ? retainTurnAttributes(row.turn_attributes as Record<string, unknown>)
+    : {};
+  return {
+    ...(row.thread_id ? { sandboxSessionId: row.thread_id } : {}),
+    ...stored,
+  };
 }
 
 interface IdentityRow {
@@ -116,9 +158,10 @@ export async function resolveCurrentApprovalAuth(client: PoolClient, row: Approv
       throw error;
     }
   }
-  // Only freshly read database policy enters the resumed Eve turn.
+  // The requesting turn's context comes first; only freshly read database policy may follow it.
   return {
     attributes: {
+      ...restoredTurnAttributes(row),
       applicationSessionId: row.application_session_id,
       ...(row.space_policy_version != null
         ? { spaceId: row.space_id!, spacePolicyVersion: String(row.space_policy_version) }

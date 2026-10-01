@@ -23,6 +23,8 @@ import { handleTelegramMessage } from "../lib/telegram-on-message.js";
 import { completedTelegramOutput, silentGroupTurnRecord } from "../lib/telegram-progress.js";
 import { deliverTelegramProgressNotice } from "../lib/telegram-progress-notice.js";
 import { progressNoticeKey, telegramProgressNoticeDeferral } from "../lib/telegram-progress-deferral.js";
+import { TELEGRAM_KEEP_OPEN_DIRECTIVE } from "../lib/telegram-authored-split.js";
+import { takeTelegramKeepOpenMark } from "../lib/telegram-keep-open-turns.js";
 import { refreshTelegramReactionPolicy } from "../lib/telegram-reaction-policy.js";
 import {
   telegramAudienceWatch,
@@ -188,7 +190,8 @@ export default telegramChannel({
         await setTelegramMessageReaction(channel.telegram, telegramMessageId, output.emoji);
         return;
       }
-      const message = output.message;
+      // Ход с итогом записи или закрытия дел показывается целиком (`telegram-keep-open-turns.ts`).
+      const message = takeTelegramKeepOpenMark(noticeKey) ? `${TELEGRAM_KEEP_OPEN_DIRECTIVE}\n${output.message}` : output.message;
       const replyParameters = isScheduledSession(ctx)
         ? undefined
         : telegramTurnReplyParameters(channel.state, ctx);

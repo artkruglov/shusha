@@ -13,6 +13,7 @@ import { defineTool } from "eve/tools";
 import { z } from "zod";
 
 import { AppError } from "../app-error.js";
+import { groupOverviewRepository } from "../initiative/group-overview-repository.js";
 import { requireReminderAuthorization } from "../reminders/reminder-context.js";
 import { reminderRepository } from "../reminders/reminder-repository.js";
 import {
@@ -24,16 +25,18 @@ import {
 } from "../tool-input-validation.js";
 
 const INPUT_ERROR_CODE = "AGENT_NOTIFICATION_SETTINGS_INPUT_INVALID";
-const TOOL_ACTIONS = ["get", "set", "coach", "weekly_review"] as const;
+const TOOL_ACTIONS = ["get", "set", "coach", "weekly_review", "group_overview"] as const;
 const TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/u;
-const TOP_LEVEL_FIELDS = ["action", "coachEnabled", "initiativeDailyLimit", "initiativeEnabled", "quietEnd",
+const TOP_LEVEL_FIELDS = ["action", "coachEnabled", "groupOverviewEnabled", "initiativeDailyLimit", "initiativeEnabled", "quietEnd",
   "quietStart", "timezone", "weeklyReviewEnabled"] as const;
 
 const nullableTimeSchema = z.union([z.string(), z.null()]).optional();
 const notificationSettingsSchema = z.object({
-  action: z.enum(TOOL_ACTIONS).describe("Обязательный action: get, set, coach или weekly_review."),
+  action: z.enum(TOOL_ACTIONS).describe("Обязательный action: get, set, coach, weekly_review или group_overview."),
   coachEnabled: z.boolean().optional()
     .describe("Обязательно для action=coach: true по явному «да» на приглашение коуча, false на «без коуча»."),
+  groupOverviewEnabled: z.boolean().optional()
+    .describe("Обязательно для action=group_overview: false на «не присылайте общий обзор в группу», true чтобы вернуть."),
   weeklyReviewEnabled: z.boolean().optional()
     .describe("Обязательно для action=weekly_review: true по явной просьбе о недельном обзоре, false на «хватит обзоров»."),
   quietEnd: nullableTimeSchema.describe("Обязательно для action=set: ЧЧ:ММ или null."),
@@ -120,17 +123,24 @@ function requireNotificationSettingsInput(input: unknown) {
     }
     return { action, enabled: payload["weeklyReviewEnabled"] as boolean } as const;
   }
+  if (action === "group_overview") {
+    requireOnlyFields(payload, ["action", "groupOverviewEnabled"], "action=group_overview", INPUT_ERROR_CODE);
+    if (typeof payload["groupOverviewEnabled"] !== "boolean") {
+      toolInputError(INPUT_ERROR_CODE, "Для action=group_overview передайте groupOverviewEnabled true или false");
+    }
+    return { action, enabled: payload["groupOverviewEnabled"] as boolean } as const;
+  }
   return { action, values: requireSetInput(payload) } as const;
 }
 
 const TOOL_DESCRIPTION = [
-  "Получить или настроить личный IANA timezone и тихие часы. В тихие часы не приходит ничего, что начато без просьбы человека: ни напоминание, ни сводка, ни предупреждение, ни предложение обновления. Отложенное уходит, когда тихие часы кончаются. Get: {\"action\":\"get\"}. Set: {\"action\":\"set\",\"timezone\":\"Europe/Moscow\",\"quietStart\":\"22:00\",\"quietEnd\":\"08:00\"}; quietStart и quietEnd разные значения ЧЧ:ММ, для отключения тихих часов оба null. Просьбу «не пиши мне первым» передавай как initiativeEnabled false, число сообщений в сутки как initiativeDailyLimit; непереданные поля остаются прежними. Не угадывай timezone и часы: если данных нет, спроси пользователя. Coach: {\"action\":\"coach\",\"coachEnabled\":true} только на явное «да» человека на приглашение коуча, false на «без коуча»; молчание и уклончивый ответ не согласие. Weekly_review: {\"action\":\"weekly_review\",\"weeklyReviewEnabled\":true} по явной просьбе о недельном обзоре дел, false на «хватит обзоров»; обзор приходит в воскресенье вечером.",
+  "Получить или настроить личный IANA timezone и тихие часы. В тихие часы не приходит ничего, что начато без просьбы человека: ни напоминание, ни сводка, ни предупреждение, ни предложение обновления. Отложенное уходит, когда тихие часы кончаются. Get: {\"action\":\"get\"}. Set: {\"action\":\"set\",\"timezone\":\"Europe/Moscow\",\"quietStart\":\"22:00\",\"quietEnd\":\"08:00\"}; quietStart и quietEnd разные значения ЧЧ:ММ, для отключения тихих часов оба null. Просьбу «не пиши мне первым» передавай как initiativeEnabled false, число сообщений в сутки как initiativeDailyLimit; непереданные поля остаются прежними. Не угадывай timezone и часы: если данных нет, спроси пользователя. Coach: {\"action\":\"coach\",\"coachEnabled\":false} на «без коуча» или отказ от вопросов не про дела, true только если человек просит вернуть коуча; по умолчанию коуч включён. Weekly_review: {\"action\":\"weekly_review\",\"weeklyReviewEnabled\":true} по явной просьбе о недельном обзоре дел, false на «хватит обзоров»; обзор приходит в воскресенье вечером. Group_overview: {\"action\":\"group_overview\",\"groupOverviewEnabled\":false} только владелец, на просьбу не присылать общий утренний обзор дел в семейную группу; true возвращает его.",
 ].join(" ");
 
 export default defineTool({
   approval: ({ toolInput }) => {
     const parsed = requireNotificationSettingsInput(toolInput);
-    // Коуч и недельный обзор меняют только то, пишет ли бот этому же человеку, и выключаются
+    // Коуч, недельный обзор и общий обзор группы меняют только то, пишет ли бот сам, и выключаются
     // одной фразой; кнопка подтверждения на такую настройку была бы лишним шагом.
     return parsed.action === "set" ? "user-approval" : "not-applicable";
   },
@@ -153,6 +163,17 @@ export default defineTool({
     }
     if (parsed.action === "weekly_review") {
       return await reminderRepository.setWeeklyReview(authorization, parsed.enabled);
+    }
+    if (parsed.action === "group_overview") {
+      // Общий разбор идёт в семейную группу, то есть касается обоих: гасит и возвращает его владелец.
+      if (authorization.role !== "owner") {
+        throw new AppError(
+          "AGENT_GROUP_OVERVIEW_OWNER_ONLY",
+          "Общий утренний обзор в группе включает и выключает только владелец семьи",
+        );
+      }
+      const groups = await groupOverviewRepository.setEnabled(authorization.familyId, parsed.enabled);
+      return { groupOverviewEnabled: parsed.enabled, groups };
     }
 
     return await reminderRepository.configureNotifications(authorization, parsed.values);

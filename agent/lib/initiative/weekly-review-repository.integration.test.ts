@@ -56,18 +56,12 @@ dbDescribe("weekly review data", () => {
   });
   afterAll(closeDatabase);
 
-  it("writes only to people who asked for the review themselves", async () => {
+  it("writes to everyone who has not said stop, and to nobody who has", async () => {
     await privateChat(fixture.owner);
     await privateChat(fixture.spouse);
-    // Молчание и отказ это не согласие: обзор добровольный, по умолчанию его нет ни у кого.
+    // Включён по умолчанию (30 сентября 2026): молчание значит «можно», «хватит обзоров» это отказ.
     await settings(fixture.owner, null);
     await settings(fixture.spouse, false);
-    await expect(weeklyReviewRepository.recipients(NOW)).resolves.toEqual([]);
-
-    await database().query(
-      "UPDATE user_notification_settings SET weekly_review_enabled = true WHERE user_id = $1",
-      [fixture.owner.userId],
-    );
     const recipients = await weeklyReviewRepository.recipients(NOW);
     expect(recipients.map((recipient) => recipient.userId)).toEqual([fixture.owner.userId]);
     expect(recipients[0]).toMatchObject({ enabled: true, settings: { timezone: "Europe/Moscow" } });

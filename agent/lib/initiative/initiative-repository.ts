@@ -12,6 +12,7 @@ import type { PoolClient } from "pg";
 
 import { database } from "../database.js";
 import type { InitiativeKind, InitiativeSettings, InitiativeState } from "./initiative-policy.js";
+import { unansweredCountSql } from "./initiative-unanswered.js";
 
 const DEFAULT_DAILY_LIMIT = 3;
 
@@ -36,14 +37,20 @@ export const initiativeRepository = {
     const { rows } = await executor.query<SettingsRow>(
       `WITH person AS (
          SELECT person.id,
-                COALESCE(settings.timezone, 'UTC') AS timezone,
+                COALESCE(settings.timezone, owner_settings.timezone, 'UTC') AS timezone,
                 to_char(settings.quiet_start, 'HH24:MI') AS quiet_start,
                 to_char(settings.quiet_end, 'HH24:MI') AS quiet_end,
                 COALESCE(settings.initiative_enabled, true) AS enabled,
                 COALESCE(settings.initiative_daily_limit, $3::smallint) AS daily_limit
            FROM users AS person
            LEFT JOIN user_notification_settings AS settings ON settings.user_id = person.id
+           LEFT JOIN family_memberships AS own_membership ON own_membership.user_id = person.id
+           LEFT JOIN family_memberships AS owner_membership
+             ON owner_membership.family_id = own_membership.family_id AND owner_membership.role = 'owner'
+           LEFT JOIN user_notification_settings AS owner_settings
+             ON owner_settings.user_id = owner_membership.user_id
           WHERE person.id = $1
+          LIMIT 1
        )
        SELECT person.timezone, person.quiet_start, person.quiet_end, person.enabled,
               person.daily_limit,
@@ -51,8 +58,7 @@ export const initiativeRepository = {
                 WHERE sent.user_id = person.id
                   AND sent.sent_on = ($2::timestamptz AT TIME ZONE person.timezone)::date
               )::text AS sent_today,
-              (SELECT count(*) FROM initiative_messages AS sent
-                WHERE sent.user_id = person.id AND sent.answered_at IS NULL)::text AS unanswered
+              ${unansweredCountSql("person.id", "$2")} AS unanswered
          FROM person`,
       [userId, now, DEFAULT_DAILY_LIMIT],
     );
@@ -79,10 +85,15 @@ export const initiativeRepository = {
     await database().query(
       `INSERT INTO initiative_messages(family_id, user_id, kind, sent_on, sent_at)
        SELECT $1, $2, $3,
-              ($4::timestamptz AT TIME ZONE COALESCE(settings.timezone, 'UTC'))::date, $4
+              ($4::timestamptz AT TIME ZONE COALESCE(settings.timezone, owner_settings.timezone, 'UTC'))::date, $4
          FROM users AS person
          LEFT JOIN user_notification_settings AS settings ON settings.user_id = person.id
-        WHERE person.id = $2`,
+         LEFT JOIN family_memberships AS own_membership ON own_membership.user_id = person.id
+         LEFT JOIN family_memberships AS owner_membership
+           ON owner_membership.family_id = own_membership.family_id AND owner_membership.role = 'owner'
+         LEFT JOIN user_notification_settings AS owner_settings
+           ON owner_settings.user_id = owner_membership.user_id
+        WHERE person.id = $2 LIMIT 1`,
       [input.familyId, input.userId, input.kind, input.now],
     );
   },

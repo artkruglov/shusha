@@ -185,6 +185,13 @@ const POST_V0101_MIGRATIONS = [
   "152_weekly_review.sql",
   "153_weekly_review_claim.sql",
   "154_life_area.sql",
+  "155_claim_evidence_attach_time_checks.sql",
+  "156_memory_search_vector_yo_folding.sql",
+  "157_hitl_approval_turn_attributes.sql",
+  "158_group_overview.sql",
+  "159_coach_care_area_offer.sql",
+  "160_coach_situation_followup.sql",
+  "161_task_projects.sql",
 ] as const;
 
 const EXPECTED_R0_R7_TABLES = [

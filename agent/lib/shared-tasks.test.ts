@@ -16,6 +16,17 @@ describe("shared task lifecycle", () => {
     expect(nextSharedTaskStatus("proposed", "cancel", false, true)).toBe("cancelled");
     expect(() => nextSharedTaskStatus("completed", "cancel", true, true)).toThrow();
   });
+  it("lets whoever did an unowned task close it, and says why others cannot close a claimed one", () => {
+    // Прод 1 октября 2026: «встретил мебельщиков» не закрылось, потому что дело никому не принадлежало.
+    expect(nextSharedTaskStatus("open", "complete", false, false)).toBe("completed");
+    expect(nextSharedTaskStatus("open", "complete", false, true)).toBe("completed");
+    expect(() => nextSharedTaskStatus("proposed", "complete", false, true))
+      .toThrow(/предложено другому человеку/);
+    expect(() => nextSharedTaskStatus("proposed", "complete", true, false)).toThrow(/сначала прими/i);
+    expect(() => nextSharedTaskStatus("accepted", "complete", false, true))
+      .toThrow(/другом исполнителе/);
+    expect(() => nextSharedTaskStatus("open", "accept", false, false)).toThrow(/AGENT_TASK_TRANSITION_DENIED/);
+  });
   it("rejects model supplied identities and contradictory action fields", () => {
     expect(sharedTaskInput.safeParse({ action: "create", title: "Milk", userId: "someone" }).success).toBe(false);
     expect(sharedTaskInput.safeParse({ action: "accept", id: "bad", title: "Changed" }).success).toBe(false);

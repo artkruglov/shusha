@@ -14,6 +14,7 @@
  * копии однажды начнут писать разным людям в разное время.
  */
 import type { InitiativeSettings, InitiativeState } from "./initiative-policy.js";
+import { unansweredCountSql } from "./initiative-unanswered.js";
 
 export const INITIATIVE_DEFAULT_DAILY_LIMIT = 3;
 
@@ -62,8 +63,7 @@ export function initiativeRecipientQuery(extraWhere = ""): string {
                 WHERE sent.user_id = person.id
                   AND sent.sent_on = ($1::timestamptz AT TIME ZONE ${zone})::date
               )::text AS sent_today,
-              (SELECT count(*) FROM initiative_messages AS sent
-                WHERE sent.user_id = person.id AND sent.answered_at IS NULL)::text AS unanswered
+              ${unansweredCountSql("person.id", "$1")} AS unanswered
          FROM family_memberships AS membership
          JOIN users AS person ON person.id = membership.user_id
          JOIN application_conversations AS chat ON chat.family_id = membership.family_id

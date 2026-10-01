@@ -18,7 +18,7 @@
  * (история B01), и напоминать о ней раз в неделю значит превращать её в долг.
  */
 import {
-  cleanTaskTitle, dueDay, isOverdue, localDate, OPEN_TASK_STATUSES, shortDate, type BoardTask,
+  cleanTaskTitle, dueDay, isOverdue, localDate, OPEN_TASK_STATUSES, shortDate, type BoardProject, type BoardTask,
 } from "../task-board.js";
 
 export interface WeeklyReviewInput {
@@ -31,6 +31,8 @@ export interface WeeklyReviewInput {
   readonly now: Date;
   /** Пояс человека: «просрочено» считается в его дне. */
   readonly timezone: string;
+  /** Живые проекты человека со счётом дел: без следующего шага и с готовым результатом. */
+  readonly projects?: readonly BoardProject[];
 }
 
 /** Три вопроса и не больше: длинная анкета остаётся без ответа целиком. */
@@ -42,6 +44,8 @@ export const WEEKLY_REVIEW_QUESTIONS = [
 
 export const WEEKLY_REVIEW_OFFER = "Скажи, что закрыть, отложить, передать или снять — сделаю.";
 export const WEEKLY_REVIEW_OPT_OUT = "«Хватит обзоров» — выключу.";
+const PROJECT_NO_STEP_HINT = "Скажи первый шаг.";
+const PROJECT_DONE_HINT = "Закрыть?";
 /** Столько строк на раздел: обзор для пересмотра, а не полный список, он уже есть по просьбе. */
 const PER_SECTION = 5;
 
@@ -59,8 +63,13 @@ export function formatWeeklyReview(input: WeeklyReviewInput): string | null {
   const stalled = open.filter((task) => !overdue.includes(task) && withoutNextStep(task, input.timezone));
   const ideas = open.filter((task) => task.kind === "idea").length;
 
+  // Проект без открытого дела это вопрос человеку: нет следующего шага (GTD) или результат готов.
+  const quiet = (input.projects ?? []).filter((project) => project.status === "accepted" && project.open === 0);
+  const noStep = quiet.filter((project) => project.completed === 0);
+  const finished = quiet.filter((project) => project.completed > 0);
+
   // Пересматривать нечего: обзор ни о чём приучает не читать обзоры вовсе.
-  if (overdue.length === 0 && waiting.length === 0 && stalled.length === 0) return null;
+  if (overdue.length === 0 && waiting.length === 0 && stalled.length === 0 && noStep.length === 0 && finished.length === 0) return null;
 
   const lines: string[] = ["Обзор недели."];
   if (input.closedLastWeek > 0) lines.push("", `За неделю закрыто: ${input.closedLastWeek}.`);
@@ -77,6 +86,16 @@ export function formatWeeklyReview(input: WeeklyReviewInput): string | null {
   section("⚠️ Просрочено", overdue, (task) => ` — срок ${shortDate(dueDay(task, input.timezone)!)}`);
   section("Жду ответа", waiting, () => "");
   section("Без следующего шага", stalled, () => "");
+  const projectSection = (title: string, projects: readonly BoardProject[], hint: string) => {
+    if (projects.length === 0) return;
+    const shown = projects.slice(0, PER_SECTION);
+    const more = projects.length - shown.length;
+    lines.push("", `${title} · ${projects.length}`,
+      ...shown.map((project) => `• ${cleanTaskTitle(project.title, "plain")}`),
+      ...(more > 0 ? [`…и ещё ${more}`] : []), hint);
+  };
+  projectSection("Проекты без следующего шага", noStep, PROJECT_NO_STEP_HINT);
+  projectSection("Проекты, где всё сделано", finished, PROJECT_DONE_HINT);
   if (ideas > 0) lines.push("", `Идей на «когда-нибудь»: ${ideas}.`);
 
   return [...lines, "", ...WEEKLY_REVIEW_QUESTIONS, "", WEEKLY_REVIEW_OFFER, WEEKLY_REVIEW_OPT_OUT]

@@ -48,8 +48,24 @@ function invitationDeliveryAmbiguousError(): AppError {
 
 export type FamilyRelation = "child" | "other" | "parent" | "partner";
 
+export interface FamilyMember {
+  name: string;
+  participantRef: string;
+  relation: FamilyRelation | null;
+}
+
 export interface FamilyRepository {
   approveInvitation(input: ApproveInvitationInput): Promise<{ approved: true }>;
+  /**
+   * Участники семьи, кроме самого владельца, с ref для `set_relation`.
+   *
+   * Метку родства ставит только владелец и только в личном чате, а `manage_shared_tasks`
+   * с `action: participants` в личном чате всегда возвращает пустой список: там область
+   * `personal`, и список участников она не собирает. Из-за этого 23 и 24 сентября 2026 метка
+   * не ставилась вовсе, а бот отвечал «список участников пустой», хотя обе участницы в семье
+   * с 16 сентября. Родство это семейное понятие, поэтому список берётся из членства.
+   */
+  listMembers(input: { familyId: string; ownerUserId: string }): Promise<FamilyMember[]>;
   /** Кто кому кто: метка отношения участника к владельцу семьи. Прав она не даёт. */
   setRelation(input: {
     familyId: string;
@@ -88,6 +104,52 @@ export interface FamilyRepository {
 }
 
 export const familyRepository: FamilyRepository = {
+  async listMembers(input) {
+    const client = await database().connect();
+    try {
+      await client.query("BEGIN");
+      const owner = await client.query(
+        `SELECT 1 FROM family_memberships WHERE family_id = $1 AND user_id = $2 AND role = 'owner'`,
+        [input.familyId, input.ownerUserId],
+      );
+      if (owner.rowCount !== 1) {
+        throw new AppError("AGENT_FAMILY_OWNER_REQUIRED", "Список участников семьи доступен владельцу");
+      }
+      // Ref живёт в том же семейном списке, из которого его читает `setRelation`; строка на
+      // участника заводится здесь, если её ещё нет.
+      await client.query(
+        `INSERT INTO shared_task_participants(family_id, group_id, telegram_user_id, display_name)
+         SELECT m.family_id, NULL, u.telegram_user_id, u.display_name FROM family_memberships m
+          JOIN users u ON u.id = m.user_id
+          WHERE m.family_id = $1 AND u.telegram_user_id IS NOT NULL
+         ON CONFLICT (family_id, group_id, telegram_user_id)
+         DO UPDATE SET display_name = excluded.display_name`,
+        [input.familyId],
+      );
+      const rows = await client.query<{ display_name: string; id: string; relation: string | null }>(
+        `SELECT participant.id, person.display_name, membership.relation
+           FROM shared_task_participants AS participant
+           JOIN users AS person ON person.telegram_user_id = participant.telegram_user_id
+           JOIN family_memberships AS membership
+             ON membership.user_id = person.id AND membership.family_id = $1
+          WHERE participant.family_id = $1 AND participant.group_id IS NULL
+            AND membership.user_id <> $2
+          ORDER BY person.display_name, participant.id LIMIT 100`,
+        [input.familyId, input.ownerUserId],
+      );
+      await client.query("COMMIT");
+      return rows.rows.map((row) => ({
+        name: row.display_name,
+        participantRef: row.id,
+        relation: row.relation as FamilyRelation | null,
+      }));
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  },
   async setRelation(input) {
     const client = await database().connect();
     try {
@@ -108,7 +170,7 @@ export const familyRepository: FamilyRepository = {
       if (updated.rowCount !== 1) {
         throw new AppError(
           "AGENT_FAMILY_RELATION_INVALID",
-          "Не нашла этого участника семьи. Возьмите participantRef из manage_shared_tasks action participants и повторите",
+          "Не нашла этого участника семьи. Возьмите participantRef из manage_family_invitation action members и повторите",
         );
       }
       await client.query(

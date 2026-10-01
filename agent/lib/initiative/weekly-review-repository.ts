@@ -14,6 +14,7 @@ import { database } from "../database.js";
 import { dailyOverviewRepository } from "./daily-overview-repository.js";
 import type { InitiativeSettings, InitiativeState } from "./initiative-policy.js";
 import type { WeeklyReviewInput } from "./weekly-review.js";
+import { unansweredCountSql } from "./initiative-unanswered.js";
 
 const DEFAULT_DAILY_LIMIT = 3;
 /** Окно счётчика закрытого: ровно та неделя, которую человек пересматривает. */
@@ -44,7 +45,7 @@ interface RecipientRow {
 }
 
 export const weeklyReviewRepository = {
-  /** Обзор добровольный: без явного «да» человек в выборку не попадает вовсе. */
+  /** Обзор включён по умолчанию (30 сентября 2026): из выборки выпадает только сказавший «хватит обзоров». */
   async recipients(now: Date): Promise<WeeklyReviewRecipient[]> {
     const { rows } = await database().query<RecipientRow>(
       `SELECT DISTINCT ON (membership.family_id, person.id)
@@ -59,8 +60,7 @@ export const weeklyReviewRepository = {
                 WHERE sent.user_id = person.id
                   AND sent.sent_on = ($1::timestamptz AT TIME ZONE COALESCE(settings.timezone, owner_settings.timezone, 'UTC'))::date
               )::text AS sent_today,
-              (SELECT count(*) FROM initiative_messages AS sent
-                WHERE sent.user_id = person.id AND sent.answered_at IS NULL)::text AS unanswered
+              ${unansweredCountSql("person.id", "$1")} AS unanswered
          FROM family_memberships AS membership
          JOIN users AS person ON person.id = membership.user_id
          JOIN application_conversations AS chat ON chat.family_id = membership.family_id
@@ -74,7 +74,7 @@ export const weeklyReviewRepository = {
          LEFT JOIN user_notification_settings AS owner_settings
            ON owner_settings.user_id = owner_membership.user_id
         WHERE person.telegram_user_id IS NOT NULL
-          AND settings.weekly_review_enabled IS TRUE
+          AND settings.weekly_review_enabled IS DISTINCT FROM false
           -- Строку личного чата база заводит каждому участнику сама; написать первым Telegram даёт
           -- только тому, кто сам начал разговор, а его след это личная сессия с ботом.
           AND EXISTS (SELECT 1 FROM conversation_sessions AS session
@@ -84,7 +84,7 @@ export const weeklyReviewRepository = {
       [now, DEFAULT_DAILY_LIMIT],
     );
     return rows.map((row) => ({
-      enabled: row.weekly_review_enabled,
+      enabled: row.weekly_review_enabled !== false,
       familyId: row.family_id,
       settings: {
         dailyLimit: row.daily_limit,
@@ -104,7 +104,7 @@ export const weeklyReviewRepository = {
     const overview = await dailyOverviewRepository.overview(recipient);
     const closed = await database().query<{ count: string }>(
       `SELECT count(*)::text FROM shared_tasks
-        WHERE family_id = $1 AND status = 'completed'
+        WHERE family_id = $1 AND status = 'completed' AND kind <> 'project'
           AND (assignee_telegram_id = $2 OR creator_telegram_id = $2)
           AND updated_at > $3::timestamptz - make_interval(days => $4)`,
       [recipient.familyId, recipient.telegramUserId, now, CLOSED_WINDOW_DAYS],
@@ -112,6 +112,7 @@ export const weeklyReviewRepository = {
     return {
       closedLastWeek: Number(closed.rows[0]?.count ?? 0),
       now,
+      ...(overview.projects ? { projects: overview.projects } : {}),
       tasks: overview.tasks,
       timezone: recipient.settings.timezone,
       waiting: overview.waiting,

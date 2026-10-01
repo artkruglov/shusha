@@ -53,7 +53,7 @@ export const CAPABILITY_GROUPS: Readonly<Record<string, CapabilityGroup>> = {
   },
   planning: {
     label: "Дела, идеи и традиции",
-    tools: ["manage_care_areas", "manage_shared_tasks", "manage_shopping_list", "read_shared_tasks", "manage_joint_decision"],
+    tools: ["manage_care_areas", "manage_projects", "manage_shared_tasks", "manage_shopping_list", "read_shared_tasks", "manage_joint_decision"],
   },
   personal: {
     label: "Личное время",

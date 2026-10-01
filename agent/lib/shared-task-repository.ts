@@ -13,6 +13,7 @@ import { applyTaskStatus, lockTaskForChange, type StatusAction } from "./shared-
 import { mutateTaskPlan } from "./shared-task-planning.js";
 import { requireSpaceAction } from "./spaces/space-write.js";
 import { taskSpaceAction,requireTaskRecipientSpace,lockTaskSpaceBoundary } from "./spaces/task-space-action.js";
+import { personalTimeRepository } from "./personal-time/personal-time-repository.js";
 import { isCurrentTelegramMember } from "./telegram-current-membership.js";
 
 export const sharedTaskRepository = {
@@ -22,7 +23,7 @@ export const sharedTaskRepository = {
     const input = parsed.data;
     if (input.action === "batch") {
       const batch = await executeTaskBatch(auth, input, operationKey);
-      return { tasks: batch.tasks, replayed: batch.replayed };
+      return { tasks: batch.tasks, replayed: batch.replayed, adopted: batch.adopted };
     }
     const client = await database().connect();
     try {
@@ -86,6 +87,7 @@ export const sharedTaskRepository = {
         return { task: present(rows[0],!auth.groupId), replayed: true };
       }
       let id: string;
+      let adoptedUnowned = false;
       if (input.action === "create") {
         id = await createTask(client, auth, scope, spaceId, input);
       } else {
@@ -115,10 +117,21 @@ export const sharedTaskRepository = {
             }
           }
           if(input.action === "transfer") await requireTaskRecipientSpace(client,auth,task.space_id,recipient);
+          // Личное время чужое (B02): барьер стоял только на создании, и передача отдавала дело с точным
+          // временем прямо в окно получателя. Название окна отказ не раскрывает.
+          if (input.action === "transfer" && recipient !== null && recipient !== auth.telegramUserId && task.due_at) {
+            const busy = await personalTimeRepository.conflictFor(recipient, auth.familyId, task.due_at);
+            if (busy !== null) {
+              throw new AppError(
+                "AGENT_TASK_PERSONAL_TIME",
+                "Это время занято личным временем человека. Выберите другое или спросите, когда удобно",
+              );
+            }
+          }
           await recordTaskVersion(client, task, input.action, auth.telegramUserId!);
           await applyTaskHandover({ auth, client, input, recipient, task });
         } else {
-          await applyTaskStatus(client, auth, task, input.action as StatusAction);
+          adoptedUnowned = (await applyTaskStatus(client, auth, task, input.action as StatusAction)).adoptedUnowned;
         }
         id = task.id;
       }
@@ -134,7 +147,7 @@ export const sharedTaskRepository = {
       const {rows} = await readTasks(client, auth, scope, id);
       if (!rows[0]) denied();
       await client.query("COMMIT");
-      return { task: present(rows[0],!auth.groupId), replayed: false };
+      return { task: present(rows[0],!auth.groupId), replayed: false, adopted: adoptedUnowned ? [{ title: rows[0].title, assignee: present(rows[0],!auth.groupId).assignee }] : undefined };
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;

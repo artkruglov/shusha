@@ -77,10 +77,12 @@ export async function executeTaskBatch(auth: MemoryAuthorization, input: SharedT
       const taskByKey = new Map(previous.rows.map((row) => [row.operation_key, row.task_id]));
       const tasks = await readInOrder(client, auth, scope, keys.map((key) => taskByKey.get(key)!));
       await client.query("COMMIT");
-      return { applied: tasks.length, note: "Пакет применён целиком. Не повторяй его пункты по одному", tasks, replayed: true };
+      return { adopted: [] as { title: string; assignee: string | null }[], applied: tasks.length, note: "Пакет применён целиком. Не повторяй его пункты по одному", tasks, replayed: true };
     }
     const taskIds: string[] = [];
-    const failures: { index: number; code: string }[] = [];
+    const failures: { index: number; code: string; reason: string }[] = [];
+    // Ничьи дела, закрытые этим пакетом: исполнителем стал закрывший, и ответ скажет об этом.
+    const adoptedIndexes: number[] = [];
     for (const { item, index } of executionOrder(items)) {
       // Точка сохранения на пункт: отказ одного не прерывает проверку остальных, и модель узнаёт
       // обо всех неверных пунктах сразу, а не по одному за вызов.
@@ -93,7 +95,8 @@ export async function executeTaskBatch(auth: MemoryAuthorization, input: SharedT
           // Правка, план и отметка традиции идут тем же путём, что и в одиночном вызове: пакет
           // не знает о них ничего своего и потому не может разойтись с ним в правах.
           if ((STATUS_ACTIONS as readonly string[]).includes(item.action)) {
-            await applyTaskStatus(client, auth, task, item.action as StatusAction);
+            const { adoptedUnowned } = await applyTaskStatus(client, auth, task, item.action as StatusAction);
+            if (adoptedUnowned) adoptedIndexes.push(index);
           } else {
             await mutateTaskPlan(client, auth, task, item);
           }
@@ -103,11 +106,14 @@ export async function executeTaskBatch(auth: MemoryAuthorization, input: SharedT
       } catch (error) {
         if (!isAppError(error)) throw error;
         await client.query("ROLLBACK TO SAVEPOINT task_batch_item");
-        failures.push({ index, code: error.code });
+        failures.push({ index, code: error.code, reason: error.message.replace(`${error.code}: `, "") });
       }
     }
     if (failures.length > 0) {
-      const named = failures.sort((a, b) => a.index - b.index).map((f) => `#${f.index + 1} ${f.code}`).join("; ");
+      // Причина идёт рядом с кодом: по одному коду модель не отличала «дело чужое» от «нет доступа»
+      // и пересказывала людям выдуманное «у меня нет прав».
+      const named = failures.sort((a, b) => a.index - b.index)
+        .map((f) => `#${f.index + 1} ${f.code} (${f.reason})`).join("; ");
       throw new AppError("AGENT_TASK_BATCH_REJECTED",
         `Пакет не применён, ничего не изменено. Не прошли пункты: ${named}. Исправьте их или спросите человека`);
     }
@@ -128,7 +134,8 @@ export async function executeTaskBatch(auth: MemoryAuthorization, input: SharedT
     // Эвал 23 сентября: собрав верный пакет из трёх закрытий, модель в половине сэмплов повторила
     // те же три поодиночке. Ответ говорит, что делать больше нечего, прямо в точке решения:
     // в описании инструмента этой строке места нет, а повтор на проде стоил бы трёх отказов.
-    return { applied: tasks.length, note: "Пакет применён целиком. Не повторяй его пункты по одному", tasks, replayed: false };
+    const adopted = adoptedIndexes.map((index) => ({ title: tasks[index]!.title, assignee: tasks[index]!.assignee }));
+    return { adopted, applied: tasks.length, note: "Пакет применён целиком. Не повторяй его пункты по одному", tasks, replayed: false };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;

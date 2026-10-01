@@ -25,12 +25,34 @@ export interface CoachRecipient extends InitiativeRecipient {
   readonly facts: CoachFacts;
 }
 
+/**
+ * Событие человека за последние 10 дней, но не раньше чем через 20 часов после даты: спросить
+ * «как прошло» в день события рано. Только личная область самого человека, один раз на запись.
+ */
+export async function findOpenSituation(
+  familyId: string,
+  userId: string,
+  now: Date,
+): Promise<{ id: string; text: string } | null> {
+  const { rows } = await database().query<{ id: string; content: string }>(
+    `SELECT item.id, item.content FROM memory_items AS item
+      WHERE item.family_id = $1 AND item.scope = 'personal' AND item.owner_user_id = $2
+        AND item.kind = 'episode' AND item.claim_status = 'active' AND item.attribute IS NULL
+        AND item.occurred_at BETWEEN $3::timestamptz - interval '10 days' AND $3::timestamptz - interval '20 hours'
+        AND NOT EXISTS (SELECT 1 FROM initiative_messages AS touch
+                         WHERE touch.user_id = $2 AND touch.kind = 'coach' AND touch.coach_subject = item.id)
+      ORDER BY item.occurred_at DESC LIMIT 1`,
+    [familyId, userId, now],
+  );
+  return rows[0] ? { id: rows[0].id, text: rows[0].content } : null;
+}
+
 async function factsFor(row: InitiativeRecipientRow, now: Date): Promise<CoachFacts> {
   const db = database();
   const params = [row.family_id, row.user_id, row.telegram_user_id, now, QUIET_RITUAL_DAYS];
-  const [touches, decision, ritual, windows, rituals] = await Promise.all([
-    db.query<{ coach_reason: CoachReason; last_at: Date; week: string }>(
-      `SELECT coach_reason, max(sent_at) AS last_at,
+  const [touches, decision, ritual, windows, rituals, areas, situation] = await Promise.all([
+    db.query<{ coach_reason: CoachReason; last_at: Date; total: string; week: string }>(
+      `SELECT coach_reason, max(sent_at) AS last_at, count(*)::text AS total,
               count(*) FILTER (WHERE sent_at > $2::timestamptz - interval '7 days')::text AS week
          FROM initiative_messages WHERE user_id = $1 AND kind = 'coach'
         GROUP BY coach_reason`,
@@ -74,11 +96,20 @@ async function factsFor(row: InitiativeRecipientRow, now: Date): Promise<CoachFa
           AND (scope = 'family' OR (scope = 'personal' AND assignee_telegram_id = $2))`,
       [row.family_id, row.telegram_user_id],
     ),
+    // Принятые области человека: только факт наличия, ни дел, ни нагрузки коуч не читает.
+    db.query<{ count: string }>(
+      `SELECT count(*)::text FROM care_areas
+        WHERE family_id = $1 AND owner_telegram_id = $2 AND status = 'accepted'`,
+      [row.family_id, row.telegram_user_id],
+    ),
+    findOpenSituation(row.family_id, row.user_id, now),
   ]);
   const lastByReason: Partial<Record<CoachReason, Date>> = {};
   let lastTouchAt: Date | null = null;
   let touchesLastWeek = 0;
+  let invitesSent = 0;
   for (const touch of touches.rows) {
+    if (touch.coach_reason === "invite") invitesSent = Number(touch.total);
     lastByReason[touch.coach_reason] = touch.last_at;
     if (lastTouchAt === null || touch.last_at > lastTouchAt) lastTouchAt = touch.last_at;
     touchesLastWeek += Number(touch.week);
@@ -88,13 +119,16 @@ async function factsFor(row: InitiativeRecipientRow, now: Date): Promise<CoachFa
     relation: row.relation ?? null,
     familyRituals: Number(rituals.rows[0]?.count ?? 0),
     invited: lastByReason.invite !== undefined,
+    invitesSent,
     lastByReason,
     lastTouchAt,
     openDecision: decision.rows[0] ?? null,
+    openSituation: situation,
+    ownedCareAreas: Number(areas.rows[0]?.count ?? 0),
     personalWindows: Number(windows.rows[0]?.count ?? 0),
     quietRitual: ritual.rows[0] ?? null,
     touchesLastWeek,
-    weeklyReviewEnabled: row.weekly_review_enabled === true,
+    weeklyReviewEnabled: row.weekly_review_enabled !== false,
   };
 }
 

@@ -134,6 +134,19 @@ export function nextSharedTaskStatus(
   if (status === "proposed" && isAssignee && action === "accept") return "accepted";
   if (status === "proposed" && isAssignee && action === "decline") return "declined";
   if (status === "accepted" && isAssignee && action === "complete") return "completed";
+  // Дело, которое никто не брал, закрывает тот, кто его сделал: прод 1 октября 2026, «встретил
+  // мебельщиков» упёрлось в отсутствие исполнителя, и пакет закрытий отклонился целиком.
+  // Исполнителем становится закрывший (`applyTaskStatus`), а человек узнаёт об этом из ответа.
+  if (status === "open" && action === "complete") return "completed";
   if (["proposed", "accepted"].includes(status) && (isCreator || isAssignee) && action === "cancel") return "cancelled";
+  // Причина названа словами: общий отказ модель пересказывала как «у меня нет прав».
+  if (action === "complete" && status === "proposed") {
+    throw new AppError("AGENT_TASK_TRANSITION_DENIED", isAssignee
+      ? "Дело ещё не принято: сначала прими его (accept), потом закрой"
+      : "Дело предложено другому человеку: закрыть его можно после того, как он примет");
+  }
+  if (action === "complete" && status === "accepted") {
+    throw new AppError("AGENT_TASK_TRANSITION_DENIED", "Дело на другом исполнителе: закрыть его может только он");
+  }
   throw new AppError("AGENT_TASK_TRANSITION_DENIED", "Это действие недоступно вам или текущему состоянию задачи");
 }

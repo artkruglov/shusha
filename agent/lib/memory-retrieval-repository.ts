@@ -13,9 +13,9 @@ import {
   MEMORY_RETRIEVAL_CANDIDATE_LIMIT,
   MEMORY_RETRIEVAL_CONFIRMATION_BOOST,
   MEMORY_RETRIEVAL_LIMIT,
-  MEMORY_RETRIEVAL_MIN_RUSSIAN_MORPHOLOGY_RANK,
+  MEMORY_RETRIEVAL_MIN_RUSSIAN_MORPHOLOGY_TERM_MATCHES,
   MEMORY_RETRIEVAL_MIN_SEMANTIC_SIMILARITY,
-  MEMORY_RETRIEVAL_MIN_SIMPLE_LEXICAL_RANK,
+  MEMORY_RETRIEVAL_MIN_SIMPLE_LEXICAL_TERM_MATCHES,
   MEMORY_DISCUSSION_SUMMARY_ATTRIBUTE,
   MEMORY_RETENTION_RANK_FLOOR,
   MEMORY_STABILITY_DAYS_DISCUSSION_SUMMARY,
@@ -200,6 +200,20 @@ export const memoryRetrievalRepository = {
     }
 
     // NOT MATERIALIZED keeps authorization in every inlined branch while allowing physical indexes.
+    //
+    // Обе словесные ветки строят условие ИЛИ из лексем самого запроса, а не через
+    // `websearch_to_tsquery`, который соединяет все слова через И. Живой вопрос «Проверь, когда у
+    // меня ближайшее дежурство, и когда мы меняем резину» требовал запись, где есть все эти слова
+    // сразу, и такой записи не бывает: ветка молча возвращала ноль (upstream 3a1acdb).
+    //
+    // Точная ветка берёт термины из того же `to_tsvector('simple', ...)`, что строит её колонку
+    // (с тем же сведением «ё»), и отбрасывает стоп-слова русского словаря: при ИЛИ «и», «у», «за»
+    // совпали бы почти с каждой записью и утопили бы коды и имена, ради которых ветка есть.
+    // Морфологическая ветка берёт основы своей конфигурации, где стоп-слов уже нет. Условие обе
+    // собирают через `to_tsquery('simple', ...)`: термины уже лексемы своей колонки, а русская
+    // конфигурация прогнала бы стеммер второй раз и «решен» перестало бы совпадать с колонкой.
+    // Слова считаются по позициям, не по лексемам: слово через дефис или ссылка дают несколько
+    // лексем в одной позиции и иначе проходили бы порог в одиночку.
     const result = await database().query<RetrievalRow>(
       `WITH authorized AS NOT MATERIALIZED (
           SELECT item.*, ref.memory_ref
@@ -210,15 +224,42 @@ export const memoryRetrievalRepository = {
              AND ($19::timestamptz IS NULL OR COALESCE(item.occurred_at, item.created_at) >= $19::timestamptz)
              AND ($20::timestamptz IS NULL OR COALESCE(item.occurred_at, item.created_at) <= $20::timestamptz)
        ),
+       simple_lexemes AS (
+         SELECT lexeme, positions
+         FROM unnest(to_tsvector('simple', translate($5, 'ёЁ', 'еЕ')))
+         WHERE ts_lexize('russian_stem', lexeme) <> '{}'
+       ),
+       russian_lexemes AS (
+         SELECT lexeme, positions FROM unnest(to_tsvector('russian', $5))
+       ),
+       simple_query AS (
+         SELECT to_tsquery('simple', string_agg(quote_literal(lexeme), ' | ')) AS query,
+                (SELECT count(DISTINCT word)
+                 FROM simple_lexemes AS counted, unnest(counted.positions) AS word) AS word_count
+         FROM simple_lexemes
+       ),
+       russian_query AS (
+         SELECT to_tsquery('simple', string_agg(quote_literal(lexeme), ' | ')) AS query,
+                (SELECT count(DISTINCT word)
+                 FROM russian_lexemes AS counted, unnest(counted.positions) AS word) AS word_count
+         FROM russian_lexemes
+       ),
+       simple_matched AS (
+         SELECT authorized.id, authorized.updated_at,
+                ts_rank_cd(authorized.search_vector, simple_query.query) AS relevance,
+                (SELECT count(DISTINCT word)
+                 FROM simple_lexemes, unnest(simple_lexemes.positions) AS word
+                 WHERE tsvector_to_array(authorized.search_vector) @> ARRAY[simple_lexemes.lexeme])
+                  AS matched_terms,
+                LEAST($7::bigint, simple_query.word_count) AS required_terms
+         FROM authorized, simple_query
+         WHERE simple_query.query IS NOT NULL
+           AND authorized.search_vector @@ simple_query.query
+       ),
        simple_evidence AS (
          SELECT id, updated_at, relevance
-         FROM (
-           SELECT id, updated_at,
-                  ts_rank_cd(search_vector, websearch_to_tsquery('simple', $5)) AS relevance
-           FROM authorized
-           WHERE search_vector @@ websearch_to_tsquery('simple', $5)
-         ) AS matched
-         WHERE relevance >= $7
+         FROM simple_matched
+         WHERE matched_terms >= required_terms
          ORDER BY relevance DESC, updated_at DESC, id DESC
           LIMIT $6
         ),
@@ -227,15 +268,22 @@ export const memoryRetrievalRepository = {
                 row_number() OVER (ORDER BY relevance DESC, updated_at DESC, id DESC) AS ordinal
          FROM simple_evidence
        ),
+       russian_matched AS (
+         SELECT authorized.id, authorized.updated_at,
+                ts_rank_cd(authorized.russian_search_vector, russian_query.query) AS relevance,
+                (SELECT count(DISTINCT word)
+                 FROM russian_lexemes, unnest(russian_lexemes.positions) AS word
+                 WHERE tsvector_to_array(authorized.russian_search_vector)
+                   @> ARRAY[russian_lexemes.lexeme]) AS matched_terms,
+                LEAST($8::bigint, russian_query.word_count) AS required_terms
+         FROM authorized, russian_query
+         WHERE russian_query.query IS NOT NULL
+           AND authorized.russian_search_vector @@ russian_query.query
+       ),
        russian_evidence AS (
          SELECT id, updated_at, relevance
-         FROM (
-           SELECT id, updated_at,
-                  ts_rank_cd(russian_search_vector, websearch_to_tsquery('russian', $5)) AS relevance
-           FROM authorized
-           WHERE russian_search_vector @@ websearch_to_tsquery('russian', $5)
-         ) AS matched
-         WHERE relevance >= $8
+         FROM russian_matched
+         WHERE matched_terms >= required_terms
          ORDER BY relevance DESC, updated_at DESC, id DESC
          LIMIT $6
        ),
@@ -329,8 +377,8 @@ export const memoryRetrievalRepository = {
         auth.groupId,
         normalizedQuery,
         MEMORY_RETRIEVAL_CANDIDATE_LIMIT,
-        MEMORY_RETRIEVAL_MIN_SIMPLE_LEXICAL_RANK,
-        MEMORY_RETRIEVAL_MIN_RUSSIAN_MORPHOLOGY_RANK,
+        MEMORY_RETRIEVAL_MIN_SIMPLE_LEXICAL_TERM_MATCHES,
+        MEMORY_RETRIEVAL_MIN_RUSSIAN_MORPHOLOGY_TERM_MATCHES,
         vectorLiteral(queryEmbedding),
         MEMORY_EMBEDDING_MODEL_VERSION,
         MEMORY_RETRIEVAL_MIN_SEMANTIC_SIMILARITY,

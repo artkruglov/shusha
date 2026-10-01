@@ -14,9 +14,7 @@ import { embedMemoryPassages, embedMemoryQuery } from "./memory-embedding-client
 import {
   MEMORY_EMBEDDING_MODEL_VERSION,
   MEMORY_EMBEDDING_PROVIDER_BATCH_SIZE,
-  MEMORY_RETRIEVAL_MIN_RUSSIAN_MORPHOLOGY_RANK,
   MEMORY_RETRIEVAL_MIN_SEMANTIC_SIMILARITY,
-  MEMORY_RETRIEVAL_MIN_SIMPLE_LEXICAL_RANK,
 } from "./memory-config.js";
 import {
   MEMORY_RETRIEVAL_R0_BASELINE_V1,
@@ -145,15 +143,15 @@ describeEval("memory retrieval eval v1", () => {
         await embedMemoryQuery(query.text),
         EVAL_RESULT_LIMIT,
       );
-      // Every exposed attribution must carry branch-local evidence that already passed its gate.
+      // Every exposed attribution must carry branch-local evidence. The word branches gate on the
+      // number of question words the record holds, not on the rank they expose, so only the
+      // semantic gate can be checked against the score itself.
       for (const result of results) {
         if (result.evidence.simpleLexicalRank !== null) {
-          expect(result.evidence.simpleLexicalRank)
-            .toBeGreaterThanOrEqual(MEMORY_RETRIEVAL_MIN_SIMPLE_LEXICAL_RANK);
+          expect(result.evidence.simpleLexicalRank).toBeGreaterThan(0);
         }
         if (result.evidence.russianMorphologyRank !== null) {
-          expect(result.evidence.russianMorphologyRank)
-            .toBeGreaterThanOrEqual(MEMORY_RETRIEVAL_MIN_RUSSIAN_MORPHOLOGY_RANK);
+          expect(result.evidence.russianMorphologyRank).toBeGreaterThan(0);
         }
         if (result.evidence.semanticSimilarity !== null) {
           expect(result.evidence.semanticSimilarity)

@@ -11,8 +11,11 @@ async function auth(chat:"group"|"private",owner=false){
  return twoSpaceMemoryAuthorization({as:owner?f.owner:f.spouse,chat,fixture:f,spaceId:f.pairSpaceId});
 }
 async function seed(space:string,title:string){
- await database().query(`INSERT INTO shared_tasks(family_id,space_id,scope,creator_telegram_id,assignee_telegram_id,title,list_name,status)
- VALUES($1,$2,'family',$3,$4,$5,'Дела','accepted')`,[f.familyId,space,f.owner.telegramUserId,f.spouse.telegramUserId,title]);
+ // Список это проект области (миграция 161): задача ссылается на него, а не носит имя строкой.
+ const project=(await database().query(`INSERT INTO shared_tasks(family_id,space_id,scope,creator_telegram_id,assignee_telegram_id,title,status,kind)
+ VALUES($1,$2,'family',$3,$3,'Дела','accepted','project') RETURNING id`,[f.familyId,space,f.owner.telegramUserId])).rows[0].id;
+ await database().query(`INSERT INTO shared_tasks(family_id,space_id,scope,creator_telegram_id,assignee_telegram_id,title,list_name,project_id,status)
+ VALUES($1,$2,'family',$3,$4,$5,'Дела',$6,'accepted')`,[f.familyId,space,f.owner.telegramUserId,f.spouse.telegramUserId,title,project]);
 }
 (enabled?describe:describe.skip)("task read audience across shared spaces",()=>{
  beforeEach(async()=>{
@@ -41,7 +44,7 @@ async function seed(space:string,title:string){
   expect(before.lists?.map(l=>l.itemCount)).toEqual([1,1]);
   await database().query("DELETE FROM space_memberships WHERE space_id=$1 AND user_id=$2",[f.householdSpaceId,f.owner.userId]);
   const after=await tasks.execute(await auth("private",true),{action:"lists"},randomUUID());
-  expect(after.lists).toEqual([{listName:"Дела",source:"Пара",itemCount:1,unfinishedItemCount:1}]);
+  expect(after.lists).toMatchObject([{listName:"Дела",source:"Пара",itemCount:1,unfinishedItemCount:1}]);
  });
 
  it("hides removed space members and rejects their old participant reference",async()=>{

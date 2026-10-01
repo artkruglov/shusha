@@ -147,6 +147,7 @@ export function repositories() {
       observePassiveMessage: vi.fn().mockResolvedValue(null),
       prepareInteractiveTurn: vi.fn().mockResolvedValue(null),
     },
+    taskProjects: { contextBlock: vi.fn(async () => null) },
     proactiveDeliveries: {
       listPendingContext: vi.fn().mockResolvedValue(null),
     },

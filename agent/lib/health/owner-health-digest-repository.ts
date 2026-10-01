@@ -80,7 +80,7 @@ async function practicesOfWeek(
   const counter = (kind: string, field: "answered" | "sent") =>
     Number(initiative.rows.find((row) => row.kind === kind)?.[field] ?? 0);
   const tasks = await client.query<{ closed: string; ideas: string; rituals: string }>(
-    `SELECT count(*) FILTER (WHERE status = 'completed' AND updated_at >= $2::timestamptz - interval '7 days')::text AS closed,
+    `SELECT count(*) FILTER (WHERE status = 'completed' AND kind <> 'project' AND updated_at >= $2::timestamptz - interval '7 days')::text AS closed,
             count(*) FILTER (WHERE kind = 'idea' AND created_at >= $2::timestamptz - interval '7 days')::text AS ideas,
             count(*) FILTER (WHERE kind = 'ritual' AND created_at >= $2::timestamptz - interval '7 days')::text AS rituals
        FROM shared_tasks WHERE family_id = $1`,

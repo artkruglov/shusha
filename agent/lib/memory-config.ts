@@ -69,8 +69,16 @@ export const PROFILE_SELECTION_DORMANCY_MILLISECONDS = 60 * 24 * 60 * 60 * 1_000
 export const PROFILE_PROJECTION_NOTICE_LEASE_MILLISECONDS = 5 * 60 * 1_000;
 
 // Branch gates are calibrated by memory-retrieval-v1 and apply before reciprocal-rank fusion.
-export const MEMORY_RETRIEVAL_MIN_SIMPLE_LEXICAL_RANK = 0.05;
-export const MEMORY_RETRIEVAL_MIN_RUSSIAN_MORPHOLOGY_RANK = 0.05;
+// Словесные ветки считают, сколько собственных различающих слов вопроса содержит запись, и требуют
+// два из них или весь вопрос, если он из одного слова («4271»). Ранг сюда не годится: при условии
+// ИЛИ одно совпавшее слово даёт один и тот же ранг у вопроса из одного слова и из десяти. Доля
+// слов тоже не годится: на половине слов длинное многотемное сообщение перестаёт находить что-либо,
+// потому что ни одна запись не держит половину вопроса о трёх разных вещах. Два слова отделяют
+// «код домофона в подъезде» от случайного попадания «курс» в вопрос про курс валюты. Порог
+// откалиброван upstream на memory-retrieval-v3 (3a1acdb); у веток разные задачи, поэтому имена
+// раздельны, хотя сейчас число одно.
+export const MEMORY_RETRIEVAL_MIN_SIMPLE_LEXICAL_TERM_MATCHES = 2;
+export const MEMORY_RETRIEVAL_MIN_RUSSIAN_MORPHOLOGY_TERM_MATCHES = 2;
 export const MEMORY_RETRIEVAL_MIN_SEMANTIC_SIMILARITY = 0.78;
 export const MEMORY_RETRIEVAL_RRF_RANK_OFFSET = 60;
 export const MEMORY_RETRIEVAL_CONFIRMATION_BOOST = 0.001;
