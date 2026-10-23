@@ -36,6 +36,31 @@ const PER_RUN_PROJECTIONS = [
   "DELETE FROM workflow.workflow_payload_blob_refs WHERE run_id = ANY($1)",
 ] as const;
 
+/**
+ * Removes the runs' projections and, in the same transaction, the payload blobs those runs were the
+ * last to refer to: a deleted conversation leaves no text behind until a sweep. A writer touches a
+ * blob row under its lock before adding a reference, so the delete either waits for that commit and
+ * sees the fresh reference, or wins and the writer recreates the row.
+ */
+async function deleteRunProjections(client: WorkflowQueryClient, ids: readonly string[]): Promise<void> {
+  const referenced = await client.query(
+    "SELECT DISTINCT hash FROM workflow.workflow_payload_blob_refs WHERE run_id = ANY($1)",
+    [ids],
+  );
+  for (const statement of PER_RUN_PROJECTIONS) {
+    await client.query(statement, [ids]);
+  }
+  const hashes = referenced.rows.map((row) => String(row.hash));
+  if (hashes.length > 0) {
+    await client.query(
+      `DELETE FROM workflow.workflow_payload_blobs AS blob
+        WHERE blob.hash = ANY($1)
+          AND NOT EXISTS (SELECT 1 FROM workflow.workflow_payload_blob_refs AS ref WHERE ref.hash = blob.hash)`,
+      [hashes],
+    );
+  }
+}
+
 interface WorkflowQueryClient {
   query(
     text: string,
@@ -121,9 +146,7 @@ export async function deletePostgresEveSession(
     }
 
     // Public schema has no foreign keys, so remove every per-run projection before the run itself.
-    for (const statement of PER_RUN_PROJECTIONS) {
-      await client.query(statement, [ids]);
-    }
+    await deleteRunProjections(client, ids);
     if (ids.length > 1) {
       await client.query(
         "DELETE FROM workflow.workflow_runs WHERE id = ANY($1) AND id <> $2",
@@ -192,9 +215,7 @@ export async function deleteOrphanedPostgresEveRuns(client: WorkflowQueryClient)
       await client.query("COMMIT");
       return 0;
     }
-    for (const statement of PER_RUN_PROJECTIONS) {
-      await client.query(statement, [ids]);
-    }
+    await deleteRunProjections(client, ids);
     await client.query("DELETE FROM workflow.workflow_runs WHERE id = ANY($1)", [ids]);
     await client.query("COMMIT");
     return ids.length;

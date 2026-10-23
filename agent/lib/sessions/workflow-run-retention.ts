@@ -92,17 +92,19 @@ export async function pruneTerminalWorkflowRuns(
   }
   if (deleted > 0) {
     console.info(JSON.stringify({ code: "AGENT_WORKFLOW_RUNS_PRUNED", deleted, retentionDays }));
-    // Payload blobs no run refers to any more. A writer touches the blob row under its lock before
-    // adding its reference, so this delete either waits for that commit and then sees the fresh
-    // touch, or wins and the writer recreates the row; the hour is slack, not the guarantee.
-    const blobs = await client.query(
-      `DELETE FROM workflow.workflow_payload_blobs AS blob
-        WHERE blob.touched_at < now() - interval '1 hour'
-          AND NOT EXISTS (SELECT 1 FROM workflow.workflow_payload_blob_refs AS ref WHERE ref.hash = blob.hash)`,
-    );
-    if ((blobs.rowCount ?? 0) > 0) {
-      console.info(JSON.stringify({ code: "AGENT_WORKFLOW_PAYLOAD_BLOBS_PRUNED", deleted: blobs.rowCount }));
-    }
+  }
+  // Payload blobs no run refers to any more, on every pass: a session deleted on request leaves its
+  // blobs only until here even when no turn run was old enough to prune. A writer touches the blob
+  // row under its lock before adding its reference, so this delete either waits for that commit and
+  // then sees the fresh touch, or wins and the writer recreates the row; the hour is slack, not the
+  // guarantee.
+  const blobs = await client.query(
+    `DELETE FROM workflow.workflow_payload_blobs AS blob
+      WHERE blob.touched_at < now() - interval '1 hour'
+        AND NOT EXISTS (SELECT 1 FROM workflow.workflow_payload_blob_refs AS ref WHERE ref.hash = blob.hash)`,
+  );
+  if ((blobs.rowCount ?? 0) > 0) {
+    console.info(JSON.stringify({ code: "AGENT_WORKFLOW_PAYLOAD_BLOBS_PRUNED", deleted: blobs.rowCount }));
   }
   return deleted;
 }

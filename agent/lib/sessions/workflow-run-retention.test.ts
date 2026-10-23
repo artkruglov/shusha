@@ -45,7 +45,11 @@ describe("pruneTerminalWorkflowRuns", () => {
   it("skips a run that is no longer finished under the lock", async () => {
     const c = client([[{ id: "wrun_A" }], [{ status: "running" }]]);
     expect(await pruneTerminalWorkflowRuns(c)).toBe(0);
-    expect(c.query).toHaveBeenLastCalledWith("ROLLBACK");
+    const texts = c.query.mock.calls.map(([sql]) => String(sql));
+    expect(texts).toContain("ROLLBACK");
+    // The blob sweep runs on every pass, also when no run was pruned: a session deleted on request
+    // must not keep its text in blobs until some turn run grows old enough.
+    expect(texts.at(-1)).toContain("DELETE FROM workflow.workflow_payload_blobs");
   });
 
   it("rolls back and rethrows a failed deletion", async () => {
