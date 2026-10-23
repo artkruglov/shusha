@@ -10,8 +10,9 @@
  * - Disabled internal sessions persist no mounts and cannot start sandbox compute.
  * - Shell and binary file delegation with workspace mutation indexing.
  * - Authored stop and server shutdown independently stop reattachable compute.
+ * - One parsed template per process serves every session that shares its key.
  */
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,7 +21,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SandboxEngine } from "../../../services/sandbox-runner/sandbox-engine.js";
 import { createSandboxRunnerServer } from "../../../services/sandbox-runner/server.js";
-import { scopedWorkspaceRunner } from "./runner-sandbox-backend.js";
+import { resetTemplateCacheForTest, scopedWorkspaceRunner } from "./runner-sandbox-backend.js";
 
 const SESSION_ID = "wrun_01JZ8K4R0W6G73VTHX9NF2QABC";
 const BACKEND_SESSION_ID =
@@ -68,6 +69,7 @@ async function runnerUrl(engine: SandboxEngine): Promise<string> {
 }
 
 afterEach(async () => {
+  resetTemplateCacheForTest();
   await Promise.all(servers.splice(0).map((server) =>
     new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
   ));
@@ -239,5 +241,52 @@ describe("scopedWorkspaceRunner", () => {
       expect.any(AbortSignal),
     );
     await expect(restored.session.setNetworkPolicy("allow-all")).resolves.toBeUndefined();
+  });
+  it("reads a template file once per process and shares it between sessions", async () => {
+    const appRoot = await mkdtemp(join(tmpdir(), "osinara-runner-backend-"));
+    roots.push(appRoot);
+    const engine = fakeEngine();
+    const backend = scopedWorkspaceRunner({ baseUrl: await runnerUrl(engine) });
+    const templateKey = "template-shared";
+    await backend.prewarm({
+      runtimeContext: { appRoot },
+      seedFiles: [{ content: "skill", path: "$HOME/.agents/skills/example/SKILL.md" }],
+      templateKey,
+    });
+    const first = await backend.create({
+      runtimeContext: { appRoot },
+      sessionKey: BACKEND_SESSION_ID,
+      templateKey,
+      tags: { sessionId: SESSION_ID },
+    });
+    await first.useSessionFn({
+      mounts: [{ mountPoint: "personal", workspaceId: WORKSPACE_ID }],
+      sandboxSessionId: SANDBOX_SESSION_ID,
+    });
+    await first.session.run({ command: "printf first" });
+
+    // The file is immutable (its key carries the content hash); a second session must be served
+    // from the process-wide copy rather than parse the multi-megabyte JSON again.
+    await writeFile(
+      join(appRoot, ".eve", "sandbox-cache", "osinara-scoped-runner", "templates", `${templateKey}.json`),
+      "not json",
+    );
+    vi.mocked(engine.createSession).mockClear();
+    const second = await backend.create({
+      runtimeContext: { appRoot },
+      sessionKey: `${BACKEND_SESSION_ID}-second`,
+      templateKey,
+      tags: { sessionId: SESSION_ID },
+    });
+    await second.useSessionFn({
+      mounts: [{ mountPoint: "personal", workspaceId: WORKSPACE_ID }],
+      sandboxSessionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    });
+    await second.session.run({ command: "printf second" });
+    expect(engine.createSession).toHaveBeenLastCalledWith(expect.objectContaining({
+      seedFiles: [expect.objectContaining({
+        contentBase64: Buffer.from("skill").toString("base64"),
+      })],
+    }));
   });
 });
