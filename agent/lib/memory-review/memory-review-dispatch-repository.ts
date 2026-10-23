@@ -121,15 +121,46 @@ async function laneHasBatchAtCursor(client: PoolClient, lane: LaneRow): Promise<
   return (existing.rowCount ?? 0) > 0;
 }
 
-async function lockedLanes(client: PoolClient, groupOnly: boolean): Promise<LaneRow[]> {
+// Lanes that may need a batch now, found in one statement and locked without waiting.
+// Load run, 3 October 2026: locking every lane and querying each twice per minute made a turn wait
+// 30-100 s for its own lane at 20 000 chats, and replicas queued behind each other. The caller still
+// re-checks every locked lane with the exact batch rules; this only skips lanes that cannot qualify.
+async function lockedDueLanes(client: PoolClient, now: Date, groupOnly: boolean): Promise<LaneRow[]> {
   const result = await client.query<LaneRow>(
-    `SELECT lane.id, lane.conversation_id, lane.message_thread_id::text,
+    `WITH due AS (
+       SELECT lane.id
+         FROM memory_review_lanes AS lane
+         JOIN application_conversations AS conversation ON conversation.id = lane.conversation_id
+         CROSS JOIN LATERAL (
+           -- "Newest" is the last pending message by sequence, as the batch rules read it.
+           SELECT count(*)::int AS pending,
+                  (array_agg(waiting.sent_at ORDER BY waiting.sequence_id DESC))[1] AS newest_at
+             FROM (SELECT message.sent_at, message.sequence_id FROM telegram_group_messages AS message
+                    WHERE message.conversation_id = lane.conversation_id
+                      AND message.actor_kind IN ('user', 'telegram_bot')
+                      AND message.message_thread_id IS NOT DISTINCT FROM lane.message_thread_id
+                      AND message.sequence_id > lane.processed_through_sequence
+                    ORDER BY message.sequence_id LIMIT $2) AS waiting
+         ) AS stats
+        WHERE ($1::boolean = false OR conversation.telegram_group_id IS NOT NULL)
+          AND stats.pending > 0
+          AND NOT EXISTS (
+            SELECT 1 FROM memory_review_batches AS batch
+             WHERE batch.lane_id = lane.id AND batch.predecessor_sequence = lane.processed_through_sequence
+          )
+          AND (stats.pending >= $3
+            OR (stats.pending >= $4 AND stats.newest_at <= $6::timestamptz - make_interval(secs => $5 / 1000.0))
+            OR stats.newest_at <= $6::timestamptz - make_interval(secs => $7 / 1000.0))
+     )
+     SELECT lane.id, lane.conversation_id, lane.message_thread_id::text,
             lane.processed_through_sequence::text
        FROM memory_review_lanes AS lane
-       JOIN application_conversations AS conversation ON conversation.id = lane.conversation_id
-      WHERE ($1::boolean = false OR conversation.telegram_group_id IS NOT NULL)
-      ORDER BY lane.created_at, lane.id FOR UPDATE OF lane`,
-    [groupOnly],
+      WHERE lane.id IN (SELECT id FROM due)
+      ORDER BY lane.created_at, lane.id FOR UPDATE OF lane SKIP LOCKED`,
+    [groupOnly, MEMORY_REVIEW_BATCH_SIZE,
+      groupOnly ? MEMORY_REVIEW_BATCH_SIZE : MEMORY_REVIEW_IDLE_MIN_SOURCES,
+      MEMORY_REVIEW_IDLE_MIN_BATCH_SOURCES, MEMORY_REVIEW_IDLE_MILLISECONDS, now,
+      MEMORY_REVIEW_LONG_IDLE_MILLISECONDS],
   );
   return result.rows;
 }
@@ -183,9 +214,9 @@ async function precedingContext(client: PoolClient, input: {
   return result.rows.reverse().map(project);
 }
 
-async function materializeReadyBatches(client: PoolClient): Promise<void> {
+async function materializeReadyBatches(client: PoolClient, now: Date): Promise<void> {
   // This is the crash-recovery path for a committed 50th message whose inline observer did not run.
-  for (const lane of await lockedLanes(client, true)) {
+  for (const lane of await lockedDueLanes(client, now, true)) {
     if (await laneHasBatchAtCursor(client, lane)) continue;
     const sources = await pendingSources(client, lane);
     if (sources.length < MEMORY_REVIEW_BATCH_SIZE) continue;
@@ -200,9 +231,13 @@ async function materializeIdleBatches(client: PoolClient, now: Date): Promise<vo
      SELECT conversation.id, NULL, 0
        FROM application_conversations AS conversation
       WHERE conversation.scope = 'personal'
+        AND NOT EXISTS (
+          SELECT 1 FROM memory_review_lanes AS lane
+           WHERE lane.conversation_id = conversation.id AND lane.message_thread_id IS NULL
+        )
      ON CONFLICT (conversation_id, message_thread_id) DO NOTHING`,
   );
-  for (const lane of await lockedLanes(client, false)) {
+  for (const lane of await lockedDueLanes(client, now, false)) {
     if (await laneHasBatchAtCursor(client, lane)) continue;
     const sources = await pendingSources(client, lane);
     const newest = sources.at(-1);
@@ -229,7 +264,7 @@ export const memoryReviewDispatchRepository = {
     try {
       await client.query("BEGIN");
       await terminalizeStaleMemoryReviewBatches(client, input.now);
-      await materializeReadyBatches(client);
+      await materializeReadyBatches(client, input.now);
       await materializeIdleBatches(client, input.now);
       const claimed = await client.query<{
         conversation_chat_id: string; conversation_id: string; family_id: string;

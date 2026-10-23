@@ -1,5 +1,5 @@
 /** Installed by the version-pinned Workflow patch; no application data or auth enters this layer. */
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { Agent, fetch } from "undici";
 import { WorkflowInvokePayloadSchema, type Queue } from "@workflow/world";
 
@@ -30,6 +30,30 @@ export function createWorkflowHttpClient(timeoutMilliseconds: number = WORKFLOW_
       }
     },
     close: () => dispatcher.close(),
+  };
+}
+
+// The flow route lives on the agent's own listener and is reachable from the app network; the official
+// handler checks header shape but no secret (ilkruglov 3c339144, security audit 6 October 2026). The queue
+// sends the agent's internal token and the handler refuses anything else before the official one reads a byte.
+export const WORKFLOW_INTERNAL_TOKEN_HEADER = "x-osinara-internal-token";
+
+export function requireWorkflowInternalToken(): string {
+  const token = process.env.AGENT_INTERNAL_TOKEN;
+  if (!token) throw new Error("AGENT_INTERNAL_TOKEN_MISSING: Не задан внутренний токен для маршрута очереди");
+  return token;
+}
+
+export function withWorkflowInternalToken(
+  handler: (request: Request) => Promise<Response>,
+): (request: Request) => Promise<Response> {
+  return async (request) => {
+    const expected = Buffer.from(requireWorkflowInternalToken());
+    const presented = Buffer.from(request.headers.get(WORKFLOW_INTERNAL_TOKEN_HEADER) ?? "");
+    if (expected.length !== presented.length || !timingSafeEqual(expected, presented)) {
+      return new Response(null, { status: 401 });
+    }
+    return handler(request);
   };
 }
 

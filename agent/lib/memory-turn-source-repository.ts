@@ -123,7 +123,8 @@ export const memoryTurnSourceRepository = {
          FROM conversation_sessions AS app_session
          JOIN application_conversations AS conversation
            ON conversation.id = $2
-          AND conversation.family_id = app_session.family_id
+          -- A group without a family has NULL on both sides (migration 175); the group match below holds it.
+          AND conversation.family_id IS NOT DISTINCT FROM app_session.family_id
           AND conversation.scope = app_session.scope
           AND (
             (conversation.scope = 'personal'

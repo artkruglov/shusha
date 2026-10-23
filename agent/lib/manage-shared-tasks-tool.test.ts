@@ -1,4 +1,4 @@
-/** manage_shared_tasks gives the model a ready board with every list, so it never retells tasks. */
+/** manage_shared_tasks hands the board to the channel, so the model never retells tasks. */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -13,6 +13,7 @@ vi.mock("./memory-context.js", () => ({
 
 import manageSharedTasks from "./tools/manage_shared_tasks.js";
 import { takeTelegramKeepOpenMark } from "./telegram-keep-open-turns.js";
+import { takeTurnBoard } from "./telegram-turn-board.js";
 import { progressNoticeKey } from "./telegram-progress-deferral.js";
 
 const row = (title: string, listName: string) => ({
@@ -22,25 +23,45 @@ const context = { callId: "call-1", session: { id: "session-1" } } as never;
 
 describe("manage_shared_tasks list board", () => {
   beforeEach(() => mocks.execute.mockReset());
+  const withTurn = (turnId: string) => ({ callId: "call-1", session: { id: "session-b", turn: { id: turnId } } }) as never;
+  const key = (turnId: string) => progressNoticeKey("session-b", turnId);
 
-  it("returns a board of every list next to the rows", async () => {
-    mocks.execute.mockResolvedValue({ incomplete: false, nextCursor: null, tasks: [row("Написать подрядчику", "Работа"), row("Отвезти машину", "Дом")] });
+  it("hands the board to the channel, never to the model, when the person asks to see their tasks", async () => {
+    mocks.execute.mockResolvedValue({ nextCursor: null, tasks: [row("Написать подрядчику", "Работа"), row("Отвезти машину", "Дом")] });
 
-    const result = await manageSharedTasks.execute({ action: "list" } as never, context) as { board: string; tasks: unknown[] };
+    const result = await manageSharedTasks.execute({ action: "list", show: true } as never, withTurn("t-show")) as { board: string; tasks: unknown[] };
 
     expect(result.tasks).toHaveLength(2);
-    expect(result.board).toContain("<telegram-keep-open>");
-    // Ответ модели рисуется как Rich Markdown: пункт обязан быть пунктом списка, иначе секция
-    // склеится в один абзац.
-    expect(result.board).toContain("**Дом · 1**\n\n- Отвезти машину");
-    expect(result.board).toContain("**Работа · 1**\n\n- Написать подрядчику");
+    // 21 октября 2026 модель пересказала поле board сплошными строками: теперь в нём только пометка.
+    expect(result.board).not.toContain("Отвезти машину");
+    const board = takeTurnBoard(key("t-show"))!;
+    // Доска v3 отдельным сообщением: проект свёрнут в строку со следующим шагом (`task-board-rich.ts`).
+    expect(board.markdown).toContain("<details><summary>**Дом · 1** · дальше: Отвезти машину</summary>\n- Отвезти машину");
+    expect(board.markdown).not.toContain("telegram-keep-open");
+  });
+
+  it("gives no board to a read for work, such as one before closing", async () => {
+    mocks.execute.mockResolvedValue({ nextCursor: null, tasks: [row("Отвезти машину", "Дом")] });
+
+    expect(await manageSharedTasks.execute({ action: "list" } as never, withTurn("t-read"))).not.toHaveProperty("board");
+    expect(takeTurnBoard(key("t-read"))).toBeNull();
+  });
+
+  it("shows closed tasks on their own board", async () => {
+    mocks.execute.mockResolvedValue({ nextCursor: null, tasks: [{ ...row("Отвезти машину", "Дом"), status: "completed" }] });
+
+    await manageSharedTasks.execute({ action: "list", show: true, view: "done" } as never, withTurn("t-done"));
+
+    const board = takeTurnBoard(key("t-done"))!;
+    expect(board.markdown).toContain("**Сделано · 1**\n\n- Отвезти машину");
   });
 
   it("adds no board to someone else's commitments", async () => {
-    mocks.execute.mockResolvedValue({ incomplete: false, nextCursor: null, tasks: [row("Забрать посылку", "Дом")] });
+    mocks.execute.mockResolvedValue({ nextCursor: null, tasks: [row("Забрать посылку", "Дом")] });
 
-    expect(await manageSharedTasks.execute({ action: "list", view: "waiting" } as never, context))
+    expect(await manageSharedTasks.execute({ action: "list", show: true, view: "waiting" } as never, withTurn("t-wait")))
       .not.toHaveProperty("board");
+    expect(takeTurnBoard(key("t-wait"))).toBeNull();
   });
 
   it("adds no board to a change", async () => {
@@ -73,7 +94,7 @@ describe("manage_shared_tasks says where a record went", () => {
     const result = await manageSharedTasks.execute({ action: "create", title: "Купить батарейки" } as never, context) as
       { filed: string };
 
-    expect(result.filed).toContain("пока без списка");
+    expect(result.filed).not.toContain("без списка");
     expect(result).not.toHaveProperty("unsorted");
     expect(result).not.toHaveProperty("listChoices");
     expect(mocks.execute).toHaveBeenCalledTimes(1);

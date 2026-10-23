@@ -63,6 +63,27 @@ afterEach(async () => {
 });
 
 describe("sandbox runner HTTP server", () => {
+  it("answers a full runner with 503 and the capacity code and Russian message", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const engine = fakeEngine();
+    vi.mocked(engine.runProcess).mockRejectedValueOnce(new Error(
+      "AGENT_SANDBOX_RUNNER_CAPACITY_EXHAUSTED: Все песочницы сервера заняты (10 из 10). Повторите команду через минуту.",
+    ));
+    const baseUrl = await start(engine);
+
+    const response = await fetch(`${baseUrl}/v1/sessions/${SANDBOX_SESSION_ID}/processes`, {
+      body: JSON.stringify({ command: "true" }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      code: "AGENT_SANDBOX_RUNNER_CAPACITY_EXHAUSTED",
+      message: "Все песочницы сервера заняты (10 из 10). Повторите команду через минуту.",
+    });
+  });
+
   it("validates and delegates exact credentialed GWS argv", async () => {
     const engine = fakeEngine();
     const baseUrl = await start(engine);

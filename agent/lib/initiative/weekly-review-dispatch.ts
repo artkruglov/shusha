@@ -3,6 +3,7 @@
  *
  * Экспорт:
  * - `createWeeklyReviewDispatcher`: диспетчер с подменяемыми зависимостями.
+ * - `localClock`: местная дата, час и день недели в поясе человека.
  *
  * Порядок: согласие человека, воскресный вечер его дня, общее правило инициативы (выключатель,
  * тихие часы, пауза после молчания, предел суток), личное время, содержание, заявка, отправка,
@@ -32,7 +33,8 @@ export interface WeeklyReviewDispatcherDependencies {
   record(delivery: InitiativeDelivery): Promise<void>;
 }
 
-function localClock(timezone: string, now: Date): { date: string; hour: number; weekday: number } {
+/** Местная дата, час и день недели человека; тем же счётом живёт вопрос «что мешает». */
+export function localClock(timezone: string, now: Date): { date: string; hour: number; weekday: number } {
   const parts = new Intl.DateTimeFormat("en-US", {
     day: "2-digit", hour: "2-digit", hour12: false, month: "2-digit",
     timeZone: timezone, weekday: "short", year: "numeric",
@@ -50,43 +52,50 @@ export function createWeeklyReviewDispatcher(dependencies: WeeklyReviewDispatche
   return async function dispatchWeeklyReview(now = new Date()): Promise<number> {
     let sent = 0;
     for (const recipient of await dependencies.recipients()) {
-      // Выборка уже отсекает несогласных; проверка повторяется здесь, чтобы обзор не мог уйти
-      // человеку, который его не просил, из-за ошибки в одном запросе.
-      if (recipient.enabled !== true) continue;
-      const clock = localClock(recipient.settings.timezone, now);
-      if (clock.weekday !== WEEKLY_REVIEW_WEEKDAY) continue;
-      if (clock.hour < WEEKLY_REVIEW_FIRST_HOUR || clock.hour >= WEEKLY_REVIEW_LAST_HOUR) continue;
-      if (!decideInitiative(recipient.settings, recipient.state, now).allowed) continue;
-      if (await dependencies.personalTime(recipient, now) !== null) continue;
-      const text = formatWeeklyReview(await dependencies.review(recipient, now));
-      if (text === null) continue;
-      const deliveryRef = await dependencies.claim(recipient, clock.date, now);
-      if (deliveryRef === null) continue;
-      let messageId: string;
+      // До отправки ничего не ушло: сбой чтения или заявки у одного адресата пропускает только его.
       try {
-        messageId = await dependencies.send({ chatId: recipient.telegramUserId, text });
+        // Выборка уже отсекает несогласных; проверка повторяется здесь, чтобы обзор не мог уйти
+        // человеку, который его не просил, из-за ошибки в одном запросе.
+        if (recipient.enabled !== true) continue;
+        const clock = localClock(recipient.settings.timezone, now);
+        if (clock.weekday !== WEEKLY_REVIEW_WEEKDAY) continue;
+        if (clock.hour < WEEKLY_REVIEW_FIRST_HOUR || clock.hour >= WEEKLY_REVIEW_LAST_HOUR) continue;
+        if (!decideInitiative(recipient.settings, recipient.state, now).allowed) continue;
+        if (await dependencies.personalTime(recipient, now) !== null) continue;
+        const text = formatWeeklyReview(await dependencies.review(recipient, now));
+        if (text === null) continue;
+        const deliveryRef = await dependencies.claim(recipient, clock.date, now);
+        if (deliveryRef === null) continue;
+        let messageId: string;
+        try {
+          messageId = await dependencies.send({ chatId: recipient.telegramUserId, text });
+        } catch (error) {
+          const refused = error instanceof MemoryReviewOwnerAlertTransportError;
+          console.error(JSON.stringify({
+            code: refused ? "AGENT_WEEKLY_REVIEW_FAILED" : "AGENT_WEEKLY_REVIEW_AMBIGUOUS",
+            error: error instanceof Error ? error.message : String(error),
+            familyId: recipient.familyId,
+          }));
+          continue;
+        }
+        sent += 1;
+        console.info(JSON.stringify({ code: "AGENT_WEEKLY_REVIEW_SENT", familyId: recipient.familyId }));
+        try {
+          await dependencies.record({
+            at: now, deliveryRef, familyId: recipient.familyId, messageId, sourceKind: "weekly_review",
+            telegramUserId: recipient.telegramUserId, text, userId: recipient.userId,
+          });
+        } catch (error) {
+          console.error(JSON.stringify({
+            code: "AGENT_INITIATIVE_DELIVERY_RECORD_FAILED",
+            error: error instanceof Error ? error.message : String(error),
+            familyId: recipient.familyId,
+            sourceKind: "weekly_review",
+          }));
+        }
       } catch (error) {
-        const refused = error instanceof MemoryReviewOwnerAlertTransportError;
         console.error(JSON.stringify({
-          code: refused ? "AGENT_WEEKLY_REVIEW_FAILED" : "AGENT_WEEKLY_REVIEW_AMBIGUOUS",
-          error: error instanceof Error ? error.message : String(error),
-          familyId: recipient.familyId,
-        }));
-        continue;
-      }
-      sent += 1;
-      console.info(JSON.stringify({ code: "AGENT_WEEKLY_REVIEW_SENT", familyId: recipient.familyId }));
-      try {
-        await dependencies.record({
-          at: now, deliveryRef, familyId: recipient.familyId, messageId, sourceKind: "weekly_review",
-          telegramUserId: recipient.telegramUserId, text, userId: recipient.userId,
-        });
-      } catch (error) {
-        console.error(JSON.stringify({
-          code: "AGENT_INITIATIVE_DELIVERY_RECORD_FAILED",
-          error: error instanceof Error ? error.message : String(error),
-          familyId: recipient.familyId,
-          sourceKind: "weekly_review",
+          code: "AGENT_WEEKLY_REVIEW_FAILED", error: error instanceof Error ? error.message : String(error), familyId: recipient.familyId,
         }));
       }
     }

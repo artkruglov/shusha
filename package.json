@@ -1,6 +1,6 @@
 {
   "name": "osinara-family-agent",
-  "version": "0.21.0",
+  "version": "0.22.0",
   "private": true,
   "type": "module",
   "imports": {
@@ -55,7 +55,7 @@
     "pg": "8.22.0",
     "tar-stream": "3.2.0",
     "tsx": "4.23.0",
-    "undici": "8.9.0",
+    "undici": "8.11.2",
     "zod": "4.4.3"
   },
   "devDependencies": {
@@ -72,6 +72,8 @@
     "node": "24.x"
   },
   "overrides": {
-    "ai": "7.0.60"
+    "ai": "7.0.60",
+    "undici@^7.0.0": "7.30.0",
+    "undici@^8.0.0": "8.11.2"
   }
 }

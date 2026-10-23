@@ -19,8 +19,9 @@ import {
 export const APPROVAL_TIMEOUT_ROUTE = "/internal/hitl-approval-timeout";
 export const APPROVAL_TIMEOUT_TOKEN_HEADER = "x-osinara-internal-token";
 
+/** Guards internal routes; separate from the webhook secret, which Telegram also holds. */
 export function requireInternalToken(): string {
-  const token = process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN;
+  const token = process.env.AGENT_INTERNAL_TOKEN;
   if (!token) {
     throw new Error(
       "AGENT_INTERNAL_TOKEN_MISSING: Не задан внутренний токен для служебных маршрутов агента",

@@ -5,6 +5,8 @@ const DEFAULT_NAME = "Шуша";
 // Case forms the bot answers to when TELEGRAM_AGENT_ALIASES is empty.
 const KNOWN_ALIASES: Readonly<Record<string, readonly string[]>> = {
   "шуша": ["Шуши", "Шуше", "Шушу", "Шушей", "Шушею", "Shusha"],
+  // The bot moves to Юна (@yuna_agent): «Шуша» is someone else's trademark (21 October 2026).
+  "юна": ["Юны", "Юне", "Юну", "Юной", "Юною", "Yuna"],
   // The project was called Хомка until 1 October 2026: an installation that still names itself so
   // keeps the name set it had.
   "хомка": ["Хомки", "Хомке", "Хомку", "Хомкой", "Хомкою", "Homka", "Khomka"],
@@ -14,6 +16,20 @@ const KNOWN_ALIASES: Readonly<Record<string, readonly string[]>> = {
     "Асинара", "Асинары", "Асинаре", "Асинару", "Асинарой", "Сена", "Osinara", "Asinara",
   ],
 };
+/** The name in each Russian case, for text the code writes («спросить Юну», «с Юной»). */
+export interface TelegramAgentNameCases {
+  readonly nominative: string;
+  readonly genitive: string;
+  readonly dative: string;
+  readonly accusative: string;
+  readonly instrumental: string;
+  readonly prepositional: string;
+}
+// [genitive, dative, accusative, instrumental, prepositional]; a name not listed keeps its nominative in every case.
+const KNOWN_CASES: Readonly<Record<string, readonly [string, string, string, string, string]>> = {
+  "шуша": ["Шуши", "Шуше", "Шушу", "Шушей", "Шуше"],
+  "юна": ["Юны", "Юне", "Юну", "Юной", "Юне"],
+};
 const nameSchema = z.string().trim().min(1).max(40)
   .regex(/^[\p{L}][\p{L}\p{M}\p{N} -]*$/u);
 const aliasesSchema = z.array(nameSchema).max(32);
@@ -21,6 +37,7 @@ const aliasesSchema = z.array(nameSchema).max(32);
 export interface TelegramAgentIdentity {
   readonly name: string;
   readonly aliases: readonly string[];
+  readonly cases: TelegramAgentNameCases;
 }
 
 /** Empty environment values use defaults; an explicit [] disables additional names. */
@@ -38,9 +55,14 @@ export function readTelegramAgentIdentity(
   }
   const aliases = aliasesSchema.safeParse(aliasesInput);
   if (!name.success || !aliases.success) throw invalidIdentity();
+  const nominative = name.data.normalize("NFC");
+  const [genitive, dative, accusative, instrumental, prepositional] =
+    KNOWN_CASES[nominative.toLowerCase()] ?? Array<string>(5).fill(nominative);
   return {
-    name: name.data.normalize("NFC"),
+    name: nominative,
     aliases: [...new Set(aliases.data.map((alias) => alias.normalize("NFC")))],
+    cases: { nominative, genitive: genitive!, dative: dative!, accusative: accusative!, instrumental: instrumental!,
+      prepositional: prepositional! },
   };
 }
 

@@ -41,6 +41,28 @@ suite("operator reconciliation of verified group migration", () => {
     expect((await database().query("SELECT count(*)::int AS count FROM telegram_group_migrations")).rows[0].count).toBe(1);
   });
 
+  // A group without a family (migration 175) moves too, and its month's spend follows the new chat id.
+  it("moves a group without a family with its spend and budget notice", async () => {
+    await database().query("DELETE FROM telegram_groups WHERE family_id IS NULL");
+    await database().query("DELETE FROM model_usage_events WHERE familyless_chat_id IN ('-123', '-100456')");
+    await database().query("DELETE FROM familyless_group_budget_notices WHERE telegram_chat_id IN ('-123', '-100456')");
+    await fixture();
+    await database().query("DELETE FROM families WHERE name = 'migration'");
+    const groupId = (await database().query(`INSERT INTO telegram_groups(family_id,telegram_chat_id,title,type,message_mode,
+        enabled_by_telegram_user_id,monthly_budget_usd)
+      VALUES(NULL,'-123','Free','external','addressed_only','777',1) RETURNING id`)).rows[0].id;
+    await database().query(`INSERT INTO model_usage_events(model_id,cache_hit_tokens,cache_miss_tokens,output_tokens,cost_usd,familyless_chat_id)
+      VALUES('deepseek-v4-flash',0,0,0,0.5,'-123')`);
+    await database().query("INSERT INTO familyless_group_budget_notices(telegram_chat_id,month) VALUES('-123','2026-10-01')");
+    await expect(reconcileVerifiedGroupMigration("901")).resolves.toEqual({ groupId, replayed: false });
+    await expect(telegramRepository.findGroup("-100456", "supergroup")).resolves.toMatchObject({ familyId: null, groupId });
+    expect((await database().query("SELECT count(*)::int AS n FROM model_usage_events WHERE familyless_chat_id='-100456'")).rows[0].n).toBe(1);
+    expect((await database().query("SELECT telegram_chat_id FROM familyless_group_budget_notices WHERE telegram_chat_id IN ('-123','-100456')")).rows)
+      .toEqual([{ telegram_chat_id: "-100456" }]);
+    expect((await database().query("SELECT count(*)::int AS n FROM audit_events WHERE group_id=$1", [groupId])).rows[0].n).toBe(1);
+    await database().query("DELETE FROM telegram_groups WHERE id=$1", [groupId]);
+  });
+
   it("keeps a group whose chat type was already learned reachable at the supergroup address", async () => {
     const { groupId } = await fixture();
     await expect(telegramRepository.findGroup("-123", "group")).resolves.toMatchObject({ groupId });

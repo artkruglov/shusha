@@ -32,8 +32,10 @@ export default defineHook({
       });
     },
     "step.completed"(event, ctx) {
+      const familyId = ctx.session.auth.current?.attributes?.familyId;
       console.info(formatStepUsageLog(event, {
         channelKind: ctx.channel.kind,
+        ...(typeof familyId === "string" ? { familyId } : {}),
         sessionId: ctx.session.id,
       }));
     },

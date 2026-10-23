@@ -51,10 +51,10 @@ export interface ApprovalAuthRow {
  * Policy attributes (role, scopes, group, allowlist, identity) are never taken from here.
  */
 export const RETAINED_TURN_ATTRIBUTES = [
-  "memoryReviewBatchId", "memoryReviewMode", "memoryReviewSourceEntryIds", "proactiveDeliveryCursor", "sandboxSessionId",
+  "memoryReviewBatchId", "memoryReviewMode", "osinaraTelegramUpdateId", "memoryReviewSourceEntryIds", "proactiveDeliveryCursor", "sandboxSessionId",
   "telegramConversationId", "telegramForumTopicId", "telegramMessageThreadId", "telegramProfileMentionUserIds",
   "telegramProfileReplyTimelineSequence", "telegramProfileReplyUserId", "telegramReplyToMessageId", "telegramTimelineEntryId",
-  "telegramTimelineOmittedBeforeSequence", "telegramTimelineSequence", "telegramTimelineVisibleEntryIds", "telegramTurnStartedAt",
+  "telegramTimelineOmittedBeforeSequence", "telegramTimelineSequence", "telegramTimelineVisibleEntryIds", "telegramTurnInterjectionMarker", "telegramTurnStartedAt",
 ] as const;
 
 export function retainTurnAttributes(attributes: Record<string, unknown> | undefined): Record<string, unknown> {

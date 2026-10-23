@@ -3,7 +3,7 @@
  *
  * Constructs covered:
  * - A call is priced by DeepSeek's cache-hit, cache-miss and output rates, doubled in peak hours.
- * - Unknown models have no price instead of a guessed one.
+ * - Unknown models have no price instead of a guessed one; searches cost from 1 November 2026.
  * - Digest lines: daily spend in dollars and the balance, a warning only when it is low or blocked.
  */
 import { describe, expect, it } from "vitest";
@@ -30,7 +30,15 @@ describe("model spend", () => {
     expect(modelCallCostUsd("deepseek-v4-flash", usage, new Date("2026-09-14T12:00:00Z"))).toBeCloseTo(0.003 + 0.15 + 0.6, 9);
     expect(modelCallCostUsd("deepseek-v4.1-flash-expires-on-0910", usage, new Date("2026-09-14T07:00:00Z")))
       .toBeCloseTo(0.006 + 0.3 + 1.2, 9);
+    expect(modelCallCostUsd("deepseek-flash", usage, new Date("2026-10-17T12:00:00Z"))).toBeCloseTo(0.003 + 0.15 + 0.6, 9);
     expect(modelCallCostUsd("some-other-model", usage, new Date("2026-09-14T12:00:00Z"))).toBeNull();
+    expect(modelCallCostUsd("deepseek-flasher", usage, new Date("2026-09-14T12:00:00Z"))).toBeNull();
+  });
+
+  it("adds server-side searches once DeepSeek bills them, without the peak multiplier", () => {
+    const usage = { cacheHitTokens: 0, cacheMissTokens: 0, outputTokens: 0, webSearchCalls: 4 };
+    expect(modelCallCostUsd("deepseek-flash", usage, new Date("2026-10-31T15:59:59Z"))).toBe(0);
+    expect(modelCallCostUsd("deepseek-flash", usage, new Date("2026-11-02T07:00:00Z"))).toBeCloseTo(0.003, 9);
   });
 
   it("describes the day's spend only when the model was called", () => {

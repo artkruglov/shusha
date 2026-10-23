@@ -4,6 +4,13 @@
  * Exports:
  * - `executeSandboxProcess`: runs one command, collects bounded output, and removes orphaned compute.
  * - `processTimedOut`: whether a result carries the runner's timeout marker.
+ * - `SANDBOX_SYSTEM_PATH`: the image's own directories, for tools the runner runs itself.
+ *
+ * Key construct:
+ * - Docker resolves an exec's command with the container's PATH, which starts with
+ *   `/tools/<scope>/npm/bin`, writable by the model: a planted `timeout` used to replace the
+ *   runner's own and every command lost its time limit (Codex review of ilkruglov 4d6f1ea3). The
+ *   wrapper is named by absolute path; the command itself still sees the session's PATH.
  */
 import { randomUUID } from "node:crypto";
 import { PassThrough, type Duplex } from "node:stream";
@@ -19,6 +26,7 @@ import {
 import { collectLimitedStream } from "./docker-sandbox-files.js";
 
 const PROCESS_KILL_GRACE_SECONDS = 5;
+export const SANDBOX_SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 export const PROCESS_TIMED_OUT_MARKER = "AGENT_SANDBOX_RUNNER_PROCESS_TIMED_OUT";
 
 export function processTimedOut(result: Pick<SandboxRunnerProcessResponse, "stderr">): boolean {
@@ -65,11 +73,11 @@ export async function executeSandboxProcess(
     AttachStdout: true,
     // TERM lets cooperative children clean up; KILL guarantees the process group cannot outlive grace.
     Cmd: [
-      "timeout",
+      "/usr/bin/timeout",
       "--signal=TERM",
       `--kill-after=${PROCESS_KILL_GRACE_SECONDS}s`,
       String(timeoutSeconds),
-      "bash",
+      "/bin/bash",
       "-c",
       request.command,
     ],
@@ -77,7 +85,8 @@ export async function executeSandboxProcess(
       ? Object.entries(request.environment).map(([name, value]) => `${name}=${value}`)
       : undefined,
     Tty: false,
-    WorkingDir: request.workingDirectory ?? "/workspace",
+    // Absent: the container's own working directory, its main writable workspace.
+    WorkingDir: request.workingDirectory,
   });
   const startedAt = Date.now();
 

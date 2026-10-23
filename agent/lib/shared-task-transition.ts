@@ -6,6 +6,7 @@ import type { MemoryAuthorization, MemoryScope } from "./memory-context.js";
 import { nextSharedTaskStatus, type SharedTaskInput } from "./shared-tasks.js";
 import { denied, readTasks, type TaskRow } from "./shared-task-access.js";
 import { recordTaskVersion } from "./shared-task-handover.js";
+import { reviveTaskProject } from "./projects/project-moves.js";
 import { advanceRecurringTask } from "./shared-task-recurrence.js";
 import { requireTaskRecordAction, taskSpaceAction } from "./spaces/task-space-action.js";
 
@@ -17,7 +18,9 @@ export type StatusAction = typeof STATUS_ACTIONS[number];
 export async function lockTaskForChange(
   client: PoolClient, auth: MemoryAuthorization, scope: MemoryScope, input: SharedTaskInput,
 ): Promise<TaskRow> {
-  const {rows} = await readTasks(client, auth, scope, input.id!);
+  // The one offered a handover may answer it; anything else waits until they took the task.
+  const answering = input.action === "accept_transfer" || input.action === "decline_transfer";
+  const {rows} = await readTasks(client, auth, scope, input.id!, undefined, undefined, answering);
   if (!rows[0]) denied();
   const expectedVersion=await requireTaskRecordAction(client,auth,input.id!,taskSpaceAction(input));
   const locked = await client.query<TaskRow>(`SELECT *,due_on::text,recurrence_anchor_on::text AS recurrence_anchor_on
@@ -52,7 +55,9 @@ export async function applyTaskStatus(
         pending_assignee_telegram_id = CASE WHEN $4::boolean THEN NULL ELSE pending_assignee_telegram_id END,
         transfer_requested_at = CASE WHEN $4::boolean THEN NULL ELSE transfer_requested_at END
       WHERE id=$1`,
-    [task.id, status, action === "claim" || adoptedUnowned ? auth.telegramUserId : null,
+    // Снятое автором ничьё дело тоже становится его: у закрытой записи исполнитель есть всегда
+    // (`shared_tasks_open_has_no_assignee`), и вернуть её в работу сможет он.
+    [task.id, status, action === "claim" || adoptedUnowned || (task.status === "open" && action === "cancel") ? auth.telegramUserId : null,
       ["cancelled", "completed", "declined"].includes(status)],
   );
   await recordTaskVersion(client, task, action, auth.telegramUserId!);
@@ -84,6 +89,7 @@ export async function applyTaskStatus(
   // старый сигнал закрытого дела остаётся на паузе (история T05), а будущий иначе молчал бы
   // навсегда, хотя человек считает, что напоминание осталось.
   if (action === "reopen") {
+    await reviveTaskProject(client, task, auth.telegramUserId!);
     await client.query(
       `UPDATE reminders SET status='active',updated_at=now()
         WHERE shared_task_id=$1 AND status='paused' AND available_at > now()`,

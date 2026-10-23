@@ -46,6 +46,8 @@ function recipientOf(person: TwoSpaceFixture["owner"]): DailyOverviewRecipient {
   return {
     familyId: fixture.familyId,
     firstEver: false,
+    overviewEnabled: true,
+    overviewHour: null,
     settings: { dailyLimit: 3, enabled: true, quietEnd: null, quietStart: null, timezone: "UTC" },
     state: { sentToday: 0, unanswered: 0 },
     telegramUserId: person.telegramUserId,

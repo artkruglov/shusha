@@ -8,7 +8,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { silentGroupTurnRecord, completedTelegramOutput } from "./telegram-progress.js";
+import { completedTelegramOutput, isDeliberateSilence, silentGroupTurnRecord } from "./telegram-progress.js";
 
 describe("completedTelegramOutput", () => {
   afterEach(() => vi.restoreAllMocks());
@@ -170,5 +170,15 @@ describe("silent group turn record", () => {
     expect(silentGroupTurnRecord({ finishReason: "stop" }, { groupType: undefined })).toBeNull();
     expect(silentGroupTurnRecord({ finishReason: "tool-calls" }, { telegramGroupTurnTrigger: "mention" })).toBeNull();
     expect(silentGroupTurnRecord({ finishReason: "stop" }, undefined)).toBeNull();
+  });
+});
+
+describe("isDeliberateSilence", () => {
+  it("is true only for a final answer that is the silence directive and nothing visible", () => {
+    expect(isDeliberateSilence({ finishReason: "stop", message: "<telegram-silent>" })).toBe(true);
+    expect(isDeliberateSilence({ finishReason: "stop", message: "<telegram-silent>\n<memory-used></memory-used>" })).toBe(true);
+    expect(isDeliberateSilence({ finishReason: "stop", message: "" })).toBe(false);
+    expect(isDeliberateSilence({ finishReason: "stop", message: "<telegram-silent> Всё в порядке" })).toBe(false);
+    expect(isDeliberateSilence({ finishReason: "tool-calls", message: "<telegram-silent>" })).toBe(false);
   });
 });

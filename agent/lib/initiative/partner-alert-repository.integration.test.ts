@@ -1,8 +1,8 @@
 /**
  * Данные уведомлений на настоящей базе.
  *
- * Проверяется: ждущее ответа находится по всем четырём источникам; про одно и то же не пишем
- * дважды, кроме одного повтора через неделю; второе уведомление в те же сутки не уходит; человек
+ * Проверяется: ждущее ответа находится по всем четырём источникам; про одно и то же напоминаем каждые три
+ * дня, пока нет ответа, и умолкаем после ответа; второе уведомление в те же сутки не уходит; человек
  * без личной сессии не адресат.
  */
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
@@ -89,7 +89,7 @@ dbDescribe("partner alerts", () => {
     expect(waiting.pending).toBe(0);
   });
 
-  it("never repeats an item twice, except once after a week", async () => {
+  it("reminds of an unanswered item every three days and stops once it is answered (21 October 2026)", async () => {
     await privateChat(fixture.spouse);
     await database().query(
       `INSERT INTO shared_tasks(family_id, scope, creator_telegram_id, assignee_telegram_id, title, status, kind)
@@ -101,14 +101,19 @@ dbDescribe("partner alerts", () => {
     const ref = await partnerAlertRepository.claim(recipient, "2026-09-23", first.items, NOW);
     expect(ref).toMatch(/^[0-9a-f-]{36}$/u);
 
-    // В тот же день и на следующий пункт молчит, через неделю напоминает один раз и умолкает.
+    // В тот же день и через два дня молчит, на четвёртый напоминает; снова через три дня после напоминания.
     expect((await partnerAlertRepository.pending(recipient, NOW)).items).toEqual([]);
-    const later = new Date(NOW.getTime() + 8 * DAY);
+    expect((await partnerAlertRepository.pending(recipient, new Date(NOW.getTime() + 2 * DAY))).items).toEqual([]);
+    const later = new Date(NOW.getTime() + 4 * DAY);
     const again = await partnerAlertRepository.pending(recipient, later);
     expect(again.items).toEqual([expect.objectContaining({ repeated: true })]);
-    await partnerAlertRepository.claim(recipient, "2026-10-01", again.items, later);
-    expect((await partnerAlertRepository.pending(recipient, new Date(NOW.getTime() + 30 * DAY))).items)
-      .toEqual([]);
+    await partnerAlertRepository.claim(recipient, "2026-09-27", again.items, later);
+    expect((await partnerAlertRepository.pending(recipient, new Date(later.getTime() + 2 * DAY))).items).toEqual([]);
+    const third = new Date(later.getTime() + 4 * DAY);
+    expect((await partnerAlertRepository.pending(recipient, third)).items).toEqual([expect.objectContaining({ repeated: true })]);
+    // Ответ снимает напоминания: дело больше не ждёт.
+    await database().query("UPDATE shared_tasks SET status = 'accepted' WHERE title = 'Забрать посылку'");
+    expect((await partnerAlertRepository.pending(recipient, new Date(third.getTime() + 30 * DAY))).items).toEqual([]);
   });
 
   it("gives one claim a day", async () => {

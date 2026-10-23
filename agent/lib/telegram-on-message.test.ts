@@ -299,9 +299,8 @@ describe("createTelegramMessageHandler", () => {
 
     expect(result).toBeNull();
     expect(repository.family.claimInvitation).not.toHaveBeenCalled();
-    expect(sendMessage).toHaveBeenCalledWith(
-      "AGENT_ACCESS_DENIED: У вас нет доступа. Попросите владельца отправить приглашение.",
-    );
+    expect(sendMessage).toHaveBeenCalledWith(expect.stringContaining("закрытом кругу"));
+    expect(repository.signup.joinWaitlist).toHaveBeenCalled();
   });
 
   it("consumes an invitation command from an existing member before model dispatch", async () => {

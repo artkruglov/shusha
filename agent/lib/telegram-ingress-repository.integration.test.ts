@@ -2,7 +2,8 @@
  * PostgreSQL durable Telegram ingress integration tests.
  *
  * Constructs covered:
- * - `telegramIngressRepository.enqueue`: idempotent update ingestion with conflict detection.
+ * - `telegramIngressRepository.enqueue`: idempotent update ingestion with conflict detection; a
+ *   rich post stored or redelivered with its file cut out is the same update either way.
  * - `telegramIngressRepository.acceptMedia`: trust-zone decisions and tombstones are update-id atomic.
  * - Receipt/drain policy revocation: live external policy prevents a previously accepted download.
  * - `telegramIngressRepository.claimNext`: per-continuation FIFO with independent queue progress.
@@ -84,6 +85,76 @@ describeWithDatabase("telegramIngressRepository", () => {
       "SELECT count(*)::text AS count FROM telegram_ingress_updates",
     );
     expect(count.rows[0]?.count).toBe("1");
+  });
+
+  it("leaves no tombstone for a refused photo whose post still has text, so the text is queued", async () => {
+    const family = await database().query<{ id: string }>(
+      "INSERT INTO families (name) VALUES ('Ingress rich family') RETURNING id",
+    );
+    await database().query(
+      `INSERT INTO telegram_groups
+         (family_id, telegram_chat_id, title, type, message_mode, tool_allowlist)
+       VALUES ($1, '-100-rich', 'Rich group', 'external', 'addressed_only', '{}')`,
+      [family.rows[0]!.id],
+    );
+    const update = updateInput("1003", "telegram:group:-100-rich", "пост канала с фото");
+
+    await expect(telegramIngressRepository.acceptMedia({
+      chatId: "-100-rich", chatType: "supergroup", mediaKind: "native_photo", textFallback: true, updateId: update.updateId,
+    })).resolves.toBe(false);
+    await expect(telegramIngressRepository.enqueue(update)).resolves.toBe("inserted");
+    const ignored = await database().query("SELECT 1 FROM telegram_ingress_ignored_updates WHERE update_id = $1", [update.updateId]);
+    expect(ignored.rowCount).toBe(0);
+  });
+
+  it("treats a redelivered rich post with its file as the duplicate of its stored text-only shape", async () => {
+    const blocks = [{ photo: [{ file_id: "p-redelivered", file_unique_id: "u" }], type: "photo" }, { text: "пост", type: "paragraph" }];
+    const withFile = { ...updateInput("1004", "telegram:group:-100-rich-again", "пост"), payload: { message: { chat: { id: -100 }, rich_message: { blocks } }, update_id: 1004 } };
+    const textOnly = { ...withFile, payload: { message: { chat: { id: -100 }, rich_message: { blocks: [{ text: "пост", type: "paragraph" }] } }, update_id: 1004 } };
+
+    await expect(telegramIngressRepository.enqueue(textOnly)).resolves.toBe("inserted");
+    await expect(telegramIngressRepository.enqueue(withFile)).resolves.toBe("duplicate");
+    await expect(telegramIngressRepository.enqueue({ ...withFile, payload: { ...withFile.payload, update_id: 1005 } })).rejects.toMatchObject({ code: "AGENT_TELEGRAM_UPDATE_CONFLICT" });
+  });
+
+  // The grant was removed between the first delivery (stored with its file) and Telegram's
+  // redelivery, which the ingress now stores without the file: the same update, not a conflict.
+  it("treats a stripped redelivery of a rich post stored with its file as the duplicate", async () => {
+    const blocks = [{ photo: [{ file_id: "p-granted", file_unique_id: "u" }], type: "photo" }, { text: "пост", type: "paragraph" }];
+    const withFile = { ...updateInput("1006", "telegram:group:-100-rich-revoked", "пост"), payload: { message: { chat: { id: -100 }, rich_message: { blocks } }, update_id: 1006 } };
+    const textOnly = { ...withFile, payload: { message: { chat: { id: -100 }, rich_message: { blocks: [{ text: "пост", type: "paragraph" }] } }, update_id: 1006 } };
+    const otherFile = { ...withFile, payload: { message: { chat: { id: -100 }, rich_message: { blocks: [{ photo: [{ file_id: "p-other" }], type: "photo" }, blocks[1]] } }, update_id: 1006 } };
+
+    await expect(telegramIngressRepository.enqueue(withFile)).resolves.toBe("inserted");
+    await expect(telegramIngressRepository.enqueue(textOnly)).resolves.toBe("duplicate");
+    await expect(telegramIngressRepository.enqueue(otherFile)).rejects.toMatchObject({ code: "AGENT_TELEGRAM_UPDATE_CONFLICT" });
+    const stored = await database().query<{ payload: unknown }>("SELECT payload FROM telegram_ingress_updates WHERE update_id = 1006");
+    expect(JSON.stringify(stored.rows[0]?.payload)).toContain("p-granted");
+  });
+
+  // Migration 175: an external group may live without a family (family_id NULL).
+  it("decides the media of a familyless external group by its own grant, with the text fallback", async () => {
+    await database().query(
+      `INSERT INTO telegram_groups
+         (family_id, telegram_chat_id, title, type, message_mode, tool_allowlist,
+          enabled_by_telegram_user_id, monthly_budget_usd)
+       VALUES (NULL, '-100-rich-familyless', 'Familyless rich', 'external', 'addressed_only', '{}', '424242', 5),
+              (NULL, '-100-rich-familyless-granted', 'Familyless granted', 'external', 'addressed_only',
+               '{inspect_workspace_image}', '424243', 5)`,
+    );
+    const media = (chatId: string, updateId: string, textFallback: boolean) => telegramIngressRepository.acceptMedia({
+      chatId, chatType: "supergroup", mediaKind: "native_photo", textFallback, updateId,
+    });
+    const tombstoned = async (updateId: string) =>
+      (await database().query("SELECT 1 FROM telegram_ingress_ignored_updates WHERE update_id = $1", [updateId])).rowCount;
+
+    await expect(media("-100-rich-familyless", "1007", true)).resolves.toBe(false);
+    expect(await tombstoned("1007")).toBe(0);
+    await expect(telegramIngressRepository.enqueue(updateInput("1007", "telegram:group:-100-rich-familyless", "пост"))).resolves.toBe("inserted");
+    await expect(media("-100-rich-familyless", "1008", false)).resolves.toBe(false);
+    expect(await tombstoned("1008")).toBe(1);
+    await expect(media("-100-rich-familyless-granted", "1009", true)).resolves.toBe(true);
+    expect(await tombstoned("1009")).toBe(0);
   });
 
   it("keeps a rejected update tombstoned after the group becomes family-private", async () => {
@@ -315,6 +386,28 @@ describeWithDatabase("telegramIngressRepository", () => {
     await telegramIngressRepository.complete(head!.updateId, head!.leaseToken);
     await expect(telegramIngressRepository.claimNext(LEASE_MILLISECONDS, { callbackOnly: true }))
       .resolves.toMatchObject({ updateId: "2102" });
+  });
+
+  it("hands a guest message to the callback pool", async () => {
+    await telegramIngressRepository.enqueue(updateInput("2151", "telegram:private:101", "длинный ход"));
+    await telegramIngressRepository.enqueue({
+      continuationKey: "telegram:guest:q-1",
+      payload: {
+        guest_message: {
+          chat: { id: 501, type: "private" },
+          date: 1,
+          from: { first_name: "Анна", id: 101, is_bot: false },
+          guest_query_id: "q-1",
+          message_id: 9,
+          text: "@bot привет",
+        },
+        update_id: 2152,
+      },
+      updateId: "2152",
+    });
+
+    await expect(telegramIngressRepository.claimNext(LEASE_MILLISECONDS, { callbackOnly: true }))
+      .resolves.toMatchObject({ updateId: "2152" });
   });
 
   it("lists the pending tail behind a claimed head without leasing it", async () => {

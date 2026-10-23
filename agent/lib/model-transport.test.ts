@@ -185,6 +185,46 @@ describe("createConfiguredLanguageModel", () => {
     expect(request?.headers.get("authorization")).toBe("Bearer model-secret");
   });
 
+  it("logs the provider's reason when DeepSeek rejects the request format", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const model = createConfiguredLanguageModel({
+      apiKey: "model-secret",
+      fetch: async () => new Response(JSON.stringify({ error: { message: "Invalid schema for function 'x': schema must be a JSON Schema of 'type: \"object\"'.", type: "invalid_request_error" } }), {
+        headers: { "content-type": "application/json" },
+        status: 400,
+      }),
+      maxOutputTokens: 1_000,
+      modelId: "deepseek-flash",
+      transport: { baseUrl: "https://api.deepseek.com", protocol: "deepseek-responses", reasoning: { effort: "low" } },
+    });
+
+    // 25 сентября 2026: three hours of «отклонил формат запроса» hid a rejected tool schema.
+    await expect(model.doGenerate({ prompt: [{ content: [{ text: "Проверка", type: "text" }], role: "user" }] } as LanguageModelV4CallOptions))
+      .rejects.toMatchObject({ code: "AGENT_MODEL_REQUEST_INVALID" });
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("schema must be a JSON Schema"));
+    error.mockRestore();
+  });
+
+  it("gives a request over the model's window its own code", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const model = createConfiguredLanguageModel({
+      apiKey: "model-secret",
+      fetch: async () => new Response(JSON.stringify({ error: { message: "This model's maximum context length is 131072 tokens. However, you requested 140211 tokens.", type: "invalid_request_error" } }), {
+        headers: { "content-type": "application/json" },
+        status: 400,
+      }),
+      maxOutputTokens: 1_000,
+      modelId: "deepseek-flash",
+      transport: { baseUrl: "https://api.deepseek.com", protocol: "deepseek-responses", reasoning: { effort: "low" } },
+    });
+
+    // Repeating the same history cannot help, so it must not hide behind «отклонил формат».
+    await expect(model.doGenerate({ prompt: [{ content: [{ text: "Проверка", type: "text" }], role: "user" }] } as LanguageModelV4CallOptions))
+      .rejects.toMatchObject({ code: "AGENT_MODEL_CONTEXT_OVERFLOW" });
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("AGENT_MODEL_CONTEXT_OVERFLOW"));
+    error.mockRestore();
+  });
+
   it("retries once with the fallback model when DeepSeek no longer knows the configured id", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const bodies: string[] = [];

@@ -14,13 +14,17 @@
  *   completion leaves a row without `sent_at`, which the next tick releases and retries.
  */
 import { database } from "../database.js";
+import { withSystemDatabaseContext } from "../database-context.js";
 import type { QuietHours } from "../initiative/quiet-hours.js";
 import { modelUsageRepository } from "./model-usage-repository.js";
 import type { ModelSpendSummary } from "./model-spend.js";
+import { type BackupHealth, readBackupHealth } from "./backup-health.js";
 import { readStorageHeadroom, type StorageHeadroom } from "./storage-headroom.js";
 
 export interface OwnerHealthReport {
   alertDeliveryFailures: number;
+  /** Последний прогон `backup.py` на хосте: копия описывает установку, не семью. */
+  backups: BackupHealth;
   ingressFailures: { codes: { code: string; count: number }[]; count: number };
   /**
    * Дайджест уходит в личный чат владельца, то есть в его личную область, поэтому лейны приходят
@@ -110,8 +114,13 @@ async function practicesOfWeek(
 }
 
 export const ownerHealthDigestRepository = {
-  async recipients(): Promise<OwnerHealthRecipient[]> {
-    const result = await database().query<{
+  /**
+   * Дайджест и тревога баланса описывают установку целиком (упавшие обновления, расход, баланс DeepSeek), а не семью,
+   * поэтому получает их один человек: владелец самой ранней семьи, то есть оператор. Владелец второй семьи в той же
+   * установке (код `--new-family`) их не видит. `familyId` задаёт оператора явно (тесты, смена оператора).
+   */
+  async recipients(options: { familyId?: string } = {}): Promise<OwnerHealthRecipient[]> {
+    const result = await withSystemDatabaseContext(() => database().query<{
       family_id: string;
       quiet_end: string | null;
       quiet_start: string | null;
@@ -125,8 +134,10 @@ export const ownerHealthDigestRepository = {
          JOIN users AS owner ON owner.id = membership.user_id
          LEFT JOIN user_notification_settings AS settings ON settings.user_id = owner.id
         WHERE membership.role = 'owner' AND owner.telegram_user_id IS NOT NULL
+          AND membership.family_id = COALESCE($1::uuid, (SELECT id FROM families ORDER BY created_at, id LIMIT 1))
         ORDER BY membership.family_id`,
-    );
+      [options.familyId ?? null],
+    ));
     // Часы не настроены: тихих часов нет, и пояс не нужен — сравнивать нечего.
     return result.rows.map((row) => ({
       familyId: row.family_id,
@@ -241,6 +252,7 @@ export const ownerHealthDigestRepository = {
     const status = (name: string) => Number(batches.rows.find((row) => row.status === name)?.count ?? 0);
     return {
       alertDeliveryFailures: Number(alerts.rows[0]?.count ?? 0),
+      backups: await readBackupHealth(client),
       ingressFailures: {
         codes: ingress.rows.map((row) => ({ code: row.code ?? "unknown", count: Number(row.count) })),
         count: Number(ingressTotal.rows[0]?.count ?? 0),

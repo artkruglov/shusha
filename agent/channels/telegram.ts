@@ -14,17 +14,20 @@
  */
 import { setTimeout as sleep } from "node:timers/promises";
 
-import { telegramChannel } from "eve/channels/telegram";
+import { telegramChannel, type TelegramEventContext } from "eve/channels/telegram";
 
 import { handleTelegramDurableIngress } from "../lib/telegram-durable-ingress.js";
 import { formatTelegramTurnFailure, isUnrecoverableHistoryFailure } from "../lib/telegram-interface.js";
 import { TELEGRAM_EVE_UPLOAD_POLICY } from "../lib/telegram-message-policy.js";
 import { handleTelegramMessage } from "../lib/telegram-on-message.js";
-import { completedTelegramOutput, silentGroupTurnRecord } from "../lib/telegram-progress.js";
+import { completedTelegramOutput, isDeliberateSilence, silentGroupTurnRecord } from "../lib/telegram-progress.js";
 import { deliverTelegramProgressNotice } from "../lib/telegram-progress-notice.js";
 import { progressNoticeKey, telegramProgressNoticeDeferral } from "../lib/telegram-progress-deferral.js";
 import { TELEGRAM_KEEP_OPEN_DIRECTIVE } from "../lib/telegram-authored-split.js";
 import { takeTelegramKeepOpenMark } from "../lib/telegram-keep-open-turns.js";
+import { takeTurnBoard } from "../lib/telegram-turn-board.js";
+import { questTurnActor } from "../lib/onboarding-quest/quest-after-success.js";
+import { advanceQuestAfterSuccess } from "../lib/onboarding-quest/quest-production.js";
 import { refreshTelegramReactionPolicy } from "../lib/telegram-reaction-policy.js";
 import {
   telegramAudienceWatch,
@@ -54,6 +57,7 @@ import { groupTimelineCursorRepository } from "../lib/sessions/group-timeline-cu
 import { authorizeTelegramHitlCallback } from "../lib/telegram-hitl/callback-authorization.js";
 import { handleTelegramInputRequested } from "../lib/telegram-hitl/input-request.js";
 import { telegramHitlApprovalRepository } from "../lib/telegram-hitl/approval-repository.js";
+import { requireInternalToken } from "../lib/telegram-hitl/approval-timeout-sweep.js";
 import {
   handleTelegramSessionFailure,
 } from "../lib/telegram-session-failure.js";
@@ -80,11 +84,22 @@ import {
   releaseMemoryTurnSources,
 } from "../lib/memory-turn-source.js";
 import { memoryReviewBatchId } from "../lib/memory-review/memory-review-session.js";
+import { keepTelegramTurnTyping, stopTelegramTurnTyping } from "../lib/telegram-typing-heartbeat.js";
+import {
+  allowTelegramTurnSteps,
+  beginTelegramTurnSteps,
+  closeTelegramTurnSteps,
+  recordTelegramTurnSteps,
+} from "../lib/telegram-step-status-channel.js";
 import { resolveMemoryReviewBatch } from "../lib/memory-review/memory-review-turn-binding.js";
 import { memoryReviewRepository } from "../lib/memory-review/memory-review-repository.js";
 import { memoryReviewDispatchRepository } from "../lib/memory-review/memory-review-dispatch-repository.js";
 import { isTelegramChannelSession } from "../lib/telegram-session-actor.js";
 import { reinforceUsedMemories } from "../lib/memory-used-reinforcement.js";
+import { attachReceiptUndo } from "../lib/task-buttons/receipt-undo.js";
+import {
+  formatTaskTurnReceipt, readTaskTurnReceipt, receiptGoesAlone, type TaskTurnCreated, type TaskTurnUndo,
+} from "../lib/task-turn-receipt.js";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
@@ -111,6 +126,70 @@ async function watchTelegramAudience(
   }
 }
 
+type ReceiptContext = { session: { id: string; auth: { current: { attributes?: Readonly<Record<string, unknown>> } | null } } };
+
+interface TurnReceipt {
+  readonly familyId: string;
+  /** What the turn closed; null when it only wrote tasks, whose buttons go under the answer itself. */
+  readonly line: string | null;
+  readonly telegramUserId: string;
+  readonly undo: readonly TaskTurnUndo[];
+  readonly created: readonly TaskTurnCreated[];
+  readonly askDefault: boolean;
+}
+
+/**
+ * The board the person asked to see goes after the answer as its own message, built by code with «✓» inside
+ * (`telegram-turn-board.ts`, `task-buttons/board-buttons.ts`): a press redraws the whole board, never the answer.
+ * Like a progress notice it is not a durable final delivery: a failure is logged, and the answer stands.
+ */
+async function sendTurnBoard(channel: TelegramEventContext, noticeKey: string): Promise<void> {
+  const board = takeTurnBoard(noticeKey);
+  if (board === null) return;
+  try {
+    await postTelegramRichMessageChunk(board.markdown, channel.telegram, channel.state);
+  } catch (error) {
+    console.error(JSON.stringify({
+      code: "AGENT_TASK_BOARD_DELIVERY_FAILED", error: error instanceof Error ? error.message.slice(0, 160) : String(error),
+    }));
+  }
+}
+
+/** The receipt of the tasks this turn really closed, or `null`; a failed read gives no receipt. */
+async function taskTurnReceipt(ctx: ReceiptContext): Promise<TurnReceipt | null> {
+  const attributes = ctx.session.auth.current?.attributes;
+  const familyId = attributes?.familyId;
+  const telegramUserId = attributes?.telegramUserId;
+  const startedAt = attributes?.telegramTurnStartedAt;
+  if (typeof familyId !== "string" || typeof telegramUserId !== "string" || typeof startedAt !== "string") return null;
+  try {
+    // A turn without a group is the person's private chat: there the receipt also says who sees a new task.
+    const receipt = await readTaskTurnReceipt({
+      eveSessionId: ctx.session.id, familyId, privateChat: typeof attributes?.groupId !== "string",
+      since: new Date(startedAt), telegramUserId,
+    });
+    const line = formatTaskTurnReceipt(receipt);
+    return line === null && receipt.created.length === 0 ? null : {
+      askDefault: receipt.askDefault, created: receipt.created, familyId, line, telegramUserId, undo: receipt.undo,
+    };
+  } catch (error) {
+    console.error(JSON.stringify({
+      code: "AGENT_TASK_RECEIPT_FAILED",
+      error: error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160),
+    }));
+    return null;
+  }
+}
+
+/** «↩ Вернуть» under the delivered message that carries the receipt (`receipt-undo.ts`). */
+async function attachTurnReceiptUndo(receipt: TurnReceipt | null, chatId: string, messageId: string | null): Promise<void> {
+  if (receipt === null) return;
+  await attachReceiptUndo({
+    askDefault: receipt.askDefault, chatId, created: receipt.created, familyId: receipt.familyId, messageId,
+    telegramUserId: receipt.telegramUserId, undo: receipt.undo,
+  });
+}
+
 /** Отбивка несёт текст модели, поэтому её аудитория проверяется тем же швом, что и ответ. */
 async function deliveryAllowed(
   ctx: { session: { auth: { current: Parameters<typeof spaceDeliveryRequestFromAuth>[0] } } },
@@ -125,11 +204,15 @@ export default telegramChannel({
   credentials: {
     webhookSecretToken: process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN as string,
   },
+  // Telegram holds the webhook secret; the internal drain route takes the agent's own token.
+  drainCredentials: { webhookSecretToken: requireInternalToken },
   drainRoute: "/eve/v1/telegram-drain",
   // Durable ingress is FIFO; a later update must never cancel a paid or side-effecting active turn.
   turnPolicy: "queue",
   events: {
     async "input.requested"(data, channel, ctx) {
+      stopTelegramTurnTyping(ctx);
+      await closeTelegramTurnSteps(ctx);
       // The confirmation prompt is this step's visible reply; text the model wrote next to the
       // gated call would otherwise follow the prompt and repeat what the resumed turn says.
       telegramProgressNoticeDeferral.discard(progressNoticeKey(ctx.session.id, ctx.session.turn.id));
@@ -144,16 +227,50 @@ export default telegramChannel({
     async "message.completed"(data, channel, ctx) {
       // Model-authored pre-tool text is a user-visible progress update, not technical tool noise.
       if (isScheduledSession(ctx) && data.finishReason !== "stop") return;
-      const output = completedTelegramOutput(data);
+      let output = completedTelegramOutput(data);
+      const noticeKey = progressNoticeKey(ctx.session.id, ctx.session.turn.id);
+      // A turn that closed tasks and then kept silent still owes the person the receipt: it goes
+      // out alone, through the same delivery below. Text still held is the answer and carries it.
+      let receiptOnly = false;
+      let receipt: TurnReceipt | null = null;
+      // The same goes for a board the person asked to see (`telegram-turn-board.ts`).
+      if (!output && receiptGoesAlone({
+        deliberateSilence: isDeliberateSilence(data),
+        scheduled: isScheduledSession(ctx),
+        textHeld: telegramProgressNoticeDeferral.isHeld(noticeKey),
+      })) {
+        receipt = await taskTurnReceipt(ctx);
+        if (receipt !== null && receipt.line !== null) {
+          output = { kind: "message", memoryUsedDeclared: false, memoryUsedRefs: [], message: receipt.line };
+          receiptOnly = true;
+        } else {
+          // The board goes only where the answer could: this session, an audience the space allows.
+          if (await sessionRepository.isCurrentEveSession(applicationSessionId(ctx), ctx.session.id) && await deliveryAllowed(ctx)) {
+            await sendTurnBoard(channel, noticeKey);
+          }
+        }
+      }
       if (!output) {
+        if (data.finishReason !== "tool-calls") {
+          stopTelegramTurnTyping(ctx);
+          await closeTelegramTurnSteps(ctx);
+        }
         const silent = silentGroupTurnRecord(data, ctx.session.auth.current?.attributes);
         if (silent) console.info(JSON.stringify(silent));
+        // A scenario that found nothing worth saying ends here; turn.completed would record it as a
+        // missing delivery, and the schedule's statistics would lie.
+        if (isScheduledSession(ctx) && isDeliberateSilence(data)) {
+          const completed = await agentScheduleDispatchRepository.completeSilentRun(
+            applicationSessionId(ctx), ctx.session.id, new Date(),
+          );
+          console.info(JSON.stringify({ code: "AGENT_SCHEDULE_RUN_SILENT", completed }));
+        }
         return;
       }
       const sessionId = applicationSessionId(ctx);
       if (!await sessionRepository.isCurrentEveSession(sessionId, ctx.session.id)) return;
-      const noticeKey = progressNoticeKey(ctx.session.id, ctx.session.turn.id);
       if (output.kind === "progress") {
+        const progressText = output.message;
         // Отбивка несёт текст модели, значит это содержимое области: неподтверждённая аудитория
         // просто не получает её. Проверка стоит здесь, а не в самой отбивке: та глушит ошибки.
         if (!await deliveryAllowed(ctx)) {
@@ -163,19 +280,32 @@ export default telegramChannel({
         // Held until the step names its tools: an answer written beside `remember` must not go
         // out twice, while text before a slow tool still reaches the person at once.
         telegramProgressNoticeDeferral.hold(noticeKey, {
-          send: () => deliverTelegramProgressNotice({
-            applicationSessionId: sessionId,
-            channel,
-            eveSessionId: ctx.session.id,
-            eveTurnId: ctx.session.turn.id,
-            message: output.message,
-            stepIndex: data.stepIndex,
-          }),
+          send: async ({ final }) => {
+            // Held to the end, the text was the answer, and the receipt goes under it.
+            const heldReceipt = final ? await taskTurnReceipt(ctx) : null;
+            const lastMessageId = await deliverTelegramProgressNotice({
+              applicationSessionId: sessionId,
+              channel,
+              eveSessionId: ctx.session.id,
+              eveTurnId: ctx.session.turn.id,
+              message: heldReceipt?.line ? `${progressText}\n\n${heldReceipt.line}` : progressText,
+              stepIndex: data.stepIndex,
+            });
+            await attachTurnReceiptUndo(heldReceipt, channel.telegram.chatId, lastMessageId);
+            if (final) await sendTurnBoard(channel, noticeKey);
+            // The person has been told work is under way, so a group turn may show typing too.
+            keepTelegramTurnTyping(channel, ctx, { afterNotice: true });
+            allowTelegramTurnSteps(ctx);
+          },
           stepIndex: data.stepIndex,
         });
         return;
       }
       telegramProgressNoticeDeferral.discard(noticeKey);
+      // The answer itself is going out; a later tick would show typing under it, and the step
+      // status has done its job.
+      stopTelegramTurnTyping(ctx);
+      await closeTelegramTurnSteps(ctx);
       const currentAttributes = ctx.session.auth.current?.attributes;
       const scheduledDelivery = scheduledDeliveryMetadata(ctx);
       if (output.kind === "reaction") {
@@ -188,10 +318,20 @@ export default telegramChannel({
         }
         // A declined reaction stays silent: a text emoji is not a reaction (owner's decision).
         await setTelegramMessageReaction(channel.telegram, telegramMessageId, output.emoji);
-        return;
+        // A reaction is no text to put the receipt under, so the receipt follows it alone.
+        receipt = await taskTurnReceipt(ctx);
+        if (receipt === null || receipt.line === null) {
+          if (await deliveryAllowed(ctx)) await sendTurnBoard(channel, noticeKey);
+          return;
+        }
+        output = { kind: "message", memoryUsedDeclared: false, memoryUsedRefs: [], message: receipt.line };
+        receiptOnly = true;
       }
+      // Что ход действительно закрыл, пишет код, а не модель (`task-turn-receipt.ts`).
+      if (!isScheduledSession(ctx) && !receiptOnly) receipt = await taskTurnReceipt(ctx);
+      const answer = receipt === null || receipt.line === null || receiptOnly ? output.message : `${output.message}\n\n${receipt.line}`;
       // Ход с итогом записи или закрытия дел показывается целиком (`telegram-keep-open-turns.ts`).
-      const message = takeTelegramKeepOpenMark(noticeKey) ? `${TELEGRAM_KEEP_OPEN_DIRECTIVE}\n${output.message}` : output.message;
+      const message = takeTelegramKeepOpenMark(noticeKey) ? `${TELEGRAM_KEEP_OPEN_DIRECTIVE}\n${answer}` : answer;
       const replyParameters = isScheduledSession(ctx)
         ? undefined
         : telegramTurnReplyParameters(channel.state, ctx);
@@ -317,6 +457,8 @@ export default telegramChannel({
         }
         throw error;
       }
+      await attachTurnReceiptUndo(receipt, channel.telegram.chatId, sentMessages.at(-1)?.messageId ?? null);
+      await sendTurnBoard(channel, noticeKey);
       const deliveredAt = new Date();
       const groupId = scheduledDelivery?.groupId ??
         (typeof currentAttributes?.groupId === "string" ? currentAttributes.groupId : null);
@@ -416,7 +558,9 @@ export default telegramChannel({
         agentScheduleDispatchRepository,
       );
     },
-    async "actions.requested"(data, _channel, ctx) {
+    async "actions.requested"(data, channel, ctx) {
+      keepTelegramTurnTyping(channel, ctx);
+      await recordTelegramTurnSteps(channel, ctx, data.actions, () => deliveryAllowed(ctx));
       await telegramProgressNoticeDeferral.release(
         progressNoticeKey(ctx.session.id, ctx.session.turn.id),
         data.stepIndex,
@@ -426,6 +570,8 @@ export default telegramChannel({
       );
     },
     async "turn.failed"(data, channel, ctx) {
+      stopTelegramTurnTyping(ctx);
+      await closeTelegramTurnSteps(ctx);
       telegramProgressNoticeDeferral.forget(progressNoticeKey(ctx.session.id, ctx.session.turn.id));
       // Terminal failure releases the temporary timeline retention after all tool writes have stopped.
       await releaseMemoryTurnSources(ctx);
@@ -516,6 +662,8 @@ export default telegramChannel({
       await telegramHitlApprovalRepository.clearForEveSession(sessionId, ctx.session.id);
     },
     async "turn.cancelled"(_data, _channel, ctx) {
+      stopTelegramTurnTyping(ctx);
+      await closeTelegramTurnSteps(ctx);
       // Steering by the next chat message is the most common way a turn ends in a live group. The
       // batch used to wait for the time bound instead, while later turns chained onto a head that
       // would never report, so their finished work stayed unreachable from the lane cursor.
@@ -537,6 +685,8 @@ export default telegramChannel({
       );
     },
     async "turn.started"(_data, channel, ctx) {
+      keepTelegramTurnTyping(channel, ctx);
+      beginTelegramTurnSteps(ctx);
       const sessionId = applicationSessionId(ctx);
       await sessionRepository.bindEveSession(sessionId, ctx.session.id);
       // Which reactions this chat accepts is provider state, so it is refreshed here and read from
@@ -576,6 +726,8 @@ export default telegramChannel({
       }
     },
     async "turn.completed"(_data, channel, ctx) {
+      stopTelegramTurnTyping(ctx);
+      await closeTelegramTurnSteps(ctx);
       // Text still held here was the answer: the model never wrote again after its quiet tools.
       const noticeKey = progressNoticeKey(ctx.session.id, ctx.session.turn.id);
       await telegramProgressNoticeDeferral.flush(noticeKey);
@@ -610,8 +762,13 @@ export default telegramChannel({
       if (!awaitingApproval) {
         await telegramHitlApprovalRepository.clearForEveSession(sessionId, ctx.session.id);
       }
+      // After the answer, a step of «Знакомство» done for the first time brings the next step card (`onboarding-quest/`).
+      const questActor = awaitingApproval || reviewBatchId ? null : questTurnActor(ctx);
+      if (questActor !== null) await advanceQuestAfterSuccess(questActor);
     },
     async "authorization.required"(_data, _channel, ctx) {
+      stopTelegramTurnTyping(ctx);
+      await closeTelegramTurnSteps(ctx);
       if (isTelegramChannelSession(ctx.session.auth)) {
         throw new AppError(
           "AGENT_TELEGRAM_CHANNEL_APPROVAL_FORBIDDEN",
@@ -633,6 +790,8 @@ export default telegramChannel({
     },
   },
   onDrain: handleTelegramDurableIngress.drain,
+  onGuestUpdate: handleTelegramDurableIngress.guest,
+  onChatJoinRequest: handleTelegramDurableIngress.joinRequest,
   onHitlCallbackQuery: authorizeTelegramHitlCallback,
   onMessage: handleTelegramMessage,
   onVerifiedUpdate: handleTelegramDurableIngress,

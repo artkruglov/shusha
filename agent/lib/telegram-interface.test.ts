@@ -552,6 +552,20 @@ describe("Telegram interface localization", () => {
     expect(formatTelegramTurnFailure(data)).toContain("следующее сообщение начнёт новый контекст");
   });
 
+  it("names a context overflow and starts a new session after it", () => {
+    const data = {
+      code: "MODEL_CALL_FAILED",
+      details: {
+        errorId: "0b6f3c1e-8a7d-4f43-9b2e-5c1d2e3f4a5b",
+        message: "AGENT_MODEL_CONTEXT_OVERFLOW: Разговор не помещается в контекст модели",
+      },
+    };
+
+    expect(isUnrecoverableHistoryFailure(data)).toBe(true);
+    expect(formatTelegramTurnFailure(data)).toContain("Разговор стал слишком длинным");
+    expect(formatTelegramTurnFailure(data)).toContain("Номер ошибки: 0b6f3c1e-8a7d-4f43-9b2e-5c1d2e3f4a5b");
+  });
+
   it("keeps generic model failures from exposing internals", () => {
     const turnMessage = formatTelegramTurnFailure({
       code: "MODEL_CALL_FAILED",

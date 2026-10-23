@@ -12,7 +12,8 @@ const DIST = "node_modules/@workflow/world-postgres/dist";
 describe("Postgres World queue transport patch", () => {
   it("sends flow requests through the bounded workflow HTTP client and closes it", async () => {
     const queue = await readFile(`${DIST}/queue.js`, "utf8");
-    expect(queue).toContain("import { createWorkflowHttpClient, createWorkflowExecutionFence } from './osinara-workflow-transport.js';");
+    expect(queue).toContain("import { createWorkflowHttpClient, createWorkflowExecutionFence, requireWorkflowInternalToken, withWorkflowInternalToken, WORKFLOW_INTERNAL_TOKEN_HEADER } from './osinara-workflow-transport.js';");
+    expect(queue).toContain("[WORKFLOW_INTERNAL_TOKEN_HEADER]: requireWorkflowInternalToken(),");
     expect(queue).toContain("const response = await httpClient.fetch(createWorkflowUrl(baseUrl, { type: 'flow' }), {");
     expect(queue).not.toContain("await fetch(createWorkflowUrl(");
     expect(queue).toContain("await httpClient.close();\n            await localWorld.close?.();");
@@ -21,7 +22,7 @@ describe("Postgres World queue transport patch", () => {
 
   it("fences the receiving queue handler and no longer queues workflow replays behind a running request", async () => {
     const queue = await readFile(`${DIST}/queue.js`, "utf8");
-    expect(queue).toContain("const createQueueHandler = (prefix, handler) => localWorld.createQueueHandler(prefix, fence(handler));");
+    expect(queue).toContain("const createQueueHandler = (prefix, handler) => withWorkflowInternalToken(localWorld.createQueueHandler(prefix, fence(handler)));");
     expect(queue).not.toContain("inflightWorkflowRuns");
     expect(queue).not.toContain("WorkflowInvokePayloadSchema");
     // Idempotency-keyed deliveries keep the package's own in-flight and completed caches.

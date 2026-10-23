@@ -13,6 +13,7 @@ import {
 
 import { TELEGRAM_MAX_INBOUND_ATTACHMENT_BYTES } from "../../config.js";
 import { AppError, isAppError } from "../app-error.js";
+import { readBoundedBody } from "../bounded-body.js";
 import { ModelFacingError } from "../model-facing-error.js";
 
 interface TelegramAttachmentDownloadAdapter {
@@ -20,13 +21,15 @@ interface TelegramAttachmentDownloadAdapter {
   getFile(fileId: string): Promise<{ filePath: string }>;
 }
 
+function downloadTooLarge(): AppError {
+  return new AppError(
+    "AGENT_ATTACHMENT_DOWNLOAD_TOO_LARGE",
+    "Telegram позволяет боту получить входящий файл размером не более 20 МБ",
+  );
+}
+
 function assertDownloadSize(size: number): void {
-  if (size > TELEGRAM_MAX_INBOUND_ATTACHMENT_BYTES) {
-    throw new AppError(
-      "AGENT_ATTACHMENT_DOWNLOAD_TOO_LARGE",
-      "Telegram позволяет боту получить входящий файл размером не более 20 МБ",
-    );
-  }
+  if (size > TELEGRAM_MAX_INBOUND_ATTACHMENT_BYTES) throw downloadTooLarge();
 }
 
 function throwDownloadFailure(error: unknown): never {
@@ -76,14 +79,13 @@ export function createTelegramAttachmentDownloader(adapter: TelegramAttachmentDo
       }
       assertDownloadSize(length);
     }
-    let bytes: Buffer;
+    // Counted while streaming: a missing or wrong Content-Length must not let the whole body be
+    // buffered before the limit applies (security review, 5 October 2026).
     try {
-      bytes = Buffer.from(await response.arrayBuffer());
+      return await readBoundedBody(response, TELEGRAM_MAX_INBOUND_ATTACHMENT_BYTES, downloadTooLarge);
     } catch (error) {
       throwDownloadFailure(error);
     }
-    assertDownloadSize(bytes.byteLength);
-    return bytes;
   };
 }
 

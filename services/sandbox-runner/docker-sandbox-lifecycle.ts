@@ -9,6 +9,7 @@
  * - `sandboxContainerNeedsReplacement`: detects stale owner or policy identity.
  * - `sandboxRequestHash`: stable policy identity independent of transient Eve roots.
  * - Activity gates prevent idle stop/removal from racing with newly arriving work.
+ * - `runAlone` reuses that gate, so the stray-process sweep never meets a new command.
  */
 import { createHash } from "node:crypto";
 
@@ -31,8 +32,15 @@ export interface SandboxActivityRegistry {
   clear(): void;
   forget(sessionId: string): void;
   isIdle(sessionId: string, cutoffMs: number): boolean;
+  /** When the session last started or finished an operation; undefined when never seen. */
+  lastActiveAt(sessionId: string): number | undefined;
   removeIfIdle(sessionId: string, cutoffMs: number, operation: () => Promise<void>): Promise<boolean>;
   runActive<T>(sessionId: string, operation: () => Promise<T>): Promise<T>;
+  /**
+   * From inside `runActive`: runs `operation` only when the caller is the session's sole
+   * operation, and holds new operations of the session until it ends. False when skipped.
+   */
+  runAlone(sessionId: string, operation: () => Promise<void>): Promise<boolean>;
   runExclusive<T>(sessionId: string, operation: () => Promise<T>): Promise<T>;
   touch(sessionId: string): void;
 }
@@ -90,6 +98,26 @@ export function createSandboxActivityRegistry(now: () => number): SandboxActivit
     },
     isIdle(sessionId, cutoffMs) {
       return isIdle(sessionId, cutoffMs);
+    },
+    lastActiveAt(sessionId) {
+      return lastActivity.get(sessionId);
+    },
+    async runAlone(sessionId, operation) {
+      // The stray sweep kills every process but the browser's; a command that started meanwhile
+      // would lose its own, so the sweep runs only alone and new work waits for it.
+      if ((activeCounts.get(sessionId) ?? 0) !== 1 || removalGates.has(sessionId)) return false;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      removalGates.set(sessionId, gate);
+      try {
+        await operation();
+        return true;
+      } finally {
+        if (removalGates.get(sessionId) === gate) removalGates.delete(sessionId);
+        release();
+      }
     },
     async runActive<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
       // Register activity synchronously once no removal owns the ID, closing check/remove races.

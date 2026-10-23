@@ -7,6 +7,9 @@
  * - Scheduled Telegram delivery is reauthorized before send and confirmed before timeline persistence.
  * - Turn start never launches a second semantic pass over the conversation.
  * - Turn-bound memory sources survive HITL and release only at a terminal turn boundary.
+ * - «Печатает…» and the step status start with the turn and stop at every way it can end or wait
+ *   for the person: the application's handlers replace Eve's defaults, which once lost the
+ *   indicator entirely.
  */
 import { readFile } from "node:fs/promises";
 
@@ -28,6 +31,28 @@ describe("Telegram channel draft policy", () => {
     expect(handlerBody).toContain("telegramProgressNoticeDeferral.release(");
     expect(handlerBody).not.toContain("postTelegram");
     expect(handlerBody).not.toContain("Draft");
+  });
+
+  it("keeps typing on through the turn and stops it wherever the turn ends or waits", async () => {
+    const source = await readFile(TELEGRAM_CHANNEL_PATH, "utf8");
+    const handler = (name: string) => {
+      const start = source.indexOf(`async "${name}"`);
+      expect(start, name).toBeGreaterThan(-1);
+      const next = source.indexOf("    async \"", start + 1);
+      return source.slice(start, next === -1 ? undefined : next);
+    };
+
+    for (const name of ["turn.started", "actions.requested"]) {
+      expect(handler(name), name).toContain("keepTelegramTurnTyping(channel, ctx)");
+    }
+    for (const name of ["turn.completed", "turn.failed", "turn.cancelled", "input.requested", "authorization.required"]) {
+      expect(handler(name), name).toContain("stopTelegramTurnTyping(ctx)");
+      expect(handler(name), name).toContain("await closeTelegramTurnSteps(ctx)");
+    }
+    expect(handler("message.completed")).toContain("stopTelegramTurnTyping(ctx)");
+    expect(handler("message.completed")).toContain("await closeTelegramTurnSteps(ctx)");
+    expect(handler("turn.started")).toContain("beginTelegramTurnSteps(ctx)");
+    expect(handler("actions.requested")).toContain("recordTelegramTurnSteps(");
   });
 
   it("records scheduled delivery confirmation before the group timeline", async () => {

@@ -67,7 +67,7 @@ export default defineTool({
     limit: z.number().int().min(1).max(PROACTIVE_DELIVERY_HISTORY_MAX_LIMIT)
       .default(PROACTIVE_DELIVERY_HISTORY_DEFAULT_LIMIT),
     query: z.string().trim().min(1).max(200).optional(),
-    sourceKind: z.enum(["agent_schedule", "coach", "daily_overview", "partner_alert", "reminder", "weekly_review"]).optional(),
+    sourceKind: z.enum(["agent_schedule", "coach", "daily_overview", "feedback_ask", "partner_alert", "reminder", "weekly_review"]).optional(),
   }).strict(),
   async execute(input, ctx) {
     return await proactiveDeliveryRepository.list({

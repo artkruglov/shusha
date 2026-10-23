@@ -48,6 +48,12 @@ function invitationDeliveryAmbiguousError(): AppError {
 
 export type FamilyRelation = "child" | "other" | "parent" | "partner";
 
+/** `joined`: ссылка с автоподтверждением сразу сделала человека участником, владельцу нужно сообщить. */
+export type ClaimInvitationResult =
+  | "invalid"
+  | "pending"
+  | { joined: { familyId: string; ownerTelegramUserId: string } };
+
 export interface FamilyMember {
   name: string;
   participantRef: string;
@@ -73,12 +79,23 @@ export interface FamilyRepository {
     participantRef: string;
     relation: FamilyRelation;
   }): Promise<{ name: string; relation: FamilyRelation }>;
-  claimInvitation(code: string, profile: TelegramProfile): Promise<"invalid" | "pending">;
+  claimInvitation(code: string, profile: TelegramProfile): Promise<ClaimInvitationResult>;
+  /** Убранные владельцем участники с ref запрета для `restoreMember`; только владельцу. */
+  listRemovedMembers(input: { familyId: string; ownerUserId: string }): Promise<Array<{ name: string; participantRef: string }>>;
+  /** Владелец снимает запрет: человек снова может войти по ссылке или в группе. Членство само не возвращается. */
+  restoreMember(input: { banRef: string; familyId: string; ownerUserId: string }): Promise<{ name: string }>;
+  /** Владелец убирает участника: членство снимается, запрет на самостоятельный возврат ставится, общие дела освобождаются. Владельца убрать нельзя. */
+  removeMember(input: {
+    familyId: string;
+    ownerUserId: string;
+    participantRef: string;
+  }): Promise<{ name: string }>;
   createInvitation(
     familyId: string,
     createdBy: string,
     operationKey: string,
     space?:SpaceAttributes,
+    options?: { autoApprove?: boolean },
   ): Promise<{
     code: string;
     deliveryRequired: boolean;
@@ -101,6 +118,27 @@ export interface FamilyRepository {
     invitationId: string;
     operationKey: string;
   }): Promise<void>;
+}
+
+/**
+ * Один замок на состав семьи: удаление участника, вступление по ссылке, подтверждение заявки и автовход в группе
+ * не идут одновременно, иначе вступление, начатое до удаления, возвращало бы убранного участника.
+ */
+export async function lockFamilyMembers(client: { query: (sql: string, values?: unknown[]) => Promise<unknown> }, familyId: string): Promise<void> {
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 7))", [`family-members:${familyId}`]);
+}
+
+/** Запрещено ли человеку входить в эту семью самому: его убрал владелец и ещё не вернул. */
+export async function isBannedFromFamily(
+  client: { query: (sql: string, values?: unknown[]) => Promise<{ rowCount: number | null }> },
+  familyId: string,
+  telegramUserId: string,
+): Promise<boolean> {
+  const result = await client.query(
+    "SELECT 1 FROM family_member_bans WHERE family_id = $1 AND telegram_user_id = $2",
+    [familyId, telegramUserId],
+  );
+  return (result.rowCount ?? 0) > 0;
 }
 
 export const familyRepository: FamilyRepository = {
@@ -143,6 +181,116 @@ export const familyRepository: FamilyRepository = {
         participantRef: row.id,
         relation: row.relation as FamilyRelation | null,
       }));
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  },
+  async removeMember(input) {
+    const client = await database().connect();
+    try {
+      await client.query("BEGIN");
+      await lockFamilyMembers(client, input.familyId);
+      // Владелец перепроверяется живым запросом; участник берётся по ref семейного списка, владельца и себя убрать нельзя.
+      const removed = await client.query<{ display_name: string; telegram_user_id: string; user_id: string }>(
+        `DELETE FROM family_memberships AS membership
+           USING users AS person, shared_task_participants AS participant
+          WHERE participant.id = $3 AND participant.family_id = $1 AND participant.group_id IS NULL
+            AND person.telegram_user_id = participant.telegram_user_id
+            AND membership.user_id = person.id AND membership.family_id = $1
+            AND membership.role <> 'owner' AND membership.user_id <> $2
+            AND EXISTS (SELECT 1 FROM family_memberships AS owner
+                         WHERE owner.family_id = $1 AND owner.user_id = $2 AND owner.role = 'owner')
+          RETURNING person.display_name, person.telegram_user_id::text AS telegram_user_id, membership.user_id`,
+        [input.familyId, input.ownerUserId, input.participantRef],
+      );
+      if (removed.rowCount !== 1) {
+        throw new AppError(
+          "AGENT_FAMILY_MEMBER_NOT_REMOVABLE",
+          "Не нашла такого участника, или это владелец. Возьмите participantRef из action members и повторите",
+        );
+      }
+      const gone = removed.rows[0]!;
+      // Запрет на самостоятельный возврат: автовход в группе, старая ссылка и ожидавшая заявка его не обходят.
+      await client.query(
+        `INSERT INTO family_member_bans (family_id, telegram_user_id, display_name, banned_by)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (family_id, telegram_user_id)
+         DO UPDATE SET display_name = EXCLUDED.display_name, banned_by = EXCLUDED.banned_by, banned_at = now()`,
+        [input.familyId, gone.telegram_user_id, gone.display_name, input.ownerUserId],
+      );
+      // Общие дела (семья, группа): принятое или предложенное ему дело снова ничьё, идея и традиция отменяются;
+      // его передачи, как исходящие, так и входящие, отменяются. Личные дела остаются у автора: они частные.
+      await client.query(
+        `UPDATE shared_tasks
+            SET status = CASE WHEN kind = 'task' THEN 'open' ELSE 'cancelled' END,
+                assignee_telegram_id = NULL,
+                pending_assignee_telegram_id = NULL, transfer_requested_at = NULL, version = version + 1, updated_at = now()
+          WHERE family_id = $1 AND scope <> 'personal' AND assignee_telegram_id = $2
+            AND status IN ('proposed', 'accepted')`,
+        [input.familyId, gone.telegram_user_id],
+      );
+      await client.query(
+        `UPDATE shared_tasks SET pending_assignee_telegram_id = NULL, transfer_requested_at = NULL, version = version + 1, updated_at = now()
+          WHERE family_id = $1 AND pending_assignee_telegram_id = $2`,
+        [input.familyId, gone.telegram_user_id],
+      );
+      // Заявка, ждавшая подтверждения, не должна дожить до возврата.
+      await client.query(
+        `UPDATE invitations SET status = 'rejected', decided_at = now(), decided_by = $2, decision_operation_key = 'member-removed:' || id::text
+          WHERE family_id = $1 AND status = 'pending' AND claimed_by = $3`,
+        [input.familyId, input.ownerUserId, gone.user_id],
+      );
+      await client.query(
+        `INSERT INTO audit_events (family_id, actor_user_id, event_type, subject_id, metadata)
+         VALUES ($1, $2, 'family.member_removed', $3, '{}'::jsonb)`,
+        [input.familyId, input.ownerUserId, gone.user_id],
+      );
+      await client.query("COMMIT");
+      return { name: gone.display_name };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  },
+  async listRemovedMembers(input) {
+    const result = await database().query<{ display_name: string; id: string }>(
+      `SELECT ban.display_name, ban.id
+         FROM family_member_bans ban
+        WHERE ban.family_id = $1
+          AND EXISTS (SELECT 1 FROM family_memberships o WHERE o.family_id = $1 AND o.user_id = $2 AND o.role = 'owner')
+        ORDER BY ban.banned_at DESC LIMIT 50`,
+      [input.familyId, input.ownerUserId],
+    );
+    return result.rows.map((row) => ({ name: row.display_name, participantRef: row.id }));
+  },
+  async restoreMember(input) {
+    const client = await database().connect();
+    try {
+      await client.query("BEGIN");
+      await lockFamilyMembers(client, input.familyId);
+      const restored = await client.query<{ display_name: string }>(
+        `DELETE FROM family_member_bans AS ban
+          WHERE ban.id = $2 AND ban.family_id = $1
+            AND EXISTS (SELECT 1 FROM family_memberships AS owner
+                         WHERE owner.family_id = $1 AND owner.user_id = $3 AND owner.role = 'owner')
+          RETURNING ban.display_name`,
+        [input.familyId, input.banRef, input.ownerUserId],
+      );
+      if (restored.rowCount !== 1) {
+        throw new AppError("AGENT_FAMILY_BAN_NOT_FOUND", "Не нашла такого убранного участника. Возьмите ref из action members (removed)");
+      }
+      await client.query(
+        `INSERT INTO audit_events (family_id, actor_user_id, event_type, metadata)
+         VALUES ($1, $2, 'family.member_restored', '{}'::jsonb)`,
+        [input.familyId, input.ownerUserId],
+      );
+      await client.query("COMMIT");
+      return { name: restored.rows[0]!.display_name };
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
@@ -197,8 +345,8 @@ export const familyRepository: FamilyRepository = {
       await client.query("BEGIN");
 
       // The invitation lock reserves a one-time code for exactly one Telegram identity.
-      const invitation = await client.query<{ family_id: string; id: string }>(
-        `SELECT id, family_id
+      const invitation = await client.query<{ auto_approve: boolean; created_by: string; family_id: string; id: string }>(
+        `SELECT id, family_id, auto_approve, created_by
          FROM invitations
          WHERE code_hash = $1 AND status = 'open' AND expires_at >= now()
          FOR UPDATE`,
@@ -206,6 +354,12 @@ export const familyRepository: FamilyRepository = {
       );
       const row = invitation.rows[0];
       if (!row) {
+        await client.query("ROLLBACK");
+        return "invalid";
+      }
+      // Состав семьи меняется под одним замком, а убранного владельцем ссылка не возвращает, даже выданная до удаления.
+      await lockFamilyMembers(client, row.family_id);
+      if (await isBannedFromFamily(client, row.family_id, profile.telegramUserId)) {
         await client.query("ROLLBACK");
         return "invalid";
       }
@@ -248,6 +402,45 @@ export const familyRepository: FamilyRepository = {
         return "invalid";
       }
 
+      if (row.auto_approve) {
+        // Ссылка владельца с автоподтверждением: членство, личное пространство и закрытие приглашения
+        // идут одной транзакцией. Приглашавший должен быть владельцем сейчас, а не только когда создавал.
+        const owner = await client.query<{ telegram_user_id: string }>(
+          `SELECT u.telegram_user_id::text AS telegram_user_id
+             FROM family_memberships m JOIN users u ON u.id = m.user_id
+            WHERE m.family_id = $1 AND m.user_id = $2 AND m.role = 'owner' FOR SHARE OF m`,
+          [row.family_id, row.created_by],
+        );
+        const ownerTelegramUserId = owner.rows[0]?.telegram_user_id;
+        const membership = ownerTelegramUserId
+          ? await client.query<{ user_id: string }>(
+              `INSERT INTO family_memberships (family_id, user_id, role)
+               VALUES ($1, $2, 'member') ON CONFLICT (user_id) DO NOTHING RETURNING user_id`,
+              [row.family_id, candidateId],
+            )
+          : null;
+        if (!ownerTelegramUserId || !membership?.rows[0]) {
+          await client.query("ROLLBACK");
+          return "invalid";
+        }
+        await provisionMemberPersonalSpace(client, { familyId: row.family_id, userId: candidateId });
+        await client.query(
+          `UPDATE invitations
+           SET status = 'approved', claimed_at = now(), claimed_by = $2, decided_at = now(),
+               decided_by = $3, decision_operation_key = 'auto-approve:' || id::text
+           WHERE id = $1`,
+          [row.id, candidateId, row.created_by],
+        );
+        await client.query(
+          `INSERT INTO audit_events
+             (family_id, actor_user_id, event_type, subject_id, metadata)
+           VALUES ($1, $2, 'invitation.joined', $3, jsonb_build_object('telegramUserId', $4::text))`,
+          [row.family_id, candidateId, row.id, profile.telegramUserId],
+        );
+        await client.query("COMMIT");
+        return { joined: { familyId: row.family_id, ownerTelegramUserId } };
+      }
+
       // Pending state persists the candidate for owner review without granting membership.
       await client.query(
         `UPDATE invitations
@@ -271,7 +464,7 @@ export const familyRepository: FamilyRepository = {
     }
   },
 
-  async createInvitation(familyId, createdBy, operationKey, space) {
+  async createInvitation(familyId, createdBy, operationKey, space, options) {
     const client = await database().connect();
     try {
       await client.query("BEGIN");
@@ -297,11 +490,11 @@ export const familyRepository: FamilyRepository = {
       const expiresAt = new Date(Date.now() + INVITATION_CODE_TTL_MS);
       const inserted = await client.query<{ id: string }>(
         `INSERT INTO invitations
-           (family_id, created_by, operation_key, code_hash, expires_at)
-         VALUES ($1, $2, $3, $4, $5)
+           (family_id, created_by, operation_key, code_hash, expires_at, auto_approve)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (family_id, created_by, operation_key) DO NOTHING
          RETURNING id`,
-        [familyId, createdBy, operationKey, generated.codeHash, expiresAt],
+        [familyId, createdBy, operationKey, generated.codeHash, expiresAt, options?.autoApprove === true],
       );
       const insertedId = inserted.rows[0]?.id;
       if (insertedId) {
@@ -425,6 +618,13 @@ export const familyRepository: FamilyRepository = {
 
       // Candidate fields shown in HITL are rechecked against DB together with current owner role.
       await requireAdministrationSpace(client,input.familyId,input.approvedBy,input.space);
+      await lockFamilyMembers(client, input.familyId);
+      if (await isBannedFromFamily(client, input.familyId, input.candidateTelegramUserId)) {
+        throw new AppError(
+          "AGENT_INVITATION_NOT_APPROVABLE",
+          "Этого человека владелец убрал из семьи; сначала верните его (action members, restore_member)",
+        );
+      }
       const invitation = await client.query<{ candidate_id: string; status: string }>(
         `SELECT i.claimed_by AS candidate_id, i.status
          FROM invitations i

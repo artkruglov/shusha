@@ -33,6 +33,10 @@ interface ResponseShape {
 export interface BilledModelUsage {
   readonly cacheHitTokens: number;
   readonly cacheMissTokens: number;
+  /** The Telegram chat of a group without a family whose budget pays for the call (migration 177). */
+  readonly familylessChatId?: string | null;
+  /** The family whose turn made the call, for its monthly budget (migration 181). */
+  readonly familyId?: string | null;
   readonly modelId: string;
   readonly outputTokens: number;
   readonly webSearchCalls: number;
@@ -324,12 +328,14 @@ export interface StepUsageEvent {
 
 export function formatStepUsageLog(
   event: StepUsageEvent,
-  session: { readonly channelKind: string | undefined; readonly sessionId: string },
+  session: { readonly channelKind: string | undefined; readonly familyId?: string; readonly sessionId: string },
 ): string {
   const usage = event.data.usage ?? {};
   return JSON.stringify({
     code: "AGENT_MODEL_STEP",
     channelKind: session.channelKind ?? null,
+    // Which family a step belongs to: `model_usage_events` has no family, so the beta reads spend per family here.
+    ...(session.familyId === undefined ? {} : { familyId: session.familyId }),
     finishReason: event.data.finishReason,
     sessionId: session.sessionId,
     stepIndex: event.data.stepIndex,

@@ -15,6 +15,15 @@ export const GROUP_TITLE_MAX_LENGTH = 200;
 export const TOOL_ALLOWLIST_MAX_SIZE = 50;
 export const TELEGRAM_GROUP_TITLE_CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 
+/** A Telegram chat title fit to store: cut to the limit, control characters blanked, never empty. */
+export function cleanGroupTitle(raw: string, fallback: string): string {
+  const cleaned = Array.from(raw.slice(0, GROUP_TITLE_MAX_LENGTH))
+    .map((char) => (TELEGRAM_GROUP_TITLE_CONTROL_PATTERN.test(char) ? " " : char))
+    .join("")
+    .trim();
+  return cleaned || fallback;
+}
+
 export const telegramGroupIdSchema = z
   // PostgreSQL and Telegram boundaries use strings so large identifiers are never rounded by JSON.
   .string()

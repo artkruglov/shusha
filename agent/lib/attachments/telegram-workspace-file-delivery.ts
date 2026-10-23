@@ -12,6 +12,7 @@ import {
 } from "../../config.js";
 import { AppError } from "../app-error.js";
 import { renderTelegramMarkdownHtml } from "../telegram-markdown.js";
+import { pacedTelegramMultipartSend } from "../telegram-send-pacer.js";
 
 const TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024;
 const TELEGRAM_CAPTION_MAX_CHARACTERS = 1_024;
@@ -90,11 +91,12 @@ export async function deliverWorkspaceFile(
 
   let response: Response;
   try {
-    response = await fetchImplementation(`https://api.telegram.org/bot${token}/${method}`, {
-      body: form,
-      method: "POST",
-      signal: AbortSignal.timeout(TELEGRAM_API_REQUEST_TIMEOUT_MS),
-    });
+    response = await pacedTelegramMultipartSend(method, input.chatId, () =>
+      fetchImplementation(`https://api.telegram.org/bot${token}/${method}`, {
+        body: form,
+        method: "POST",
+        signal: AbortSignal.timeout(TELEGRAM_API_REQUEST_TIMEOUT_MS),
+      }));
   } catch (error) {
     console.error(JSON.stringify({
       code: "AGENT_WORKSPACE_FILE_DELIVERY_AMBIGUOUS",

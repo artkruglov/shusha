@@ -44,11 +44,23 @@ export interface TelegramIngressClaim {
   voice: TelegramIngressVoice | null;
 }
 
+export interface TelegramPrivateBurstPolicy {
+  /** A steady stream is claimed once this long has passed since the head arrived. */
+  maxWaitMilliseconds: number;
+  /** The chat must have been quiet this long since its newest waiting message. */
+  quietMilliseconds: number;
+}
+
+/** No waiting: the head is claimed the moment it is the oldest of its queue (tests, callbacks). */
+export const NO_PRIVATE_BURST: TelegramPrivateBurstPolicy = { maxWaitMilliseconds: 0, quietMilliseconds: 0 };
+
 export interface TelegramIngressRepository {
   acceptMedia(input: {
     chatId: string;
     chatType: "channel" | "group" | "private" | "supergroup";
     mediaKind: Exclude<TelegramInboundMediaKind, "none">;
+    /** The update still has text to deliver when its media is refused: no tombstone, it is queued. */
+    textFallback?: boolean;
     updateId: string;
   }): Promise<boolean>;
   beginVoiceTranscription(updateId: string, leaseToken: string): Promise<"completed" | "started">;
@@ -66,12 +78,16 @@ export interface TelegramIngressRepository {
   }): Promise<TelegramIngressClaim[]>;
   /**
    * Leases the oldest claimable update of any queue. `callbackOnly` restricts the lease to button
-   * presses for the callback pool; an earlier update of the same queue still blocks them.
+   * presses and guest messages for the callback pool; an earlier update of the same queue still
+   * blocks them. A private
+   * head still receiving a burst is left alone (`burst`).
    */
   claimNext(
     leaseMilliseconds: number,
-    options?: { callbackOnly?: boolean },
+    options?: { burst?: TelegramPrivateBurstPolicy; callbackOnly?: boolean },
   ): Promise<TelegramIngressClaim | null>;
+  /** Milliseconds until the earliest held private chat becomes claimable, or null when none is held. */
+  heldPrivateChatReadyIn?(burst: TelegramPrivateBurstPolicy): Promise<number | null>;
   complete(updateId: string, leaseToken: string): Promise<void>;
   completeWithSession(
     updateId: string,
@@ -96,6 +112,7 @@ export interface TelegramIngressRepository {
     previousContinuationKey: string;
     queueId: string;
   }): Promise<void>;
+  /** Returns an update to the queue; a set dispatch marker stays, so its message is never dispatched again. */
   release(updateId: string, leaseToken: string, failure: TelegramIngressFailure): Promise<void>;
   /**
    * Expires every live `processing` lease. Only the single agent process holds leases, so the

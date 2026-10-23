@@ -75,11 +75,13 @@ export const telegramIngressProcessingRepository: ProcessingOperations = {
       [updateId, leaseToken],
     );
     if (!existing.rows[0]?.active) {
-      throw new AppError("AGENT_TELEGRAM_LEASE_LOST", "Срок передачи сообщения в Eve истёк. Операция остановлена");
+      throw new AppError("AGENT_TELEGRAM_LEASE_LOST", "Срок передачи сообщения на обработку истёк. Операция остановлена");
     }
     throw new AppError(
       "AGENT_TELEGRAM_DISPATCH_RECOVERY_REQUIRED",
-      "Передача сообщения в Eve была прервана. Автоматический повтор отключён для защиты от двойного действия",
+      // The person reads this (`failureNoticeText`): the interrupted dispatch may or may not have reached
+      // the agent, and a second dispatch could repeat an action, so they decide whether to send it again.
+      "Не уверена, что обработала это сообщение: если ответа на него не было, отправьте его ещё раз.",
     );
   },
 

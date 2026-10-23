@@ -8,11 +8,13 @@
 import { defineTool } from "eve/tools";
 import { currentTimeRepository } from "../current-time-repository.js";
 import { requireMemoryAuthorization } from "../memory-context.js";
-import { sharedTaskInput } from "../shared-tasks.js";
+import { CLOSED_TASK_STATUSES, sharedTaskInput } from "../shared-tasks.js";
 import { sharedTaskRepository } from "../shared-task-repository.js";
 import { loadBoardProjects } from "../projects/project-board.js";
-import { taskBoardReply, type BoardTask } from "../task-board.js";
+import { closedTaskBoard, type BoardTask } from "../task-board.js";
+import { boardMarkdown } from "../task-buttons/board-buttons.js";
 import { markTelegramKeepOpen } from "../telegram-keep-open-turns.js";
+import { markTurnBoard, type TurnBoard } from "../telegram-turn-board.js";
 import { progressNoticeKey } from "../telegram-progress-deferral.js";
 import { describeAdoptedClosures, describeFiling, type FiledTask } from "../task-filing.js";
 
@@ -35,10 +37,10 @@ export default defineTool({
     "Одно действие над несколькими делами это один batch, а не вызов на каждое: items до 20, в пункте action и поля этого действия, одно дело в пакете один раз. В пакет идёт всё, кроме чтений, передачи и release. Отказ пункта отменяет весь пакет, причина в ответе.",
     "create: title, kind task|idea|ritual (по умолчанию task), listName, details; срок dueAt или dueOn только у task. Идея и традиция не обязательство участников.",
     "create без assigneeRef пишет дело на автора принятым; unassigned:true заводит ничьё дело open, только в группе. claim берёт ничьё, занятое взять нельзя.",
-    "reopen с id возвращает закрытое по ошибке в работу (id из ответа закрытия или list view done).",
+    "reopen: id закрытого по ошибке (из ответа закрытия или view done) возвращает его в работу.",
     "Область выводится из чата, личное не публикуй в группе. В личке list показывает мои назначения и запланированные мной идеи/традиции, в группе только её область.",
-    "list без status даёт только незакрытое, view done закрытые; строки краткие, полная запись с details через get с id. board в ответе list это готовая доска для человека: на просьбу показать дела отправь её как есть.",
-    "Фильтры list: status, listName, view mine|promised|waiting|open|today|ideas|rituals|planned|inbox|transfers|done. promised: что поручили мне другие; waiting: мои просьбы другим; open: свободные; today: срок или план на сегодня в поясе человека, просроченное первым; inbox: неразобранное без срока и плана (в группе без личного плана). planned и from/until YYYY-MM-DD только в личке. nextCursor передай как cursor; incomplete значит, что часть групп не проверена. lists: имена списков с источником, одинаковое имя в разных чатах это разные списки. lifeArea self|couple|kids|home|work и одноимённые view: сфера жизни.",
+    "list без status: только незакрытое, view done: закрытые; строки краткие, полная запись с details: get с id. show:true на просьбу показать дела: доску приложит сервер, сам список не пиши.",
+    "Фильтры list: status, listName, view mine|promised|waiting|open|today|ideas|rituals|planned|inbox|transfers|done. promised: что поручили мне другие; waiting: мои просьбы другим; open: свободные; today: срок или план на сегодня в поясе человека, просроченное первым; inbox: неразобранное без срока и плана (в группе без личного плана). planned и from/until YYYY-MM-DD только в личке. nextCursor передай как cursor; hidden: сколько дел групп скрыто проверкой доступа, скажи это. lists: имена списков с источником, одно имя в разных чатах это разные списки. lifeArea self|couple|kids|home|work и одноимённые view: сфера жизни.",
     "plan: id, plannedFrom, plannedUntil YYYY-MM-DD; личный период, не общий срок. unplan: id.",
     "update или clarify: id, version из list и изменения title/details/listName/dueAt/dueOn, null очищает поле. clarify по явной просьбе убирает из inbox, сохраняя originalText. Свободное правят читатели, принятое исполнитель. activate с id/version делает идею своим делом только по просьбе.",
     "careAreaRef связывает create с доступной областью заботы и сужает list до её дел.",
@@ -76,14 +78,39 @@ export default defineTool({
       keepOpen();
       return { ...visible, ...notice };
     }
-    // Доску собирает код: пересказанный моделью список приходил сплошным абзацем и прятался под кат.
+    // Доску собирает код и прикладывает канал: 21 октября модель пересказала поле `board` сплошными
+    // строками по девять дел. Теперь модель доски не видит, а просит её флагом `show`; без него `list`
+    // это чтение для работы (например, перед закрытием), и доска под ответом была бы лишней.
     // Виды чужих обязательств (просьбы другим, входящие передачи) доской не оформляются: там
     // строки не про дела самого человека, и «Открытых дел: N» вводило бы в заблуждение.
-    const ownList = input.action === "list" && !["transfers", "waiting"].includes(String(input.view ?? ""));
+    const ownList = input.action === "list" && input.show === true && !["transfers", "waiting"].includes(String(input.view ?? ""));
     const tasks = ownList ? (visible as { tasks?: readonly BoardTask[] }).tasks : undefined;
     if (!tasks) return visible;
-    const timezone = await currentTimeRepository.findTurnTimezone(auth.userId, auth.familyId) ?? "UTC";
-    const projects = await loadBoardProjects(auth);
-    return { ...visible, board: taskBoardReply(tasks, new Date(), timezone, projects) };
+    const board = await turnBoard(input, tasks, auth);
+    if (board === null) return { ...visible, board: "Показывать нечего: открытых дел нет." };
+    // Without a turn to attach it to, nothing would show the board: then the model answers with the list itself.
+    if (typeof turn?.id !== "string" || typeof turn.turn?.id !== "string") return visible;
+    markTurnBoard(progressNoticeKey(turn.id, turn.turn.id), board);
+    return { ...visible, board: "Человек получит доску отдельным сообщением после ответа. О доске не говори и дела не перечисляй: одна фраза о главном или ничего." };
   },
 });
+
+/** Доска хода: Rich Markdown с кнопками «✓» в личке; канал шлёт её отдельным сообщением после ответа. */
+async function turnBoard(
+  input: { careAreaRef?: string; lifeArea?: string | null; listName?: string | null; status?: string; view?: string },
+  tasks: readonly BoardTask[],
+  auth: ReturnType<typeof requireMemoryAuthorization>,
+): Promise<TurnBoard | null> {
+  // Закрытое показывает своя доска: открытая отбросила бы все его строки.
+  if (input.view === "done" || (input.status && CLOSED_TASK_STATUSES.includes(input.status as never))) {
+    const markdown = closedTaskBoard(tasks, "rich");
+    return markdown === null ? null : { markdown };
+  }
+  const timezone = await currentTimeRepository.findTurnTimezone(auth.userId, auth.familyId) ?? "UTC";
+  const projects = await loadBoardProjects(auth);
+  // The board keeps the list it was asked for: a press redraws «на сегодня», not the whole list (ревью 21 октября 2026).
+  const filters = Object.fromEntries((["careAreaRef", "lifeArea", "listName", "status", "view"] as const)
+    .flatMap((key) => typeof input[key] === "string" ? [[key, input[key] as string]] : []));
+  const markdown = await boardMarkdown({ auth, now: new Date(), query: { filters, source: "list" }, tasks, timezone, ...(projects ? { projects } : {}) });
+  return markdown === null ? null : { markdown };
+}

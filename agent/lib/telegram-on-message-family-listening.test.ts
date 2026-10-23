@@ -65,6 +65,36 @@ describe("family group listening", () => {
     expect(repository.memoryReview.observePassiveMessage).toHaveBeenCalledTimes(1);
   });
 
+  it("answers /family from the registration command path and never starts a turn for it", async () => {
+    const repository = familyGroup("all");
+    repository.telegram.findGroup.mockResolvedValue(null);
+    repository.familyGroup.command.mockResolvedValue("registered");
+    const { context, sendMessage } = telegramContext();
+    await expect(createTelegramMessageHandler(repository)(context, groupMessage("/family"))).resolves.toBeNull();
+
+    expect(repository.familyGroup.command).toHaveBeenCalledWith(expect.objectContaining({ telegramChatId: "group-101" }));
+    expect(sendMessage).toHaveBeenCalledWith(expect.stringContaining("Группа подключена"));
+  });
+
+  it("lets a person without a family in when the group auto-join lets them, then treats them as a member", async () => {
+    const repository = familyGroup("all");
+    repository.telegram.findIdentity
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ familyId: "family-1", role: "member", userId: "user-2" });
+    repository.familyGroup.autoJoin.mockResolvedValue({ ownerTelegramUserId: "9001" });
+    const result = await createTelegramMessageHandler(repository)(telegramContext().context, groupMessage(LIST));
+
+    expect(repository.familyGroup.autoJoin).toHaveBeenCalledTimes(1);
+    expect(result).not.toBeNull();
+  });
+
+  it("keeps a stranger out when auto-join refuses", async () => {
+    const repository = familyGroup("all");
+    repository.telegram.findIdentity.mockResolvedValue(null);
+    repository.familyGroup.autoJoin.mockResolvedValue(null);
+    await expect(createTelegramMessageHandler(repository)(telegramContext().context, groupMessage(LIST))).resolves.toBeNull();
+  });
+
   it("observes but does not answer an unaddressed message of someone outside the family", async () => {
     const repository = familyGroup("all");
     repository.telegram.findIdentity.mockResolvedValue(null);

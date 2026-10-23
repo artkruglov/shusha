@@ -10,6 +10,8 @@
  * - Timeline-proven agent replies can start a fresh message turn after application session rotation.
  * - One server-clock snapshot anchors all time-sensitive work and model context in an accepted turn.
  * - Registered groups project the verified dynamic skill policy into turn auth.
+ * - A group without a family (migration 175) takes the same path without the family machinery:
+ *   no quiet memory review, areas, memory context, projects or family timezone.
  * - Production side-effect adapters are assembled in `telegram-on-message-repositories.ts`.
  */
 import type {
@@ -22,9 +24,18 @@ import type { StoredTelegramAttachment } from "./attachments/telegram-workspace-
 import { preparePrivateImageAnalysis } from "./attachments/telegram-private-image-analysis.js";
 import { AppError, isAppError } from "./app-error.js";
 import { bindTelegramConversationTimeline } from "./telegram-conversation-timeline.js";
-import { evaluateConversationAccess } from "./family-access.js";
+import { evaluateConversationAccess, hasFamilyAccess } from "./family-access.js";
 import { parseInvitationStartCommand } from "./invitation-code.js";
 import { CONVERSATION_TIMELINE_SELECTION_MAX_ENTRIES } from "./memory-config.js";
+import {
+  FAMILY_GROUP_COMMAND_PATTERN,
+  FAMILY_GROUP_REPLIES,
+} from "./telegram-family-group-command.js";
+import { notifyOwnerMemberJoined } from "./telegram-delivery.js";
+import { FAMILYLESS_GROUP_BUDGET_NOTICE, parseFamilylessGroupCommand } from "./telegram-familyless-group-command.js";
+import { GROUP_CONNECT_REPLIES, parseGroupConnectCommand } from "./telegram-group-connect-command.js";
+import { FAMILY_BUDGET_NOTICE } from "./family-budget-repository.js";
+import { isDatabaseFamilyId } from "./database-context.js";
 import { handleTelegramEnrollmentBoundary } from "./telegram-enrollment-boundary.js";
 import { groupCanonicalContinuationToken } from "./sessions/group-canonical-token.js";
 import {
@@ -63,6 +74,8 @@ import { prepareTelegramMemoryReviewTurn } from "./memory-review/telegram-memory
 import { telegramInboundActor } from "./telegram-inbound-actor.js";
 import { readTelegramSeriesMarker } from "./telegram-message-series.js";
 import { formatPendingMessagesContext, readTelegramPendingMarker } from "./telegram-pending-messages.js";
+import { readTelegramUpdateMarker } from "./telegram-update-marker.js";
+import { createTurnInterjectionMarker } from "./turn-interjection/turn-interjection-block.js";
 import { logTurnTiming } from "./turn-timing.js";
 
 export function createTelegramMessageHandler(repositories: TelegramMessageRepositories) {
@@ -121,6 +134,11 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
       : await repositories.telegram.findGroup(message.chat.id, groupChatType);
     if (actor.kind === "telegram_channel" &&
       (group?.type !== "external" || group.messageMode === "owner_only")) return null;
+    // A group without a family has no family memory for the quiet review to feed.
+    const familylessGroup = group?.familyId === null;
+    const observePassiveMessage = async (input: { groupId: string; timelineEntryId: string }) => {
+      if (!familylessGroup) await repositories.memoryReview.observePassiveMessage(input);
+    };
     const forumTopicId = group ? telegramForumTopicId(message) : null;
     const mediaKind = classifyTelegramInboundMedia(message);
     const externalAllowlist = group?.type !== "family_private"
@@ -138,7 +156,7 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
     // Неадресованная реплика, на которую ход не начнётся, всё равно уходит в тихую проверку памяти.
     const observeUnaddressed = async () => {
       if (!group || inboundTimeline?.status !== "inserted") return;
-      await repositories.memoryReview.observePassiveMessage({
+      await observePassiveMessage({
         groupId: group.groupId,
         timelineEntryId: inboundTimeline.entryId,
       });
@@ -146,6 +164,51 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
     const hasLazyGroupAttachment = group !== null && message.attachments.length > 0 &&
       (group.type === "family_private" || externalImageAllowed || externalTextAttachmentAllowed);
     if (message.chat.type !== "private") {
+      const familyCommand = actor.kind === "telegram_user"
+        ? FAMILY_GROUP_COMMAND_PATTERN.exec(message.text.trim()) : null;
+      if (familyCommand) {
+        // Владелец подключает группу к своей семье одной командой, без chat id и без модели.
+        const result = await repositories.familyGroup.command({
+          ...(familyCommand[1] === "on" || familyCommand[1] === "off" ? { autoJoin: familyCommand[1] } : {}),
+          telegramChatId: message.chat.id,
+          telegramUserId: actor.id,
+          title: message.chat.title ?? "",
+        });
+        await ctx.telegram.sendMessage(FAMILY_GROUP_REPLIES[result]);
+        return null;
+      }
+      // «Группы»: владелец подключает обычную группу своей семьи по ссылке `?startgroup=group`, без модели.
+      // Без флага команда остаётся командой группы без семьи, как до «Групп».
+      if (repositories.groupConnect.enabled && actor.kind === "telegram_user" && groupChatType !== null &&
+        !Object.hasOwn(message.raw, "voice") && parseGroupConnectCommand(message.text, botUsername)) {
+        const result = await repositories.groupConnect.command({
+          telegramChatId: message.chat.id,
+          telegramUserId: actor.id,
+          title: message.chat.title ?? "",
+        });
+        // Подключённая группа получает приветствие в закрепе, а владелец ссылку-приглашение в личку.
+        const prepared = result === "registered" && repositories.groupConnect.prepare !== undefined &&
+          await repositories.groupConnect.prepare({
+            ownerTelegramUserId: actor.id, telegramChatId: message.chat.id, title: message.chat.title ?? "Группа",
+          });
+        if (!prepared) await ctx.telegram.sendMessage(GROUP_CONNECT_REPLIES[result]);
+        return null;
+      }
+      // Администратор включает и выключает бота в группе без семьи; группой семьи правит её владелец.
+      const familylessCommand = actor.kind === "telegram_user" && groupChatType !== null &&
+        (group === null || group.familyId === null)
+        ? parseFamilylessGroupCommand(message.text, botUsername) : null;
+      if (familylessCommand && groupChatType !== null) {
+        const reply = await repositories.familylessGroup.command({
+          command: familylessCommand,
+          telegramChatId: message.chat.id,
+          telegramChatType: groupChatType,
+          telegramUserId: actor.id,
+          title: message.chat.title ?? "",
+        });
+        if (reply !== null) await ctx.telegram.sendMessage(reply);
+        return null;
+      }
       if (!group) {
         // Registration needs the exact chat id, and nothing else tells the owner what it is. Only
         // an addressed message leaves it in the log, and never the chat title or the text.
@@ -172,7 +235,7 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
       if (unsupportedGroupSlashCommand) {
         if (inboundTimeline.status === "inserted" &&
           (actor.kind === "telegram_user" || actor.kind === "telegram_bot")) {
-          await repositories.memoryReview.observePassiveMessage({
+          await observePassiveMessage({
             groupId: group.groupId,
             timelineEntryId: inboundTimeline.entryId,
           });
@@ -213,7 +276,7 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
       if (((!addressed && !listensUnaddressed) || seriesContext) && !hasLazyGroupAttachment) {
         if (inboundTimeline.status === "inserted") {
           if (actor.kind === "telegram_user" || actor.kind === "telegram_bot") {
-            await repositories.memoryReview.observePassiveMessage({
+            await observePassiveMessage({
               groupId: group.groupId,
               timelineEntryId: inboundTimeline.entryId,
             });
@@ -225,9 +288,22 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
       return null;
     }
 
-    const identity = actor.kind === "telegram_user"
+    let identity = actor.kind === "telegram_user"
       ? await repositories.telegram.findIdentity(actor.id)
       : null;
+    // Группа, подключённая командой /family, впускает человека без семьи первым же сообщением.
+    if (!identity && actor.kind === "telegram_user" && group?.type === "family_private" && message.from) {
+      const joined = await repositories.familyGroup.autoJoin({
+        displayName: telegramProfileName(message),
+        telegramChatId: message.chat.id,
+        telegramUserId: actor.id,
+        ...(message.from.username ? { username: message.from.username } : {}),
+      });
+      if (joined) {
+        identity = await repositories.telegram.findIdentity(actor.id);
+        await notifyOwnerMemberJoined({ memberName: telegramProfileName(message), ownerTelegramUserId: joined.ownerTelegramUserId, via: "group" });
+      }
+    }
 
     // Group policy and identity are separate DB records. Re-reading the group establishes a
     // fail-closed authorization boundary if owner-only mode, type, or capabilities changed while
@@ -241,9 +317,11 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
 
     // Owner-only external groups retain everyone's timeline but dispatch solely for the current
     // persisted Osinara owner; Telegram administrator status never grants application authority.
+    // In a group without a family nobody is its Osinara owner yet, so owner-only answers nobody.
     if (
       group?.messageMode === "owner_only" &&
       (
+        group.familyId === null ||
         identity?.familyId !== group.familyId ||
         identity.role !== "owner"
       )
@@ -317,12 +395,20 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
     if ((!addressed && !listensUnaddressed) || journalDuplicate || seriesContext) {
       if (!addressed && !listensUnaddressed && !journalDuplicate && group && inboundTimeline &&
         (actor.kind === "telegram_user" || actor.kind === "telegram_bot")) {
-        await repositories.memoryReview.observePassiveMessage({
+        await observePassiveMessage({
           groupId: group.groupId,
           timelineEntryId: inboundTimeline.entryId,
         });
       }
       return null;
+    }
+    // A group without a family pays from its own monthly budget: past it, one notice a month, then silence.
+    if (familylessGroup && group) {
+      const budget = await repositories.familylessGroup.budgetGate({
+        groupId: group.groupId, now: turnStartedAt, telegramChatId: message.chat.id,
+      });
+      if (budget === "notify") await ctx.telegram.sendMessage(FAMILYLESS_GROUP_BUDGET_NOTICE);
+      if (budget !== "within") return null;
     }
 
     // The accepted verified message reactivates exactly its participant identity before profile
@@ -344,7 +430,15 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
     const replyHandling = replyAuthorization.replyHandling;
     const resumesPendingTask = replyAuthorization.resumesPendingTask;
     verifiedReplyRoute = replyAuthorization.verifiedReplyRoute;
+    // A family pays from its own monthly budget (migration 181), the same way: one notice a month, then silence.
+    // An answer to a confirmation the bot already asked still reaches it: a refusal must not wait for the timeout.
+    if (!familylessGroup && !resumesPendingTask && isDatabaseFamilyId(access.familyId)) {
+      const budget = await repositories.familyBudget.budgetGate({ familyId: access.familyId, now: turnStartedAt });
+      if (budget === "notify") await ctx.telegram.sendMessage(FAMILY_BUDGET_NOTICE);
+      if (budget !== "within") return null;
+    }
 
+    const familyAccess = hasFamilyAccess(access) ? access : null;
     // Context snapshots and one-time notices are consumed only after reply/HITL authorization has
     // proved that this accepted message will continue into an agent turn.
     const profileSignals = actor.kind === "telegram_user"
@@ -357,8 +451,9 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
       }
       // Человек написал сам: неотвеченных начатых разговоров больше нет, пауза снимается.
       if (access.userId) await repositories.initiative.markAnswered(access.userId, new Date());
+      if (!familyAccess) throw new Error("AGENT_TELEGRAM_ACCESS_INVALID: Личный чат без семьи");
       await deliverPendingMemoryThreadNotice({
-        familyId: access.familyId,
+        familyId: familyAccess.familyId,
         groupId: access.groupId,
         role: access.role,
         scopes: access.memoryScopes,
@@ -404,7 +499,8 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
         throw error;
       }
     }
-    const imageAnalysis = await preparePrivateImageAnalysis({
+    // Only a private chat analyses an image up front, and a group without a family has no workspace.
+    const imageAnalysis = message.chat.type !== "private" ? null : await preparePrivateImageAnalysis({
       attachments: storedAttachments,
       auth: telegramWorkspaceAuthorization(decision, group, message),
       question: dispatchText,
@@ -420,15 +516,17 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
       : telegramBaseContinuationToken(message, verifiedReplyRoute);
     // Область берётся из проверенного состояния чата; подготовка сессии перепроверяет её под
     // блокировкой аудитории, поэтому выбор, устаревший за эти миллисекунды, безопасен.
-    const spaceSelection = {
+    // У группы без семьи областей нет вовсе.
+    const spaceSelection = familyAccess === null ? null : {
       chatType: message.chat.type,
-      familyId: access.familyId,
+      familyId: familyAccess.familyId,
       groupId: access.groupId,
       userId: access.userId,
     };
     // Неподтверждённый чат не тратит ход впустую: иначе модель отработала бы, а ответ всё равно
     // приостановился бы на доставке — человек остался бы без ответа после оплаченного вызова.
-    if (await repositories.spaces.resolveTelegramChatMode(spaceSelection) === "unproven") {
+    if (spaceSelection !== null &&
+      await repositories.spaces.resolveTelegramChatMode(spaceSelection) === "unproven") {
       // Предупреждение отвечает тому, кто обратился; на каждую реплику чата оно звучало бы шумом.
       if (listensUnaddressed) {
         await observeUnaddressed();
@@ -439,7 +537,7 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
       );
       return null;
     }
-    const spaceContext = await repositories.spaces.resolveTurnSpace(spaceSelection);
+    const spaceContext = spaceSelection === null ? null : await repositories.spaces.resolveTurnSpace(spaceSelection);
     const appSession = await repositories.session.prepareTurn({
       baseContinuationToken,
       familyId: access.familyId,
@@ -472,7 +570,7 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
     // a lookup failure must not cost the turn. The sender's own timezone wins, else the owner's.
     let timezone: string | null = null;
     try {
-      timezone = await repositories.currentTime.findTurnTimezone(access.userId ?? null, access.familyId);
+      if (familyAccess) timezone = await repositories.currentTime.findTurnTimezone(access.userId ?? null, familyAccess.familyId);
     } catch (error) {
       console.error(JSON.stringify({
         code: "AGENT_CURRENT_TIME_TIMEZONE_LOOKUP_FAILED",
@@ -511,7 +609,7 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
         "AGENT_CONVERSATION_TURN_CONTEXT_MISSING: Не удалось подготовить историю разговора",
       );
     }
-    const groupTurnContext = group && actor.kind === "telegram_user"
+    const groupTurnContext = group && actor.kind === "telegram_user" && !familylessGroup
       ? await prepareTelegramMemoryReviewTurn({
           applicationSessionId: appSession.id,
           conversationId: conversation.id,
@@ -552,8 +650,8 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
       }
     }
     // Memory travels with the delivery so the cacheable system prefix never changes between turns.
-    const retrievedMemoryContext = await repositories.memoryContext({
-      access,
+    const retrievedMemoryContext = familyAccess === null ? [] : await repositories.memoryContext({
+      access: familyAccess,
       actor: { id: actor.id, kind: actor.kind },
       applicationSessionId: appSession.id,
       conversationId: conversation.id,
@@ -570,10 +668,10 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
     const pendingBlock = formatPendingMessagesContext(readTelegramPendingMarker(message.raw));
     // Проекты области: справка, по которой агент выбирает проект для дела. Сбой блока ход не роняет.
     let projectsBlock: string | null = null;
-    if (group?.type !== "external") {
+    if (group?.type !== "external" && familyAccess) {
       try {
         projectsBlock = await repositories.taskProjects.contextBlock({
-          access, actor: { id: actor.id, kind: actor.kind },
+          access: familyAccess, actor: { id: actor.id, kind: actor.kind },
           ...(appSession.spacePolicy === undefined ? {} : { space: appSession.spacePolicy }),
         });
       } catch (error) {
@@ -588,7 +686,26 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
       ...(pendingBlock === null ? [] : [pendingBlock]),
       ...(projectsBlock === null ? [] : [projectsBlock]),
     ];
+    // A running turn of this same conversation may already have seen this message with a tool result.
+    const currentUpdateId = readTelegramUpdateMarker(message.raw);
+    const shownDuringTurn = currentUpdateId !== null
+      ? await repositories.turnInterjections.findDeliveredContentKind(currentUpdateId, appSession.id)
+      : null;
+    const earlierInSeries = series?.role === "current" ? series.earlierUpdateIds ?? [] : [];
+    const shownEarlierInSeries = earlierInSeries.length > 0
+      ? [...(await repositories.turnInterjections.findDeliveredContentKinds(earlierInSeries, appSession.id)).values()]
+        .filter((kind) => kind !== "notice").length
+      : 0;
+    // Messages its author sends while this turn works can reach it only in the trusted zones.
+    const turnInterjectionMarker = currentUpdateId !== null && !resumesPendingTask &&
+      actor.kind === "telegram_user" && (group === null || group.type === "family_private")
+      ? createTurnInterjectionMarker()
+      : null;
     const turnResult = buildTelegramTurnResult({
+      currentUpdateId,
+      shownDuringTurn,
+      shownEarlierInSeries,
+      turnInterjectionMarker,
       access,
       actor,
       appSession,

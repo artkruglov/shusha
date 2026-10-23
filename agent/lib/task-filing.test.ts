@@ -19,9 +19,10 @@ describe("describeFiling", () => {
     expect(filed).toBe("• «Купить батарейки» → список «Дом», срок 03.10, видишь только ты");
   });
 
-  it("says plainly that a task has no list yet", () => {
+  it("says nothing about a place a task does not have yet", () => {
+    // «Пока без списка» читалось как жаргон (ревью 21 октября 2026).
     expect(describeFiling([task({ title: "Разобраться с кружком" })], TZ).filed)
-      .toBe("• «Разобраться с кружком» → пока без списка, без срока, видишь только ты");
+      .toBe("• «Разобраться с кружком» → без срока, видишь только ты");
   });
 
   it("shows the life area by its human name", () => {
@@ -34,13 +35,11 @@ describe("describeFiling", () => {
     const proposed = describeFiling([task({ assignee: "Юля", scope: "family", status: "proposed" })], TZ).filed;
 
     expect(free.split("\n")).toEqual([
-      "• «Купить батарейки» → пока без списка, без срока, ничьё, видит вся семья",
+      "• «Купить батарейки» → без срока, никто не взял, видит вся семья",
       "Ничьи дела никто не взял: скажи «беру» или назови, кому.",
     ]);
-    expect(proposed.split("\n")).toEqual([
-      "• «Купить батарейки» → пока без списка, без срока, ждёт согласия: Юля, видит вся семья",
-      "Ждут согласия: Юля. Пока ответа нет, дело не назначено.",
-    ]);
+    // Просьба называется один раз: вторая строка «Ждут согласия: Юля» повторяла первую.
+    expect(proposed.split("\n")).toEqual(["• «Купить батарейки» → без срока, ждёт ответа: Юля, видит вся семья"]);
   });
 
   it("does not repeat the unowned warning for every line of a batch", () => {
@@ -48,12 +47,12 @@ describe("describeFiling", () => {
     const lines = describeFiling(many, TZ).filed.split("\n");
 
     expect(lines).toHaveLength(4);
-    expect(lines.filter((line) => line.includes("никто не взял"))).toHaveLength(1);
+    expect(lines.filter((line) => line.startsWith("Ничьи дела"))).toHaveLength(1);
   });
 
   it("adds no warning for a personal task or for one somebody already owns", () => {
     expect(describeFiling([task({ scope: "family", status: "accepted" }), task({ status: "accepted" })], TZ).filed)
-      .not.toMatch(/никто не взял|Ждут согласия/u);
+      .not.toMatch(/никто не взял|ждёт ответа/u);
   });
 
   it("names the unowned tasks that a closure just assigned, without gendered verbs or a bare 'you'", () => {

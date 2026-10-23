@@ -37,7 +37,7 @@ describe("configureTelegramWebhook", () => {
     expect(fetch.mock.calls[0]?.[1]).toMatchObject({ method: "POST" });
     const body = JSON.parse(String(fetch.mock.calls[0]?.[1]?.body)) as Record<string, unknown>;
     expect(body).toEqual({
-      allowed_updates: ["message", "callback_query"],
+      allowed_updates: ["message", "callback_query", "guest_message", "chat_join_request"],
       secret_token: "webhook_secret-123",
       url: "https://bot.example.com/eve/v1/telegram",
     });

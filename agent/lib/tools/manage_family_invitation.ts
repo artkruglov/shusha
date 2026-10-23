@@ -26,7 +26,7 @@ import {
 } from "../tool-input-validation.js";
 
 const INPUT_ERROR_CODE = "AGENT_FAMILY_INVITATION_INPUT_INVALID";
-const TOOL_ACTIONS = ["create", "approve", "members", "set_relation"] as const;
+const TOOL_ACTIONS = ["create", "approve", "members", "set_relation", "remove_member", "restore_member"] as const;
 const RELATIONS = ["partner", "parent", "child", "other"] as const;
 const TOP_LEVEL_FIELDS = [
   "action",
@@ -42,7 +42,7 @@ const manageFamilyInvitationSchema = z.object({
   candidateDisplayName: z.string().optional().describe("Обязательно только для action=approve."),
   candidateTelegramUserId: z.string().optional().describe("Обязательно только для action=approve."),
   invitationId: z.string().optional().describe("UUID обязателен только для action=approve."),
-  participantRef: z.string().optional().describe("Обязательно для action=set_relation: ref из participants."),
+  participantRef: z.string().optional().describe("Обязательно для set_relation и remove_member: ref из members."),
   relation: z.enum(RELATIONS).optional().describe("Обязательно для action=set_relation."),
 }).strict();
 
@@ -72,6 +72,10 @@ function requireManageFamilyInvitationInput(input: unknown) {
   // MiniMax may materialize known approve-only siblings for create. Creation ignores them and
   // cannot bind a candidate accidentally; unpublished fields still fail in the global guard.
   if (action === "create" || action === "members") return { action } as const;
+  if (action === "remove_member" || action === "restore_member") {
+    requireOnlyFields(payload, ["action", "participantRef"], `action=${action}`, INPUT_ERROR_CODE);
+    return { action, participantRef: requiredUuid(payload, "participantRef", INPUT_ERROR_CODE, "участник из members") } as const;
+  }
   if (action === "set_relation") {
     requireOnlyFields(payload, ["action", "participantRef", "relation"], "action=set_relation", INPUT_ERROR_CODE);
     const relation = payload["relation"];
@@ -88,17 +92,18 @@ function requireManageFamilyInvitationInput(input: unknown) {
 }
 
 const TOOL_DESCRIPTION = [
-  "Создать одноразовое семейное приглашение или подтвердить кандидата; оба action требуют подтверждения. Create: {\"action\":\"create\"} без полей кандидата.",
-  "Members: {\"action\":\"members\"} отдаёт участников семьи с participantRef и текущей меткой; в личном чате это единственный источник ref, потому что manage_shared_tasks участников там не собирает.",
-  "Set_relation: сначала возьми participantRef вызовом members, имя в ref не превращай; затем {\"action\":\"set_relation\",\"participantRef\":\"<uuid оттуда>\",\"relation\":\"partner|parent|child|other\"} по явным словам владельца о том, кто ему кто. Кнопки не требует, прав не меняет; нужна, чтобы вопросы про пару не уходили родителю.",
-  "Approve: {\"action\":\"approve\",\"invitationId\":\"<UUID из list_pending_family_invitations>\",\"candidateTelegramUserId\":\"123456789\",\"candidateDisplayName\":\"Анна\"}; все три значения берутся точно из list_pending_family_invitations, иначе запроси список снова или спроси владельца.",
+  "Create: {\"action\":\"create\"} шлёт владельцу в личку одноразовую ссылку без кнопки: близкий входит сразу, владелец получает уведомление.",
+  "Members: {\"action\":\"members\"} отдаёт участников (participantRef, метка) и removed; ref только отсюда.",
+  "Set_relation: {\"action\":\"set_relation\",\"participantRef\":\"<uuid из members>\",\"relation\":\"partner|parent|child|other\"} по словам владельца о том, кто ему кто; кнопки нет.",
+  "Remove_member: {\"action\":\"remove_member\",\"participantRef\":\"<uuid из members>\"} убирает участника с кнопкой и закрывает ему самовольный возврат; владельца убрать нельзя. Restore_member с participantRef из members.removed возвращает право войти без кнопки.",
+  "Approve: {\"action\":\"approve\",\"invitationId\":\"<UUID из list_pending_family_invitations>\",\"candidateTelegramUserId\":\"123456789\",\"candidateDisplayName\":\"Анна\"}; значения точно из списка, с кнопкой.",
 ].join(" ");
 
 export default defineTool({
   approval: ({ toolInput }) => {
     // Метка родства обратима и прав не меняет, поэтому кнопка нужна только приглашениям.
     // Чтение списка и обратимая метка кнопки не требуют; приглашение и подтверждение требуют.
-    return ["members", "set_relation"].includes(requireManageFamilyInvitationInput(toolInput).action)
+    return ["members", "set_relation", "create", "restore_member"].includes(requireManageFamilyInvitationInput(toolInput).action)
       ? "not-applicable"
       : "user-approval";
   },
@@ -109,8 +114,12 @@ export default defineTool({
     const owner = requirePrivateTelegramOwner(ctx);
     const space=readSpaceAttributes(ctx.session.auth.current?.attributes);
     if (parsed.action === "members") {
-      return { members: await familyRepository.listMembers({
-        familyId: owner.familyId, ownerUserId: owner.userId }) };
+      const scope = { familyId: owner.familyId, ownerUserId: owner.userId };
+      return { members: await familyRepository.listMembers(scope), removed: await familyRepository.listRemovedMembers(scope) };
+    }
+    if (parsed.action === "restore_member") {
+      return await familyRepository.restoreMember({
+        banRef: parsed.participantRef, familyId: owner.familyId, ownerUserId: owner.userId });
     }
     if (parsed.action === "set_relation") {
       return await familyRepository.setRelation({
@@ -119,6 +128,10 @@ export default defineTool({
         participantRef: parsed.participantRef,
         relation: parsed.relation,
       });
+    }
+    if (parsed.action === "remove_member") {
+      return await familyRepository.removeMember({
+        familyId: owner.familyId, ownerUserId: owner.userId, participantRef: parsed.participantRef });
     }
     if (parsed.action === "approve") {
       return await familyRepository.approveInvitation({
@@ -135,6 +148,7 @@ export default defineTool({
       owner.userId,
       ctx.callId,
       space,
+      { autoApprove: true },
     );
     if (invitation.deliveryRequired) {
       // The repository persists one transport attempt and rechecks live owner access before send.

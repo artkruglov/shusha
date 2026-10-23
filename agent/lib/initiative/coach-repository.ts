@@ -5,6 +5,8 @@
  * - `CoachRecipient`: человек с личным чатом, его правило инициативы и факты для повода.
  * - `coachRepository`: адресаты и заявка на сутки.
  *
+ * Тихая традиция это своя или семейная (её мог завести другой взрослый): спросить о ней можно каждого.
+ *
  * Факты это только структура: окна личного времени, традиции, предложения партнёра и прошлые
  * касания. Текст переписки, память и дела коуч не читает. Пишет только тем, кто сам писал боту
  * в личку: Telegram не даёт боту начать разговор первым, а общий чат для вопроса о себе не место.
@@ -75,7 +77,9 @@ async function factsFor(row: InitiativeRecipientRow, now: Date): Promise<CoachFa
       `SELECT task.id, task.title FROM shared_tasks AS task
         WHERE task.family_id = $1 AND task.kind = 'ritual' AND task.scope IN ('personal', 'family')
           AND task.status IN ('open', 'accepted')
-          AND (task.assignee_telegram_id = $3 OR task.creator_telegram_id = $3)
+          -- A family tradition of another adult only without an area (legacy family): one written in a shared
+          -- area of spaces mode may belong to a circle this person is not in, and its title must not reach them.
+          AND ((task.scope = 'family' AND task.space_id IS NULL) OR task.assignee_telegram_id = $3 OR task.creator_telegram_id = $3)
           AND task.created_at < $4::timestamptz - make_interval(days => $5)
           AND NOT EXISTS (SELECT 1 FROM shared_ritual_occurrences AS occurrence
                            WHERE occurrence.task_id = task.id
@@ -90,11 +94,12 @@ async function factsFor(row: InitiativeRecipientRow, now: Date): Promise<CoachFa
       "SELECT count(*)::text FROM personal_time_windows WHERE family_id = $1 AND user_id = $2",
       params.slice(0, 2),
     ),
+    // Любая живая традиция семьи, и чужая личная тоже, но только фактом: «что делать вместе» не спрашивают
+    // у семьи, которая уже что-то делает, а названия чужих традиций сюда не попадают.
     db.query<{ count: string }>(
       `SELECT count(*)::text FROM shared_tasks
-        WHERE family_id = $1 AND kind = 'ritual' AND status IN ('open', 'proposed', 'accepted')
-          AND (scope = 'family' OR (scope = 'personal' AND assignee_telegram_id = $2))`,
-      [row.family_id, row.telegram_user_id],
+        WHERE family_id = $1 AND kind = 'ritual' AND status <> 'cancelled' AND scope IN ('personal', 'family')`,
+      [row.family_id],
     ),
     // Принятые области человека: только факт наличия, ни дел, ни нагрузки коуч не читает.
     db.query<{ count: string }>(

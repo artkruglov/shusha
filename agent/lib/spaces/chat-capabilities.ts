@@ -67,7 +67,7 @@ export const CAPABILITY_GROUPS: Readonly<Record<string, CapabilityGroup>> = {
     ],
   },
   time: { label: "Время и история чата", tools: ["get_current_time", "list_group_history", "read_scheduled_group_history"] },
-  web: { label: "Поиск в интернете", tools: ["web_fetch", "web_search"] },
+  web: { label: "Поиск в интернете и браузер с входом на сайты", tools: ["browser", "web_fetch", "web_search"] },
 };
 
 export function chatCapabilities(available: readonly string[]): { group: string; label: string }[] {

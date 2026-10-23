@@ -24,6 +24,7 @@ const MIN_SECRET_LENGTH = 12;
 
 /** Переменные, значение которых в журнале всегда ошибка. */
 const SECRET_ENVIRONMENT_KEYS = [
+  "AGENT_INTERNAL_TOKEN",
   "CLI_PROXY_API_KEY",
   "CLOUDFLARE_AI_TOKEN",
   "GIGAAM_API_KEY",

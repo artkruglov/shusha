@@ -125,4 +125,45 @@ describe("Docker sandbox lifecycle", () => {
     await Promise.all([removal, work]);
     expect(events).toEqual(["remove-start", "remove-end", "work"]);
   });
+
+  it("runs a sweep only alone and holds new work of the session until it ends", async () => {
+    const registry = createSandboxActivityRegistry(() => 1_000);
+    const events: string[] = [];
+    let releaseSweep!: () => void;
+    let sweep!: Promise<boolean>;
+    const command = registry.runActive(SANDBOX_SESSION_ID, async () => {
+      sweep = registry.runAlone(SANDBOX_SESSION_ID, async () => {
+        events.push("sweep-start");
+        await new Promise<void>((resolve) => {
+          releaseSweep = resolve;
+        });
+        events.push("sweep-end");
+      });
+      await Promise.resolve();
+      const next = registry.runActive(SANDBOX_SESSION_ID, async () => {
+        events.push("next");
+      });
+      await Promise.resolve();
+      expect(events).toEqual(["sweep-start"]);
+      releaseSweep();
+      expect(await sweep).toBe(true);
+      return next;
+    });
+    await (await command);
+    expect(events).toEqual(["sweep-start", "sweep-end", "next"]);
+
+    let releaseOther!: () => void;
+    const other = registry.runActive(SANDBOX_SESSION_ID, () => new Promise<void>((resolve) => {
+      releaseOther = resolve;
+    }));
+    const skipped = await registry.runActive(SANDBOX_SESSION_ID, async () =>
+      await registry.runAlone(SANDBOX_SESSION_ID, async () => {
+        events.push("never");
+      })
+    );
+    expect(skipped).toBe(false);
+    expect(events).not.toContain("never");
+    releaseOther();
+    await other;
+  });
 });

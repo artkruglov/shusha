@@ -11,6 +11,7 @@
  */
 import type { TelegramMessage } from "eve/channels/telegram";
 
+import { isOwnBotUsername } from "./telegram-bot-usernames.js";
 import type { TelegramHitlApprovalRepository } from "./telegram-hitl/approval-repository.js";
 import type { TelegramInboundActor } from "./telegram-inbound-actor.js";
 import { isReplyToBot } from "./telegram-message-policy.js";
@@ -51,7 +52,7 @@ export async function authorizeTelegramReply(input: {
     replyTarget?.from?.isBot === true && !input.replyToAgent &&
     input.message.chat.type !== "private" &&
     typeof replyTarget.from.username === "string" &&
-    replyTarget.from.username.toLowerCase() !== input.botUsername.toLowerCase()
+    !isOwnBotUsername(replyTarget.from.username, input.botUsername)
   ) {
     // A reply to another bot's message is ordinary conversation. Without this Eve's native path
     // delivered it as a freeform answer to a prompt that never existed: no turn, no boundary,

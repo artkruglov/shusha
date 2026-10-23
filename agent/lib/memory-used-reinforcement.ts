@@ -9,6 +9,7 @@
  */
 import type { SessionContext } from "eve/context";
 
+import { familylessGroupFromAuth } from "./familyless-group-auth.js";
 import { memoryContextExposureRepository } from "./memory-context-exposure-repository.js";
 import { requireMemoryAuthorization } from "./memory-context.js";
 import { memoryReinforcementRepository } from "./memory-reinforcement-repository.js";
@@ -31,6 +32,8 @@ export async function reinforceUsedMemories(
     reinforcement: memoryReinforcementRepository,
   },
 ): Promise<void> {
+  // A group without a family has no long-term memory to reinforce (migration 175).
+  if (familylessGroupFromAuth(input.ctx.session.auth.current?.attributes) !== null) return;
   try {
     const auth = requireMemoryAuthorization(input.ctx);
     const sessionTurn = await dependencies.exposures.sessionTurn(input.applicationSessionId);

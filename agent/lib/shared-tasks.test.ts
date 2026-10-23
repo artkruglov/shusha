@@ -14,6 +14,9 @@ describe("shared task lifecycle", () => {
   it("requires acceptance before completion and supports cancellation by the proposer", () => {
     expect(() => nextSharedTaskStatus("proposed", "complete", true, false)).toThrow();
     expect(nextSharedTaskStatus("proposed", "cancel", false, true)).toBe("cancelled");
+    // Ничьё дело снимает только автор.
+    expect(nextSharedTaskStatus("open", "cancel", false, true)).toBe("cancelled");
+    expect(() => nextSharedTaskStatus("open", "cancel", false, false)).toThrow();
     expect(() => nextSharedTaskStatus("completed", "cancel", true, true)).toThrow();
   });
   it("lets whoever did an unowned task close it, and says why others cannot close a claimed one", () => {

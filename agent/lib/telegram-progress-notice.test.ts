@@ -35,7 +35,7 @@ describe("Telegram progress notice", () => {
     repository.claim.mockResolvedValue({ noticeId: "notice-1" });
     sendChunk.mockResolvedValue({ chatType: "private", messageId: "701" });
 
-    await deliverTelegramProgressNotice(base);
+    await expect(deliverTelegramProgressNotice(base)).resolves.toBe("701");
 
     expect(repository.claim).toHaveBeenCalledWith({
       applicationSessionId: base.applicationSessionId,
@@ -61,7 +61,7 @@ describe("Telegram progress notice", () => {
     sendChunk.mockRejectedValue(new Error("Telegram sendMessage failed with HTTP 403."));
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    await expect(deliverTelegramProgressNotice(base)).resolves.toBeUndefined();
+    await expect(deliverTelegramProgressNotice(base)).resolves.toBeNull();
 
     expect(repository.confirm).not.toHaveBeenCalled();
     expect(logged.mock.calls[0]?.[0]).toContain("AGENT_TELEGRAM_PROGRESS_NOTICE_FAILED");

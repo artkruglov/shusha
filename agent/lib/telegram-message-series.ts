@@ -27,7 +27,7 @@ export const TELEGRAM_SERIES_MARKER_KEY = "osinara_series";
 
 export type TelegramSeriesMarker =
   | { role: "context" }
-  | { addressed: boolean; role: "current"; telegramMessageIds: string[] };
+  | { addressed: boolean; earlierUpdateIds?: string[]; role: "current"; telegramMessageIds: string[] };
 
 // Telegram marks forwarded content with one of these keys; a forward is someone else's words.
 const FORWARD_KEYS = ["forward_origin", "forward_from", "forward_from_chat", "forward_date"];
@@ -84,8 +84,13 @@ export function readTelegramSeriesMarker(raw: Record<string, unknown>): Telegram
     Array.isArray(marker.telegramMessageIds) &&
     marker.telegramMessageIds.every((id) => typeof id === "string" && /^[1-9]\d*$/u.test(id))
   ) {
+    const earlier = Array.isArray(marker.earlierUpdateIds) &&
+      marker.earlierUpdateIds.every((id) => typeof id === "string" && /^[1-9]\d*$/u.test(id))
+      ? { earlierUpdateIds: marker.earlierUpdateIds as string[] }
+      : {};
     return {
       addressed: marker.addressed,
+      ...earlier,
       role: "current",
       telegramMessageIds: marker.telegramMessageIds as string[],
     };

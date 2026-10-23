@@ -17,14 +17,17 @@ if (!databaseUrl) {
   throw new Error("AGENT_DATABASE_CONFIG_MISSING: Не задано подключение к базе данных");
 }
 
+// `--new-family` выдаёт код для ещё одной семьи в установке, где владелец уже есть.
+const newFamily = process.argv.slice(2).includes("--new-family");
+
 const client = new Client({ connectionString: databaseUrl });
 await client.connect();
 try {
   const owner = await client.query<{ exists: boolean }>(
     "SELECT EXISTS (SELECT 1 FROM family_memberships WHERE role = 'owner') AS exists",
   );
-  if (owner.rows[0]?.exists) {
-    throw new Error("AGENT_OWNER_ALREADY_EXISTS: Первый владелец уже создан");
+  if (owner.rows[0]?.exists && !newFamily) {
+    throw new Error("AGENT_OWNER_ALREADY_EXISTS: Первый владелец уже создан; для новой семьи запустите с --new-family");
   }
 
   const generated = createBootstrapCode(new Date());
@@ -34,9 +37,9 @@ try {
       "UPDATE bootstrap_codes SET consumed_at = now() WHERE consumed_at IS NULL",
     );
     await client.query(
-      `INSERT INTO bootstrap_codes (code_hash, created_at, expires_at)
-       VALUES ($1, $2, $3)`,
-      [generated.record.codeHash, generated.record.createdAt, generated.record.expiresAt],
+      `INSERT INTO bootstrap_codes (code_hash, created_at, expires_at, new_family)
+       VALUES ($1, $2, $3, $4)`,
+      [generated.record.codeHash, generated.record.createdAt, generated.record.expiresAt, newFamily],
     );
     await client.query("COMMIT");
   } catch (error) {

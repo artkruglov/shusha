@@ -26,6 +26,8 @@ const DEFAULT_DAILY_LIMIT = 3;
 
 interface RecipientRow {
   daily_limit: number;
+  overview_enabled: boolean;
+  overview_hour: number | null;
   first_ever: boolean;
   enabled: boolean;
   family_id: string;
@@ -57,7 +59,9 @@ async function overviewSpace(
 }
 
 /** Всё, что нужно для выборки дел по личности человека: область берётся из его же выбора. */
-export type TaskOwner = Pick<DailyOverviewRecipient, "familyId" | "settings" | "telegramUserId" | "userId">;
+export type TaskOwner = Pick<DailyOverviewRecipient, "familyId" | "telegramUserId" | "userId"> & {
+  readonly settings: Pick<DailyOverviewRecipient["settings"], "timezone">;
+};
 
 export const dailyOverviewRepository = {
   /** Все, у кого есть личный чат: обзор дня это личное сообщение, а не общий текст в группу. */
@@ -68,6 +72,8 @@ export const dailyOverviewRepository = {
               to_char(settings.quiet_start, 'HH24:MI') AS quiet_start,
               to_char(settings.quiet_end, 'HH24:MI') AS quiet_end,
               COALESCE(settings.initiative_enabled, true) AS enabled,
+              COALESCE(settings.daily_overview_enabled, true) AS overview_enabled,
+              settings.daily_overview_hour AS overview_hour,
               COALESCE(settings.initiative_daily_limit, $2::smallint) AS daily_limit,
               (SELECT count(*) FROM initiative_messages AS sent
                 WHERE sent.user_id = person.id
@@ -90,6 +96,8 @@ export const dailyOverviewRepository = {
     return rows.map((row) => ({
       familyId: row.family_id,
       firstEver: row.first_ever,
+      overviewEnabled: row.overview_enabled,
+      overviewHour: row.overview_hour,
       settings: {
         dailyLimit: row.daily_limit,
         enabled: row.enabled,
@@ -107,7 +115,7 @@ export const dailyOverviewRepository = {
    * Тип адресата сужен до того, что обзор действительно читает: недельный обзор собирает те же
    * дела тем же путём и ничего не знает про `firstEver` утреннего сообщения.
    */
-  async overview(recipient: TaskOwner): Promise<DailyOverview> {
+  async overview(recipient: TaskOwner, options: { withoutGroups?: boolean } = {}): Promise<DailyOverview> {
     const client = await database().connect();
     let space: { policyVersion: number; spaceId: string } | null;
     try {
@@ -148,10 +156,22 @@ export const dailyOverviewRepository = {
         ORDER BY lower(title) LIMIT 8`,
       [recipient.familyId, recipient.telegramUserId],
     );
-    const projects = await loadBoardProjects(auth);
+    const projects = await loadBoardProjects(auth, options);
+    // `withoutGroups`: the Mini App's board, which never shows an external group's tasks (scope `group`).
+    // The list row leaves the scope out to stay short for the model, so it is read here by id.
+    const ids = [...tasks, ...(waiting.tasks ?? [])].map((task) => (task as { id?: string }).id)
+      .filter((id): id is string => typeof id === "string");
+    const groupIds = options.withoutGroups && ids.length > 0
+      ? new Set((await database().query<{ id: string }>(
+        "SELECT id FROM shared_tasks WHERE family_id = $1 AND id = ANY($2::uuid[]) AND scope = 'group'",
+        [recipient.familyId, ids],
+      )).rows.map((row) => row.id))
+      : new Set<string>();
+    const outsideGroups = (task: BoardTask) => !groupIds.has((task as { id?: string }).id ?? "");
     return {
-      areas: owned.rows.map((row) => row.title), now: new Date(), ...(projects ? { projects } : {}), tasks,
-      timezone: recipient.settings.timezone, waiting: waiting.tasks ?? [],
+      areas: owned.rows.map((row) => row.title), now: new Date(), ...(projects ? { projects } : {}),
+      tasks: tasks.filter(outsideGroups), timezone: recipient.settings.timezone,
+      waiting: (waiting.tasks ?? []).filter(outsideGroups),
     };
   },
 

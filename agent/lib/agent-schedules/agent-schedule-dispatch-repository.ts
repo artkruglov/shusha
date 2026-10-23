@@ -19,6 +19,7 @@ import type {
 import {
   completeDeliveredAgentScheduleRun,
   type CompleteDeliveredAgentScheduleRunInput,
+  finishActiveAgentScheduleRun,
 } from "./agent-schedule-run-completion.js";
 import {
   authorizeAgentScheduleDelivery,
@@ -278,6 +279,16 @@ export const agentScheduleDispatchRepository = {
            JOIN users ON users.id = schedule.author_user_id
           WHERE schedule.status = 'active' AND schedule.next_run_at <= $1
             AND schedule.attempts < $3
+            -- A family past its monthly model budget (migration 181) runs nothing on its own either: the
+            -- schedule waits, unfailed, and its due run goes once the next UTC month starts.
+            AND NOT EXISTS (
+              SELECT 1 FROM families AS family
+               WHERE family.id = schedule.family_id AND family.monthly_model_budget_usd IS NOT NULL
+                 AND (SELECT COALESCE(sum(spend.cost_usd), 0) FROM family_model_spend AS spend
+                       WHERE spend.family_id = family.id
+                         AND spend.created_at >= date_trunc('month', $1::timestamptz AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                     ) >= family.monthly_model_budget_usd
+            )
           ORDER BY schedule.next_run_at, schedule.id
           FOR UPDATE OF schedule SKIP LOCKED
           LIMIT $2`,
@@ -419,6 +430,27 @@ export const agentScheduleDispatchRepository = {
       await client.query("DELETE FROM agent_schedule_history_snapshots WHERE run_id = $1", [job.runId]);
       await recordFailures(client, [{ family_id: failed.rows[0].family_id, id: job.id }], errorCode);
       await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  },
+
+  /** A run the model ended with `<telegram-silent>`: completed, nothing delivered, no receipt. */
+  async completeSilentRun(applicationSessionId: string, eveSessionId: string, completedAt: Date): Promise<boolean> {
+    const client = await database().connect();
+    try {
+      await client.query("BEGIN");
+      const completed = await finishActiveAgentScheduleRun(client, {
+        applicationSessionId,
+        completedAt,
+        errorCode: null,
+        eveSessionId,
+      });
+      await client.query("COMMIT");
+      return completed;
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;

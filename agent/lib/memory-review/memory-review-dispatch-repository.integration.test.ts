@@ -499,4 +499,30 @@ describeWithDatabase("memory review dispatch repository", () => {
     });
     expect(repeated?.sourceCount).toBe(9);
   });
+
+  // Load run, 3 October 2026 (ilkruglov 57b5540f): the minute dispatcher locked every lane and queried each one twice;
+  // at 20 000 chats a turn waited 30-100 s for its own lane and replicas queued behind each other.
+  it("skips a lane another transaction holds and takes it on the next tick", async () => {
+    const fixture = await createMainAgentMemoryFixture();
+    for (let sequence = 2; sequence <= 16; sequence += 1) {
+      const source = await insertUserMessage({ conversationId: fixture.conversationId, groupId: fixture.groupId, sequence });
+      await memoryReviewRepository.observePassiveMessage({ groupId: fixture.groupId, timelineEntryId: source!.id });
+    }
+    const holder = await database().connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT 1 FROM memory_review_lanes WHERE conversation_id = $1 FOR UPDATE", [fixture.conversationId]);
+      const claimed = await Promise.race([
+        memoryReviewDispatchRepository.claimPending({ leaseMilliseconds: 60_000, limit: 5, now: new Date() }),
+        new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 3_000)),
+      ]);
+      expect(claimed).toEqual([]);
+    } finally {
+      await holder.query("ROLLBACK");
+      holder.release();
+    }
+    const later = await memoryReviewDispatchRepository.claimPending({ leaseMilliseconds: 60_000, limit: 5, now: new Date() });
+    expect(later).toHaveLength(1);
+    expect(later[0]!.sourceCount).toBe(16);
+  });
 });

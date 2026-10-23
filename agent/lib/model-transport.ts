@@ -10,6 +10,12 @@
  * - Explicit MiniMax compatibility preserves provider web-search payloads across Anthropic parsing.
  * - Retryable physical provider responses are logged before AI SDK applies its bounded retry policy.
  * - OpenAI Chat Completions carries explicit provider-native thinking controls when configured.
+ * - A provider that does not start answering, or stops streaming, fails within minutes
+ *   (`model-response-deadline.ts`) instead of holding the step past Workflow's ownership lease.
+ * - The chat of a group without a family rides from the model resolver as
+ *   `providerOptions.osinara.usageChatId`, becomes a service header in the middleware and is taken off
+ *   the request by the fetch, which hands it to the usage recorder for the group's monthly budget. The
+ *   family of a family turn rides the same way as `usageFamilyId`, for the family's budget (migration 181).
  */
 import { deepSeekAnthropicSearchFetch } from "./deepseek/deepseek-anthropic-search.js";
 import { createAnthropic } from "@ai-sdk/anthropic";
@@ -29,7 +35,12 @@ import type { AgentModelTransport } from "./model-provider-config.js";
 import { AppError } from "./app-error.js";
 import { createMiniMaxAnthropicCompatibilityFetch } from "./minimax-anthropic-compatibility.js";
 import { type ModelUsageLogContext, observeModelUsage } from "./model-usage-log.js";
-import { describeDeepSeekHttpError } from "./deepseek/deepseek-errors.js";
+import {
+  MODEL_RESPONSE_START_TIMEOUT_MS,
+  MODEL_STREAM_IDLE_TIMEOUT_MS,
+  withResponseDeadlines,
+} from "./model-response-deadline.js";
+import { describeDeepSeekContextOverflow, describeDeepSeekHttpError } from "./deepseek/deepseek-errors.js";
 import { normalizeDeepSeekResponsesRequest } from "./deepseek/deepseek-responses-request.js";
 import {
   closeStrayProviderSearchCalls,
@@ -50,6 +61,28 @@ export interface ConfiguredLanguageModelOptions {
 }
 
 const RETRYABLE_MODEL_HTTP_STATUS_CODES = new Set([408, 409, 429]);
+const USAGE_CHAT_HEADER = "x-osinara-usage-chat";
+const USAGE_CHAT_ID = /^-?[0-9]{1,20}$/u;
+const USAGE_FAMILY_HEADER = "x-osinara-usage-family";
+const USAGE_FAMILY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
+/** The provider never sees the service headers; the usage recorder gets the chat and family they carried. */
+function takeUsageChat(init: RequestInit | undefined): {
+  chatId: string | null; familyId: string | null; init: RequestInit | undefined;
+} {
+  if (init?.headers === undefined) return { chatId: null, familyId: null, init };
+  const headers = new Headers(init.headers);
+  const chat = headers.get(USAGE_CHAT_HEADER);
+  const family = headers.get(USAGE_FAMILY_HEADER);
+  if (chat === null && family === null) return { chatId: null, familyId: null, init };
+  headers.delete(USAGE_CHAT_HEADER);
+  headers.delete(USAGE_FAMILY_HEADER);
+  return {
+    chatId: chat !== null && USAGE_CHAT_ID.test(chat) ? chat : null,
+    familyId: family !== null && USAGE_FAMILY_ID.test(family) ? family : null,
+    init: { ...init, headers },
+  };
+}
 
 function modelRequestUrl(input: Parameters<FetchFunction>[0]): string {
   const url = new URL(
@@ -125,8 +158,22 @@ function createCredentialGuardedFetch(options: ConfiguredLanguageModelOptions): 
         "Не задан корректный ключ доступа к основной модели",
       );
     }
-    const request = normalizeDeepSeekResponsesTransportRequest(options, normalizeDeepSeekThinkingRequest(options, init));
-    let response = await (options.fetch ?? globalThis.fetch)(input, request);
+    const usageChat = takeUsageChat(init);
+    const onUsage = options.onUsage === undefined || (usageChat.chatId === null && usageChat.familyId === null)
+      ? options.onUsage
+      : (usage: Parameters<NonNullable<ModelUsageLogContext["onUsage"]>>[0]) => options.onUsage!({
+          ...usage,
+          ...(usageChat.chatId === null ? {} : { familylessChatId: usageChat.chatId }),
+          ...(usageChat.familyId === null ? {} : { familyId: usageChat.familyId }),
+        });
+    const request = normalizeDeepSeekResponsesTransportRequest(
+      options, normalizeDeepSeekThinkingRequest(options, usageChat.init),
+    );
+    const fetchWithDeadlines = withResponseDeadlines(options.fetch ?? globalThis.fetch, {
+      idleMs: MODEL_STREAM_IDLE_TIMEOUT_MS,
+      startMs: MODEL_RESPONSE_START_TIMEOUT_MS,
+    });
+    let response = await fetchWithDeadlines(input, request);
     // A preview alias such as deepseek-v4.1-flash-expires-on-0910 dies on a date. When DeepSeek
     // answers that the configured id is not a supported model name, the same request goes once
     // more with the stable fallback, and the log says the configured id is gone.
@@ -138,16 +185,21 @@ function createCredentialGuardedFetch(options: ConfiguredLanguageModelOptions): 
         modelId: options.modelId,
         url: modelRequestUrl(input),
       }));
-      response = await (options.fetch ?? globalThis.fetch)(input, withModelId(request, retired));
+      response = await fetchWithDeadlines(input, withModelId(request, retired));
     }
     // Documented DeepSeek statuses become stable application errors; retryable ones keep flowing to
     // the AI SDK retry policy below, terminal ones stop the call with a human-readable reason.
     if (options.transport.protocol === "deepseek-responses" && !response.ok) {
-      const described = describeDeepSeekHttpError(response.status);
-      if (described !== null && !described.retryable) {
+      const statusDescription = describeDeepSeekHttpError(response.status);
+      if (statusDescription !== null && !statusDescription.retryable) {
+        // The provider's own reason: on 25 сентября 2026 a 400 hid a tool schema DeepSeek rejects for
+        // three hours behind "отклонил формат запроса". The body of an error carries no secret.
+        const providerMessage = (await response.clone().text().catch(() => "")).replace(/\s+/gu, " ").trim().slice(0, 500);
+        const described = describeDeepSeekContextOverflow(response.status, providerMessage) ?? statusDescription;
         console.error(JSON.stringify({
           code: described.code,
           modelId: options.modelId,
+          providerMessage,
           statusCode: response.status,
           url: modelRequestUrl(input),
         }));
@@ -166,7 +218,7 @@ function createCredentialGuardedFetch(options: ConfiguredLanguageModelOptions): 
     // Provider-reported usage, including cache hits, is the baseline for prompt-cost work.
     return observeModelUsage(response, {
       modelId: options.modelId,
-      ...(options.onUsage === undefined ? {} : { onUsage: options.onUsage }),
+      ...(onUsage === undefined ? {} : { onUsage }),
       url: modelRequestUrl(input),
     });
   };
@@ -299,16 +351,24 @@ function createTransportDefaultsMiddleware(
   return {
     specificationVersion: "v4",
     async transformParams({ params }) {
+      const { osinara, ...providerOptions } = params.providerOptions ?? {};
+      const usageChatId = typeof osinara?.usageChatId === "string" ? osinara.usageChatId : null;
+      const usageFamilyId = typeof osinara?.usageFamilyId === "string" ? osinara.usageFamilyId : null;
+      const usageHeaders = {
+        ...(usageChatId === null ? {} : { [USAGE_CHAT_HEADER]: usageChatId }),
+        ...(usageFamilyId === null ? {} : { [USAGE_FAMILY_HEADER]: usageFamilyId }),
+      };
       return {
         ...params,
+        ...(Object.keys(usageHeaders).length === 0 ? {} : { headers: { ...params.headers, ...usageHeaders } }),
         maxOutputTokens: params.maxOutputTokens ?? maxOutputTokens,
         prompt: transport.protocol === "openai-chat-completions" ||
             transport.protocol === "deepseek-responses"
           ? removeUnresolvedOpenAIToolCalls(params.prompt)
           : params.prompt,
         providerOptions: {
-          ...params.providerOptions,
-          ...configuredProviderOptions(params.providerOptions, transport),
+          ...providerOptions,
+          ...configuredProviderOptions(providerOptions, transport),
         },
       };
     },

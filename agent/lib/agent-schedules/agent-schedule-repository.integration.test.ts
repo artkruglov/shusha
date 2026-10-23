@@ -5,6 +5,8 @@
  * - Scoped CRUD and destination authorization.
  * - Group-only history configuration is rejected by the domain boundary before SQL mutation.
  * - Handoff-only leases, atomic delivered completion, recurrence, and ambiguous recovery.
+ * - A run the model ended with `<telegram-silent>` completes without a delivery receipt and the
+ *   failure that the turn's end would record is then a no-op.
  */
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -298,6 +300,57 @@ describeWithDatabase("agent schedule repositories", () => {
       "SELECT source_id::text, telegram_message_id::text FROM proactive_deliveries",
     )).resolves.toMatchObject({
       rows: [{ source_id: claimed!.runId, telegram_message_id: "501" }],
+    });
+  });
+
+  it("completes a deliberately silent run without a receipt and advances the schedule", async () => {
+    const fixture = await createFixture();
+    const auth = privateAuth(fixture, "member");
+    await agentScheduleRepository.create(auth, {
+      firstRunAt: new Date("2026-07-17T09:00:00.000Z"),
+      operationKey: "silent-created",
+      recurrence: { interval: 1, kind: "daily" },
+      scenarioPrompt: "Напомнить, только если есть просроченные дела.",
+      scope: "personal",
+      timezone: "UTC",
+      title: "Просроченные дела",
+      userRequest: "Каждый день говори, если что-то просрочено",
+    });
+    const [claimed] = await agentScheduleDispatchRepository.claimDue({
+      leaseMilliseconds: 300_000,
+      limit: 10,
+      now: new Date("2026-07-17T09:00:01.000Z"),
+    });
+    const prepared = await sessionRepository.prepareTurn({
+      baseContinuationToken: "schedule-member::schedule:silent-run",
+      kind: "scheduled",
+      telegramForumTopicId: null,
+      familyId: fixture.familyId,
+      groupId: null,
+      now: new Date("2026-07-17T09:00:01.000Z"),
+      scope: "personal",
+      userId: fixture.memberId,
+    });
+    await agentScheduleDispatchRepository.markDispatchStarted(claimed!, { applicationSessionId: prepared.id });
+    await agentScheduleDispatchRepository.markRunning(claimed!, {
+      applicationSessionId: prepared.id,
+      eveSessionId: "eve-schedule-silent",
+    });
+
+    await expect(agentScheduleDispatchRepository.completeSilentRun(
+      prepared.id, "eve-schedule-silent", new Date("2026-07-17T09:01:00.000Z"),
+    )).resolves.toBe(true);
+    // turn.completed still calls failRun; the run is terminal, so nothing changes.
+    await expect(agentScheduleDispatchRepository.failRun(
+      prepared.id, "eve-schedule-silent", "AGENT_SCHEDULE_DELIVERY_CONFIRMATION_MISSING", new Date("2026-07-17T09:01:01.000Z"),
+    )).resolves.toBe(false);
+
+    await expect(database().query(
+      "SELECT status::text, error_code FROM agent_schedule_runs WHERE id = $1", [claimed!.runId],
+    )).resolves.toMatchObject({ rows: [{ error_code: null, status: "completed" }] });
+    await expect(database().query("SELECT 1 FROM proactive_deliveries")).resolves.toMatchObject({ rowCount: 0 });
+    await expect(agentScheduleRepository.list(auth, { limit: 100 })).resolves.toMatchObject({
+      items: [expect.objectContaining({ nextRunAt: "2026-07-18T09:00:00.000Z", status: "active" })],
     });
   });
 

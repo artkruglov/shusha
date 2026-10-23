@@ -5,7 +5,7 @@
  * - A step calling only quiet bookkeeping tools keeps the notice held; the next visible text
  *   discards it, so `remember` beside an answer no longer doubles the message.
  * - A step calling a slow tool releases the notice immediately.
- * - A turn ending with text still held flushes it as the answer.
+ * - A turn ending with text still held flushes it as the answer (`final`), a released one is not.
  * - Release ignores a step index other than the held one; failures discard.
  * - A released notice is remembered for the turn so tool results can tell the model about it.
  */
@@ -50,8 +50,20 @@ describe("progress notice deferral", () => {
     await deferral.release(key, 1, ["search_memories"]);
     await deferral.flush(key);
 
-    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledExactlyOnceWith({ final: true });
     expect(deferral.heldCount()).toBe(0);
+  });
+
+  it("tells a released notice it is not the answer and reports what is still held", async () => {
+    const deferral = createProgressNoticeDeferral();
+    const send = vi.fn().mockResolvedValue(undefined);
+
+    deferral.hold(key, { send, stepIndex: 0 });
+    expect(deferral.isHeld(key)).toBe(true);
+    await deferral.release(key, 0, ["web_search"]);
+
+    expect(send).toHaveBeenCalledExactlyOnceWith({ final: false });
+    expect(deferral.isHeld(key)).toBe(false);
   });
 
   it("lets newer pre-tool text supersede the held one and ignores other steps", async () => {

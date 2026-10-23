@@ -30,9 +30,22 @@ interface MemoryReviewOwnerAlertTransportDependencies {
   timeoutMilliseconds: number;
 }
 
+/** Formatting by offsets (Bot API `MessageEntity`): the text itself stays plain. */
+export type TelegramTextEntity = { length: number; offset: number; type: "bold" | "strikethrough" };
+
+export interface TelegramPlainMessage {
+  chatId: string;
+  entities?: readonly TelegramTextEntity[];
+  /** Inline keyboard under the message (task buttons, migration 179). */
+  replyMarkup?: {
+    inline_keyboard: Array<Array<{ callback_data: string; text: string } | { text: string; web_app: { url: string } }>>;
+  };
+  text: string;
+}
+
 export interface MemoryReviewOwnerAlertTransport {
-  deliver(input: { chatId: string; text: string }): Promise<void>;
-  send(input: { chatId: string; text: string }): Promise<string>;
+  deliver(input: TelegramPlainMessage): Promise<void>;
+  send(input: TelegramPlainMessage): Promise<string>;
 }
 
 function confirmedMessageId(body: unknown): string | null {
@@ -58,9 +71,13 @@ export function createMemoryReviewOwnerAlertTransport(
     ...init,
     signal: AbortSignal.timeout(dependencies.timeoutMilliseconds),
   });
-  const post = async (input: { chatId: string; text: string }): Promise<unknown> => {
+  const post = async (input: TelegramPlainMessage): Promise<unknown> => {
     const response = await callTelegramApi({
-      body: { chat_id: input.chatId, text: input.text },
+      body: {
+        chat_id: input.chatId, text: input.text,
+        ...(input.replyMarkup ? { reply_markup: input.replyMarkup } : {}),
+        ...(input.entities && input.entities.length > 0 ? { entities: input.entities.map((entity) => ({ ...entity })) } : {}),
+      },
       botToken: dependencies.botToken,
       fetch: boundedFetch,
       method: "sendMessage",

@@ -9,6 +9,7 @@
  * - `parseInvitationStartCommand`: extracts only a strict deep-link token for the current bot.
  */
 import { createHash, createHmac, randomBytes } from "node:crypto";
+import { isOwnBotUsername } from "./telegram-bot-usernames.js";
 
 export const INVITATION_CODE_TTL_MS = 24 * 60 * 60 * 1000;
 export const INVITATION_SIGNING_SECRET_MIN_LENGTH = 32;
@@ -60,7 +61,7 @@ export function parseInvitationStartCommand(text: string, botUsername: string): 
   // Exact matching keeps arbitrary unknown-user messages out of the invitation verifier.
   const match = TELEGRAM_START_COMMAND_PATTERN.exec(text);
   const target = match?.groups?.target;
-  if (target && target.toLowerCase() !== botUsername.toLowerCase()) return null;
+  if (target && !isOwnBotUsername(target, botUsername)) return null;
   const token = match?.groups?.token;
   return token && INVITATION_CODE_PATTERN.test(token) ? token : null;
 }

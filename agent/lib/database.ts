@@ -4,8 +4,14 @@
  * Exports:
  * - `database`: lazily initialized connection pool.
  * - `closeDatabase`: graceful shutdown helper for scripts and tests.
+ *
+ * Every checkout carries the row-level security context of the caller (database-context.ts).
  */
 import { Pool } from "pg";
+
+import { DATABASE_SLOW_QUERY_MS } from "../config.js";
+import { scopeDatabaseContext } from "./database-context.js";
+import { traceSlowQueries } from "./pool-trace.js";
 
 let pool: Pool | null = null;
 
@@ -20,7 +26,10 @@ export function database(): Pool {
   if (pool === null) {
     // `min` keeps a few connections open: pg-pool closes an idle client after 10 seconds, and under
     // memory pressure PostgreSQL may not start a new backend in time after a quiet pause.
-    pool = new Pool({ connectionString, max: 10, min: 3 });
+    pool = scopeDatabaseContext(traceSlowQueries(new Pool({ connectionString, max: 10, min: 3 }), {
+      code: "AGENT_DATABASE_SLOW_QUERY",
+      thresholdMs: DATABASE_SLOW_QUERY_MS,
+    }));
     // pg-pool re-emits an idle client's socket failure on the pool. Without a listener Node turns
     // that event into an uncaught exception and the whole agent process exits; the broken client is
     // already discarded by the pool, so the next checkout reconnects. Only the code is logged:

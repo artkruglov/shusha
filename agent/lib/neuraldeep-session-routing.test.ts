@@ -1,41 +1,37 @@
 /**
- * NeuralDeep session-sticky model routing tests.
+ * Per-step model selection options.
  *
  * Constructs covered:
- * - `resolveSessionModelSelection`: adds the Eve session identity only to NeuralDeep requests.
- * - Non-NeuralDeep providers retain their static model selection without provider options.
+ * - NeuralDeep gets its sticky session routing; other providers get no options of their own.
+ * - The chat of a group without a family travels to the transport alongside any provider option.
  */
 import type { LanguageModel } from "ai";
 import { describe, expect, it } from "vitest";
 
+import { familylessGroupFromAuth } from "./familyless-group-auth.js";
 import { resolveSessionModelSelection } from "./neuraldeep-session-routing.js";
 
-const model = { modelId: "test-model", provider: "test-provider" } as LanguageModel;
+const model = "test-model" as unknown as LanguageModel;
+const base = { model, modelContextWindowTokens: 100, sessionId: "session-1" };
 
-describe("resolveSessionModelSelection", () => {
-  it("uses the opaque Eve session ID for NeuralDeep sticky routing", () => {
-    expect(resolveSessionModelSelection({
-      model,
-      modelContextWindowTokens: 128_000,
-      providerId: "neuraldeep",
-      sessionId: "session_01CACHE",
-    })).toEqual({
-      model,
-      modelContextWindowTokens: 128_000,
-      modelOptions: {
-        providerOptions: {
-          neuraldeep: { user: "session_01CACHE" },
-        },
-      },
-    });
+describe("session model selection", () => {
+  it("adds only what the provider and the turn need", () => {
+    expect(resolveSessionModelSelection({ ...base, providerId: "deepseek" })).toEqual({ model, modelContextWindowTokens: 100 });
+    expect(resolveSessionModelSelection({ ...base, providerId: "neuraldeep" }).modelOptions)
+      .toEqual({ providerOptions: { neuraldeep: { user: "session-1" } } });
+    expect(resolveSessionModelSelection({ ...base, providerId: "neuraldeep", usageChatId: "-1001" }).modelOptions)
+      .toEqual({ providerOptions: { neuraldeep: { user: "session-1" }, osinara: { usageChatId: "-1001" } } });
+    expect(resolveSessionModelSelection({ ...base, providerId: "deepseek", usageFamilyId: "0f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a" }).modelOptions)
+      .toEqual({ providerOptions: { osinara: { usageFamilyId: "0f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a" } } });
   });
 
-  it("does not add NeuralDeep provider options to another provider", () => {
-    expect(resolveSessionModelSelection({
-      model,
-      modelContextWindowTokens: 128_000,
-      providerId: "deepseek",
-      sessionId: "session_01CACHE",
-    })).toEqual({ model, modelContextWindowTokens: 128_000 });
+  it("names a chat only for a verified turn of a group without a family", () => {
+    const groupId = "6f1c2f9e-3b1a-4c55-9d8e-0a1b2c3d4e5f";
+    const familyless = { groupId, groupType: "external", telegramChatId: "-1001" };
+    expect(familylessGroupFromAuth(familyless)).toEqual({ groupId, telegramChatId: "-1001" });
+    expect(familylessGroupFromAuth({ ...familyless, familyId: "family-1" })).toBeNull();
+    expect(familylessGroupFromAuth({ ...familyless, familyId: null })).toBeNull();
+    expect(familylessGroupFromAuth({ ...familyless, groupType: "family_private" })).toBeNull();
+    expect(familylessGroupFromAuth({ ...familyless, telegramChatId: "chat" })).toBeNull();
   });
 });

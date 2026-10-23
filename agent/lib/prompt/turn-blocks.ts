@@ -33,8 +33,10 @@ import {
 import { telegramReactionPolicyRepository } from "../telegram-reaction-policy-repository.js";
 import { loadCurrentExternalGroupCapabilities } from "../tool-policy/external-group-live-policy.js";
 import type { ExternalGroupToolName } from "../tool-policy/group-tool-catalog.js";
+import { familylessGroupFromAuth } from "../familyless-group-auth.js";
 import {
   resolveExternalGroupPolicyIdentity,
+  type ExternalGroupPolicyIdentity,
   resolveExternalGroupToolPolicy,
 } from "../tool-policy/external-group-policy.js";
 import { scheduledGroupHistoryAccess } from "../agent-schedules/scheduled-group-history-context.js";
@@ -50,10 +52,7 @@ export interface TurnBlockContext {
   };
 }
 
-type CapabilityLoader = (identity: {
-  familyId: string;
-  groupId: string;
-}) => Promise<ReadonlySet<ExternalGroupToolName>>;
+type CapabilityLoader = (identity: ExternalGroupPolicyIdentity) => Promise<ReadonlySet<ExternalGroupToolName>>;
 type ReactionPolicyLoader = (telegramChatId: string) => Promise<TelegramReactionPolicy | null>;
 type GrantedSkillLoader = (identity: {
   familyId: string;
@@ -63,6 +62,7 @@ type GrantedSkillLoader = (identity: {
 interface EffectiveExternalCapabilities {
   authoredSkills: readonly { description: string; name: string }[];
   capabilities: ReadonlySet<ExternalGroupToolName>;
+  familyless: boolean;
   includeApplicationCore: boolean;
 }
 
@@ -90,7 +90,11 @@ async function effectiveExternalCapabilities(
   loadGrantedSkills: GrantedSkillLoader | undefined,
   scheduledRun: boolean,
 ): Promise<EffectiveExternalCapabilities> {
-  const none: EffectiveExternalCapabilities = { authoredSkills: [], capabilities: new Set(), includeApplicationCore: false };
+  // A failed lookup still describes a group without a family as one: no workspace, no skills.
+  const none: EffectiveExternalCapabilities = {
+    authoredSkills: [], capabilities: new Set(),
+    familyless: familylessGroupFromAuth(auth.current?.attributes) !== null, includeApplicationCore: false,
+  };
   const policy = resolveExternalGroupToolPolicy(auth);
   if (!policy.restricted) return none;
   const identity = resolveExternalGroupPolicyIdentity(auth);
@@ -108,9 +112,10 @@ async function effectiveExternalCapabilities(
   // Granted authored skills are described only when the resolver would also emit them; a failed
   // lookup leaves them out of the prompt the same way it leaves them out of the manifest.
   let authoredSkills: readonly { description: string; name: string }[] = [];
-  if (loadGrantedSkills !== undefined && !scheduledRun) {
+  // Authored skills belong to a family; a group without one has none to be granted.
+  if (loadGrantedSkills !== undefined && !scheduledRun && identity.familyId !== null) {
     try {
-      authoredSkills = await loadGrantedSkills(identity);
+      authoredSkills = await loadGrantedSkills({ familyId: identity.familyId, groupId: identity.groupId });
     } catch (error) {
       logBlockFailure("AGENT_SKILL_GRANT_LOOKUP_FAILED", error);
     }
@@ -118,6 +123,7 @@ async function effectiveExternalCapabilities(
   return {
     authoredSkills,
     capabilities: new Set([...policy.allowed].filter((capability) => current.has(capability))),
+    familyless: identity.familyId === null,
     includeApplicationCore: true,
   };
 }
@@ -170,6 +176,7 @@ export function createModeBlockResolver(dependencies: {
       return modeInstructions({
         capabilities: new Set(),
         environment: "external",
+        familyless: familylessGroupFromAuth(ctx.session.auth.current?.attributes) !== null,
         includeApplicationCore: false,
         reactionPolicy,
         scheduledRun,
@@ -186,6 +193,7 @@ export function createModeBlockResolver(dependencies: {
       authoredSkills: effective.authoredSkills,
       capabilities: effective.capabilities,
       environment: "external",
+      familyless: effective.familyless,
       includeApplicationCore: effective.includeApplicationCore,
       reactionPolicy,
       scheduledHistory: effective.includeApplicationCore &&
@@ -200,6 +208,8 @@ export function createPreferenceBlockResolver(dependencies: {
   get: (auth: BehaviorPreferenceReadAuthorization) => Promise<ChatOperationalPrompt>;
 }) {
   return async function resolve(ctx: TurnBlockContext): Promise<string | null> {
+    // A group without a family keeps no behaviour preferences (migration 175): nothing to read.
+    if (familylessGroupFromAuth(ctx.session.auth.current?.attributes) !== null) return null;
     try {
       const authorization = dependencies.authorize(ctx);
       return buildBehaviorPreferenceInstructions(await dependencies.get(authorization));

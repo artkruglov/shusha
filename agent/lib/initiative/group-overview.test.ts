@@ -1,6 +1,6 @@
 /**
  * Утренний разбор семейных дел в группе: говорит только когда есть обязательство, называет, кому
- * оно поручено, и не выдаёт личное.
+ * поручено сегодняшнее, просроченное без имени, и не выдаёт личное.
  */
 import { describe, expect, it } from "vitest";
 
@@ -21,23 +21,32 @@ describe("formatGroupOverview", () => {
     expect(formatGroupOverview(overview([task({ status: "done" })]))).toBeNull();
   });
 
-  it("names who each task belongs to and marks the free and the waiting ones", () => {
+  it("shows today with names, overdue without a name, the free ones and one next step per project", () => {
+    // Ревью 21 октября 2026, пункт 8: не вся доска с именем у каждой строки и упрёком при маме и ребёнке.
     const text = formatGroupOverview(overview([
-      task({ assigneeName: "Юля", title: "Записаться к врачу" }),
-      task({ status: "open", title: "Заказать корзину" }),
+      task({ assigneeName: "Артём", dueOn: "2026-09-29", listName: "Дом", title: "Позвонить маме" }),
+      task({ assigneeName: "Артём", dueOn: "2026-09-18", listName: "Кружки", title: "Оплатить кружок" }),
+      task({ status: "open", title: "Поменять лампочку" }),
+      task({ assigneeName: "Артём", listName: "Отпуск", title: "Сравнить отели" }),
+      task({ assigneeName: "Юля", listName: "Отпуск", title: "Оформить загранпаспорт" }),
       task({ assigneeName: "Юля", status: "proposed", title: "Забрать посылку" }),
     ]))!;
 
-    expect(text).toContain("Юля: Записаться к врачу");
-    expect(text).toContain("Ничьи · 1\n• Заказать корзину");
-    expect(text).toContain("Ждут согласия · 1\n• Юля: Забрать посылку");
+    expect(text).toContain("Сегодня · 1\n• Артём: Позвонить маме");
+    expect(text).toContain("⚠️ Просрочено · 1\n• Оплатить кружок — с 18.09");
+    expect(text).not.toContain("Артём: Оплатить кружок");
+    expect(text).toContain("Никто не взял · 1\n• Поменять лампочку");
+    expect(text).toContain("Шаги проектов · 1\n• Отпуск: Артём: Сравнить отели");
+    expect(text).not.toContain("Оформить загранпаспорт");
+    expect(text).not.toContain("Скажи");
+    expect(text).toContain("Открытых · 6. Всё целиком по кнопке «Все дела», своё по «Мои дела».");
   });
 
-  it("puts what is overdue first and does not break past one Telegram message", () => {
-    const many = Array.from({ length: 80 }, (_, index) => task({ listName: `Список ${index}`, title: `Дело ${index}` }));
-    const text = formatGroupOverview(overview([task({ dueOn: "2026-09-20", title: "Просроченное" }), ...many]))!;
+  it("keeps each section short and does not break past one Telegram message", () => {
+    const many = Array.from({ length: 80 }, (_, index) => task({ dueOn: "2026-09-29", listName: `Список ${index}`, title: `Дело ${index}` }));
+    const text = formatGroupOverview(overview(many))!;
 
-    expect(text.indexOf("Просрочено")).toBeLessThan(text.indexOf("Список"));
+    expect(text).toContain("Сегодня · 80 · показано 5");
     expect(text.length).toBeLessThanOrEqual(4096);
   });
 

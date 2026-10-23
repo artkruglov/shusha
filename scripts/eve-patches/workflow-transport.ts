@@ -12,10 +12,14 @@ export async function patchWorkflowTransport(replace: (path: string, before: str
   const queue = `${root}/dist/queue.js`;
   await replace(queue,
     "import { connect } from 'node:net';",
-    "import { connect } from 'node:net';\nimport { createWorkflowHttpClient, createWorkflowExecutionFence } from './osinara-workflow-transport.js';");
+    "import { connect } from 'node:net';\nimport { createWorkflowHttpClient, createWorkflowExecutionFence, requireWorkflowInternalToken, withWorkflowInternalToken, WORKFLOW_INTERNAL_TOKEN_HEADER } from './osinara-workflow-transport.js';");
   await replace(queue,
     "    const createQueueHandler = localWorld.createQueueHandler;",
-    "    const httpClient = createWorkflowHttpClient();\n    const fence = createWorkflowExecutionFence(() => closing);\n    const createQueueHandler = (prefix, handler) => localWorld.createQueueHandler(prefix, fence(handler));");
+    "    const httpClient = createWorkflowHttpClient();\n    const fence = createWorkflowExecutionFence(() => closing);\n    const createQueueHandler = (prefix, handler) => withWorkflowInternalToken(localWorld.createQueueHandler(prefix, fence(handler)));");
+  // The flow route refuses a request without the agent's internal token (ilkruglov 3c339144).
+  await replace(queue,
+    "            'content-type': 'application/json',\n            'x-vqs-queue-name': queueName,",
+    "            'content-type': 'application/json',\n            [WORKFLOW_INTERNAL_TOKEN_HEADER]: requireWorkflowInternalToken(),\n            'x-vqs-queue-name': queueName,");
   await replace(queue,
     "const response = await fetch(createWorkflowUrl(baseUrl, { type: 'flow' }), {",
     "const response = await httpClient.fetch(createWorkflowUrl(baseUrl, { type: 'flow' }), {");

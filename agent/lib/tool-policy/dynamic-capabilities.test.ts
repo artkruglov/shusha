@@ -100,6 +100,31 @@ describe("dynamic capability resolver", () => {
     expect(Object.keys(surface ?? {})).not.toContain("export_memory");
   });
 
+  // A group without a family (migration 175): its web grant and nothing of a workspace, even when the
+  // policy lookup fails and the fallback surface is built.
+  it("keeps a group without a family off files and skills in the granted and fallback surfaces", async () => {
+    const attributes = {
+      groupId: "6f1c2f9e-3b1a-4c55-9d8e-0a1b2c3d4e5f",
+      groupType: "external",
+      memoryScopes: ["group"],
+      role: "external",
+      telegramChatId: "-1001",
+      telegramChatType: "supergroup",
+      toolAllowlist: ["web_search"],
+    };
+    loadCurrentExternalGroupCapabilities.mockResolvedValue(new Set(["web_search"]));
+    const granted = await resolve(attributes);
+    expect(loadCurrentExternalGroupCapabilities).toHaveBeenCalledWith({ familyId: null, groupId: attributes.groupId });
+    loadCurrentExternalGroupCapabilities.mockRejectedValue(new Error("down"));
+    const fallback = await resolve(attributes);
+    for (const surface of [granted, fallback]) {
+      for (const name of [...ALWAYS_AVAILABLE_SANDBOX_FILE_TOOL_NAMES, "load_skill"]) {
+        expect((surface as Record<string, { description: string }>)[name]?.description, name).toMatch(/недоступен/iu);
+      }
+      expect(surface).not.toHaveProperty("read_profile_view");
+    }
+  });
+
   it("emits only granted capabilities and framework denials for an external group", async () => {
     loadCurrentExternalGroupCapabilities.mockResolvedValue(new Set(["remember"]));
 

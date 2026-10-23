@@ -21,7 +21,7 @@ export interface TelegramProfile {
 }
 
 interface TelegramGroupRow {
-  family_id: string;
+  family_id: string | null;
   id: string;
   message_mode: RegisteredGroup["messageMode"];
   telegram_chat_id: string;
@@ -31,6 +31,8 @@ interface TelegramGroupRow {
 
 export interface TelegramRepository {
   claimFirstOwner(code: string, profile: TelegramProfile): Promise<"claimed" | "configured" | "invalid">;
+  /** Код `--new-family`: ещё одна семья с новым владельцем в установке, где владелец уже есть. */
+  claimNewFamily(code: string, profile: TelegramProfile): Promise<"claimed" | "configured" | "invalid">;
   findGroup(
     telegramChatId: string,
     telegramChatType: "group" | "supergroup",
@@ -44,6 +46,31 @@ async function ownerExists(client: PoolClient): Promise<boolean> {
     "SELECT EXISTS (SELECT 1 FROM family_memberships WHERE role = 'owner') AS exists",
   );
   return result.rows[0]?.exists === true;
+}
+
+export async function createFamilyWithOwner(client: PoolClient, profile: TelegramProfile): Promise<void> {
+  // Owner, user, and family become visible atomically with code consumption.
+  const family = await client.query<{ id: string }>(
+    "INSERT INTO families (name) VALUES ($1) RETURNING id",
+    [INITIAL_FAMILY_NAME],
+  );
+  const user = await client.query<{ id: string }>(
+    `INSERT INTO users (telegram_user_id, display_name, telegram_username)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (telegram_user_id)
+     DO UPDATE SET display_name = EXCLUDED.display_name, telegram_username = EXCLUDED.telegram_username
+     RETURNING id`,
+    [profile.telegramUserId, profile.displayName, profile.username ?? null],
+  );
+  await client.query(
+    "INSERT INTO family_memberships (family_id, user_id, role) VALUES ($1, $2, 'owner')",
+    [family.rows[0]?.id, user.rows[0]?.id],
+  );
+  // Снимок миграции выдал пространства только тем, кто существовал на момент переноса.
+  await provisionFamilySpaces(client, {
+    familyId: family.rows[0]!.id,
+    ownerUserId: user.rows[0]!.id,
+  });
 }
 
 export const telegramRepository: TelegramRepository = {
@@ -95,26 +122,58 @@ export const telegramRepository: TelegramRepository = {
         return "invalid";
       }
 
-      // Owner, user, and family become visible atomically with code consumption.
-      const family = await client.query<{ id: string }>(
-        "INSERT INTO families (name) VALUES ($1) RETURNING id",
-        [INITIAL_FAMILY_NAME],
+      await createFamilyWithOwner(client, profile);
+      await client.query("UPDATE bootstrap_codes SET consumed_at = now() WHERE id = $1", [record.id]);
+      await client.query("COMMIT");
+      return "claimed";
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  },
+
+  async claimNewFamily(code, profile) {
+    const client = await database().connect();
+    try {
+      await client.query("BEGIN");
+      // Только код, выданный с `--new-family`; уже подключённый человек второй семьи не получает.
+      const known = await client.query<{ id: string }>(
+        `SELECT u.id FROM users u JOIN family_memberships m ON m.user_id = u.id WHERE u.telegram_user_id = $1`,
+        [profile.telegramUserId],
       );
-      const user = await client.query<{ id: string }>(
-        `INSERT INTO users (telegram_user_id, display_name, telegram_username)
-         VALUES ($1, $2, $3)
-         RETURNING id`,
-        [profile.telegramUserId, profile.displayName, profile.username ?? null],
+      if (known.rows[0]) {
+        await client.query("ROLLBACK");
+        return "configured";
+      }
+      const result = await client.query<{
+        attempts: number; code_hash: string; created_at: Date; expires_at: Date; id: string;
+      }>(
+        `SELECT id, code_hash, attempts, created_at, expires_at
+         FROM bootstrap_codes
+         WHERE consumed_at IS NULL AND new_family
+         ORDER BY created_at DESC
+         LIMIT 1
+         FOR UPDATE`,
       );
-      await client.query(
-        "INSERT INTO family_memberships (family_id, user_id, role) VALUES ($1, $2, 'owner')",
-        [family.rows[0]?.id, user.rows[0]?.id],
-      );
-      // Снимок миграции выдал пространства только тем, кто существовал на момент переноса.
-      await provisionFamilySpaces(client, {
-        familyId: family.rows[0]!.id,
-        ownerUserId: user.rows[0]!.id,
+      const record = result.rows[0];
+      if (!record) {
+        await client.query("ROLLBACK");
+        return "invalid";
+      }
+      const valid = verifyBootstrapCode({
+        attempts: record.attempts,
+        code,
+        now: new Date(),
+        record: { codeHash: record.code_hash, createdAt: record.created_at, expiresAt: record.expires_at },
       });
+      if (!valid) {
+        await client.query("UPDATE bootstrap_codes SET attempts = attempts + 1 WHERE id = $1", [record.id]);
+        await client.query("COMMIT");
+        return "invalid";
+      }
+      await createFamilyWithOwner(client, profile);
       await client.query("UPDATE bootstrap_codes SET consumed_at = now() WHERE id = $1", [record.id]);
       await client.query("COMMIT");
       return "claimed";
@@ -146,6 +205,19 @@ export const telegramRepository: TelegramRepository = {
         );
     const row = result.rows[0];
     if (!row) return null;
+    if (row.family_id === null) {
+      if (row.type !== "external") {
+        throw new Error("AGENT_TELEGRAM_GROUP_POLICY_INVALID: Группа без семьи не может быть семейной");
+      }
+      return {
+        familyId: null,
+        groupId: row.id,
+        messageMode: row.message_mode,
+        telegramChatId: row.telegram_chat_id,
+        toolAllowlist: row.tool_allowlist,
+        type: row.type,
+      };
+    }
     const common = {
       familyId: row.family_id,
       groupId: row.id,

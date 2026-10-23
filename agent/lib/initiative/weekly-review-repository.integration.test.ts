@@ -2,7 +2,7 @@
  * Данные недельного обзора на настоящей базе.
  *
  * Проверяется: обзор получают только те, кто сам его попросил; заявка на неделю одна, а следующая
- * неделя открывает новую; счётчик закрытого считает ровно последние семь дней.
+ * неделя открывает новую; счётчик закрытого считает выполнения ровно последних семи дней.
  */
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -79,25 +79,34 @@ dbDescribe("weekly review data", () => {
     await expect(weeklyReviewRepository.claim(recipient, "2026-10-04", NEXT_WEEK)).resolves.not.toBeNull();
   });
 
-  it("counts only what was closed in the last seven days", async () => {
+  it("counts completions of the last seven days, each occurrence of a repeat, nothing moved or reopened", async () => {
     await privateChat(fixture.owner);
     await settings(fixture.owner, true);
-    const insert = async (title: string, status: string, ageDays: number) => {
-      await database().query(
-        `INSERT INTO shared_tasks(family_id, scope, creator_telegram_id, assignee_telegram_id, title,
-                                  status, kind, created_at, updated_at)
-         VALUES ($1, 'personal', $2, $2, $3, $4, 'task', now() - interval '60 days',
-                 $5::timestamptz - make_interval(days => $6))`,
-        [fixture.familyId, fixture.owner.telegramUserId, title, status, NOW, ageDays],
-      );
+    const insert = async (title: string, status: string, completedDaysAgo: readonly number[], repeat = false) => {
+      const id = (await database().query<{ id: string }>(
+        `INSERT INTO shared_tasks(family_id, scope, creator_telegram_id, assignee_telegram_id, title, status, kind,
+                                  created_at, updated_at, recurrence_unit, recurrence_interval, recurrence_anchor_on, due_on)
+         VALUES ($1, 'personal', $2, $2, $3, $4, 'task', now() - interval '60 days', $5,
+                 $6, $7, $8::date, $8::date) RETURNING id`,
+        [fixture.familyId, fixture.owner.telegramUserId, title, status, NOW,
+          repeat ? "weekly" : null, repeat ? 1 : null, repeat ? "2026-10-01" : null])).rows[0]!.id;
+      for (const [index, days] of completedDaysAgo.entries()) {
+        await database().query(
+          `INSERT INTO shared_task_versions(task_id, version, actor_telegram_id, action, previous_record, created_at)
+           VALUES ($1, $2, $3, 'complete', '{}'::jsonb, $4::timestamptz - make_interval(days => $5))`,
+          [id, index + 1, fixture.owner.telegramUserId, NOW, days]);
+      }
     };
-    await insert("Закрыто вчера", "completed", 1);
-    await insert("Закрыто месяц назад", "completed", 30);
-    await insert("Ещё открыто", "accepted", 1);
+    await insert("Закрыто вчера", "completed", [1]);
+    // Слияние проектов только что тронуло строку (updated_at сейчас), а закрыто дело месяц назад.
+    await insert("Закрыто месяц назад, перенесено", "completed", [30]);
+    await insert("Закрыто и открыто снова", "accepted", [2]);
+    await insert("Полить цветы", "accepted", [6, 1], true);
+    await insert("Ещё открыто", "accepted", []);
 
     const review = await weeklyReviewRepository.review((await ownerRecipient())!, NOW);
 
-    expect(review.closedLastWeek).toBe(1);
+    expect(review.closedLastWeek).toBe(3);
     expect(review.timezone).toBe("Europe/Moscow");
     expect(review.tasks.map((task) => task.title)).toContain("Ещё открыто");
     expect(review.tasks.map((task) => task.title)).not.toContain("Закрыто вчера");

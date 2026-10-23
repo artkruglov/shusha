@@ -305,13 +305,30 @@ function supportReference(details: FailureData["details"]): string | null {
  * AI SDK refuses the prompt before the provider sees it. Only a new session recovers from that.
  */
 export function isUnrecoverableHistoryFailure(data: FailureData): boolean {
+  return isMissingToolResultFailure(data) || isContextOverflowFailure(data);
+}
+
+function isMissingToolResultFailure(data: FailureData): boolean {
   return data.code === "MODEL_CALL_FAILED" &&
     JSON.stringify(data.details ?? {}).includes("AI_MissingToolResultsError");
 }
 
+/**
+ * The provider refused the request as larger than the model's window. Compaction did not save the
+ * history, so the same history fails again on the next message; a new session carries memory and
+ * the recent timeline over and recovers.
+ */
+function isContextOverflowFailure(data: FailureData): boolean {
+  return data.code === "MODEL_CALL_FAILED" &&
+    JSON.stringify(data.details ?? {}).includes("AGENT_MODEL_CONTEXT_OVERFLOW");
+}
+
 function publicFailureExplanation(data: FailureData): string | null {
-  if (isUnrecoverableHistoryFailure(data)) {
+  if (isMissingToolResultFailure(data)) {
     return "История этого разговора повреждена, поэтому следующее сообщение начнёт новый контекст.";
+  }
+  if (isContextOverflowFailure(data)) {
+    return "Разговор стал слишком длинным для модели, поэтому следующее сообщение начнёт новый контекст. Память и последние сообщения сохранятся.";
   }
   if (data.code === "MODEL_CALL_FAILED") {
     // The step guard is a blocking model, so Eve reports it as a model failure; the person needs

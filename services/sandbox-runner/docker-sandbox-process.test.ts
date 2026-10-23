@@ -12,6 +12,14 @@ import type Docker from "dockerode";
 import { describe, expect, it, vi } from "vitest";
 
 import { createDockerSandboxEngine } from "./docker-sandbox-engine.js";
+
+// Isolation is exercised by its own tests; here every run is ready and nothing is swept.
+const TEST_HARDENING = {
+  diskQuota: { refusal: async () => null },
+  maxRunning: 10,
+  prepareRun: async () => undefined,
+  sweepStrays: async () => 0,
+};
 import { SANDBOX_RUNNER_MAX_OUTPUT_BYTES } from "../../agent/lib/sandbox-runner/sandbox-runner-contract.js";
 
 const SANDBOX_SESSION_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -53,6 +61,7 @@ function processHarness(
     },
   } as unknown as Docker;
   const engine = createDockerSandboxEngine({
+    hardening: TEST_HARDENING,
     docker,
     roots: {
       toolsRoot: "/tools",
@@ -73,7 +82,7 @@ describe("Docker sandbox process lifecycle", () => {
         stderr: expect.stringContaining("AGENT_SANDBOX_RUNNER_PROCESS_TIMED_OUT"),
       });
     expect(harness.container.exec).toHaveBeenCalledWith(expect.objectContaining({
-      Cmd: ["timeout", "--signal=TERM", "--kill-after=5s", "120", "bash", "-c", "sleep infinity"],
+      Cmd: ["/usr/bin/timeout", "--signal=TERM", "--kill-after=5s", "120", "/bin/bash", "-c", "sleep infinity"],
     }));
   });
 

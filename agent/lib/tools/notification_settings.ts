@@ -2,7 +2,7 @@
  * Consolidated personal notification settings tool.
  *
  * Export:
- * - `notification_settings`: reads or updates timezone and quiet-hour policy.
+ * - `notification_settings`: reads or updates timezone, quiet hours and what the bot sends on its own.
  *
  * Key constructs:
  * - Object-shaped model schema publishes a required finite action discriminator.
@@ -14,6 +14,7 @@ import { z } from "zod";
 
 import { AppError } from "../app-error.js";
 import { groupOverviewRepository } from "../initiative/group-overview-repository.js";
+import { DAILY_OVERVIEW_DEFAULT_HOUR, dailyOverviewSettings } from "../task-buttons/digest-settings.js";
 import { requireReminderAuthorization } from "../reminders/reminder-context.js";
 import { reminderRepository } from "../reminders/reminder-repository.js";
 import {
@@ -25,16 +26,22 @@ import {
 } from "../tool-input-validation.js";
 
 const INPUT_ERROR_CODE = "AGENT_NOTIFICATION_SETTINGS_INPUT_INVALID";
-const TOOL_ACTIONS = ["get", "set", "coach", "weekly_review", "group_overview"] as const;
+const TOOL_ACTIONS = ["get", "set", "coach", "weekly_review", "group_overview", "daily_overview"] as const;
 const TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/u;
-const TOP_LEVEL_FIELDS = ["action", "coachEnabled", "groupOverviewEnabled", "initiativeDailyLimit", "initiativeEnabled", "quietEnd",
-  "quietStart", "timezone", "weeklyReviewEnabled"] as const;
+const TOP_LEVEL_FIELDS = ["action", "coachEnabled", "dailyOverviewEnabled", "dailyOverviewHour", "groupOverviewEnabled",
+  "initiativeDailyLimit", "initiativeEnabled", "quietEnd", "quietStart", "timezone", "weeklyReviewEnabled"] as const;
+/** Same bounds as `user_notification_settings.daily_overview_hour` (migration 180). */
+const DAILY_OVERVIEW_HOURS = { max: 12, min: 5 } as const;
 
 const nullableTimeSchema = z.union([z.string(), z.null()]).optional();
 const notificationSettingsSchema = z.object({
-  action: z.enum(TOOL_ACTIONS).describe("Обязательный action: get, set, coach, weekly_review или group_overview."),
+  action: z.enum(TOOL_ACTIONS).describe("Обязательный action."),
   coachEnabled: z.boolean().optional()
     .describe("Обязательно для action=coach: true по явному «да» на приглашение коуча, false на «без коуча»."),
+  dailyOverviewEnabled: z.boolean().optional()
+    .describe("Обязательно для action=daily_overview: false на «не присылай утреннюю сводку», true чтобы вернуть."),
+  dailyOverviewHour: z.number().optional()
+    .describe("Необязательно для action=daily_overview: час сводки по местному времени, 5-12."),
   groupOverviewEnabled: z.boolean().optional()
     .describe("Обязательно для action=group_overview: false на «не присылайте общий обзор в группу», true чтобы вернуть."),
   weeklyReviewEnabled: z.boolean().optional()
@@ -123,6 +130,18 @@ function requireNotificationSettingsInput(input: unknown) {
     }
     return { action, enabled: payload["weeklyReviewEnabled"] as boolean } as const;
   }
+  if (action === "daily_overview") {
+    requireOnlyFields(payload, ["action", "dailyOverviewEnabled", "dailyOverviewHour"], "action=daily_overview", INPUT_ERROR_CODE);
+    if (typeof payload["dailyOverviewEnabled"] !== "boolean") {
+      toolInputError(INPUT_ERROR_CODE, "Для action=daily_overview передайте dailyOverviewEnabled true или false");
+    }
+    const hour = payload["dailyOverviewHour"];
+    if (hour !== undefined && (typeof hour !== "number" || !Number.isInteger(hour) ||
+        hour < DAILY_OVERVIEW_HOURS.min || hour > DAILY_OVERVIEW_HOURS.max)) {
+      toolInputError(INPUT_ERROR_CODE, "Поле dailyOverviewHour должно быть целым часом от 5 до 12");
+    }
+    return { action, enabled: payload["dailyOverviewEnabled"] as boolean, hour: (hour as number | undefined) ?? null } as const;
+  }
   if (action === "group_overview") {
     requireOnlyFields(payload, ["action", "groupOverviewEnabled"], "action=group_overview", INPUT_ERROR_CODE);
     if (typeof payload["groupOverviewEnabled"] !== "boolean") {
@@ -134,13 +153,13 @@ function requireNotificationSettingsInput(input: unknown) {
 }
 
 const TOOL_DESCRIPTION = [
-  "Получить или настроить личный IANA timezone и тихие часы. В тихие часы не приходит ничего, что начато без просьбы человека: ни напоминание, ни сводка, ни предупреждение, ни предложение обновления. Отложенное уходит, когда тихие часы кончаются. Get: {\"action\":\"get\"}. Set: {\"action\":\"set\",\"timezone\":\"Europe/Moscow\",\"quietStart\":\"22:00\",\"quietEnd\":\"08:00\"}; quietStart и quietEnd разные значения ЧЧ:ММ, для отключения тихих часов оба null. Просьбу «не пиши мне первым» передавай как initiativeEnabled false, число сообщений в сутки как initiativeDailyLimit; непереданные поля остаются прежними. Не угадывай timezone и часы: если данных нет, спроси пользователя. Coach: {\"action\":\"coach\",\"coachEnabled\":false} на «без коуча» или отказ от вопросов не про дела, true только если человек просит вернуть коуча; по умолчанию коуч включён. Weekly_review: {\"action\":\"weekly_review\",\"weeklyReviewEnabled\":true} по явной просьбе о недельном обзоре дел, false на «хватит обзоров»; обзор приходит в воскресенье вечером. Group_overview: {\"action\":\"group_overview\",\"groupOverviewEnabled\":false} только владелец, на просьбу не присылать общий утренний обзор дел в семейную группу; true возвращает его.",
+  "Личный IANA timezone, тихие часы и то, что бот пишет сам. В тихие часы не приходит ничего начатого без просьбы: ни напоминание, ни сводка, ни предупреждение; отложенное уходит после них. Get: {\"action\":\"get\"}. Set: {\"action\":\"set\",\"timezone\":\"Europe/Moscow\",\"quietStart\":\"22:00\",\"quietEnd\":\"08:00\"}; часы разные ЧЧ:ММ, отключить: оба null; «не пиши мне первым» это initiativeEnabled false, число сообщений в сутки initiativeDailyLimit; непереданное не меняется. Не угадывай timezone и часы, спроси. Coach: coachEnabled false на «без коуча», true только на просьбу вернуть. Weekly_review: {\"action\":\"weekly_review\",\"weeklyReviewEnabled\":true} по просьбе о недельном обзоре (воскресенье вечером), false на «хватит обзоров». Daily_overview: личная утренняя сводка дел, dailyOverviewEnabled false на «не присылай сводку», true с dailyOverviewHour на «присылай в 9». Group_overview: groupOverviewEnabled false только владелец, на «не присылайте общий обзор в группу»; true возвращает.",
 ].join(" ");
 
 export default defineTool({
   approval: ({ toolInput }) => {
     const parsed = requireNotificationSettingsInput(toolInput);
-    // Коуч, недельный обзор и общий обзор группы меняют только то, пишет ли бот сам, и выключаются
+    // Коуч, обзоры и сводка меняют только то, пишет ли бот сам, и выключаются
     // одной фразой; кнопка подтверждения на такую настройку была бы лишним шагом.
     return parsed.action === "set" ? "user-approval" : "not-applicable";
   },
@@ -156,7 +175,22 @@ export default defineTool({
       );
     }
     if (parsed.action === "get") {
-      return await reminderRepository.getNotificationSettings(authorization);
+      const overview = await dailyOverviewSettings.read(authorization.userId);
+      return {
+        ...await reminderRepository.getNotificationSettings(authorization),
+        dailyOverviewEnabled: overview.enabled,
+        dailyOverviewHour: overview.hour ?? DAILY_OVERVIEW_DEFAULT_HOUR,
+      };
+    }
+    if (parsed.action === "daily_overview") {
+      // The person's own row only: the user id comes from the verified turn, as for the «Сводка» buttons.
+      await dailyOverviewSettings.write({
+        familyId: authorization.familyId,
+        setting: { enabled: parsed.enabled, hour: parsed.hour },
+        userId: authorization.userId,
+      });
+      const overview = await dailyOverviewSettings.read(authorization.userId);
+      return { dailyOverviewEnabled: overview.enabled, dailyOverviewHour: overview.hour ?? DAILY_OVERVIEW_DEFAULT_HOUR };
     }
     if (parsed.action === "coach") {
       return await reminderRepository.setCoach(authorization, parsed.enabled);

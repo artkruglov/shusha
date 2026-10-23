@@ -1,0 +1,235 @@
+/* The v9/v10 look (docs/design/v9, v10), loaded after the base styles: warm canvas, white cards with depth
+   instead of borders, a serif display face for greetings, a translucent tab bar, heroes with Шуша.
+   Text, links and buttons still come from the Telegram theme; the canvas, surfaces and secondary text are ours:
+   Telegram's hint colour on the warm canvas fell below 4.5:1 (review of 21 October 2026). */
+:root {
+  --canvas: #faf6f0;
+  --surface: #ffffff;
+  --surface-base: #ffffff;
+  --card-shadow: 0 8px 24px rgba(40, 28, 14, .07);
+  --card-radius: 24px;
+  --serif: ui-serif, "New York", Georgia, "Noto Serif", serif;
+  --hero-text: #2b2016;
+  --hero-muted: #5d4b39;
+  --ask-space: 0px;
+  --send-bg: #17140f;
+  --send-text: #ffffff;
+  --muted: #6a6158;
+}
+
+:root[data-theme="dark"] {
+  --canvas: #141312;
+  --surface: #1f2023;
+  --surface-base: #19191b;
+  --card-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+  --send-bg: #f5f1ea;
+  --send-text: #141312;
+  --muted: #aaa49c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --canvas: #141312;
+    --surface: #1f2023;
+    --surface-base: #19191b;
+    --card-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+    --send-bg: #f5f1ea;
+    --send-text: #141312;
+    --muted: #aaa49c;
+  }
+}
+
+body.has-ask { --ask-space: 76px; }
+.view { padding-bottom: calc(32px + var(--tabs-space) + var(--dock-space) + var(--ask-space) + var(--safe-bottom)); }
+.toast-region { bottom: calc(8px + var(--tabs-space) + var(--dock-space) + var(--ask-space) + var(--safe-bottom)); }
+
+/* ---- Depth, not borders ---- */
+.card { border-radius: var(--card-radius); box-shadow: var(--card-shadow); border: 0; }
+.card-stack { gap: 14px; }
+.page-title { font-size: 2.125rem; line-height: 1.15; letter-spacing: -.01em; }
+.section-title { font-size: 1.375rem; font-weight: 700; letter-spacing: -.01em; }
+.today .card-title, .today .card-head .card-title { font-size: 1.5rem; font-weight: 700; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card-head-link { min-height: 36px; font-size: .9375rem; }
+.fold-danger { background: var(--surface); border: 0; }
+.fold-danger .fold-toggle { color: var(--text); }
+.fold-danger .fold-icon { width: 22px; height: 22px; }
+.fold-danger .task-meta { color: var(--danger); }
+.fold-danger .task-row { border-top-color: var(--divider); }
+.jump-strip { margin: 0 -16px 16px; }
+
+/* ---- Hero ---- */
+.hero {
+  position: relative; isolation: isolate; display: flex; align-items: flex-end;
+  min-height: 260px; margin: -8px -16px 4px; padding: 24px 16px 20px; color: var(--hero-text);
+}
+.hero-scene {
+  position: absolute; inset: 0 0 auto; z-index: -2; width: 100%; height: 320px; object-fit: cover;
+  -webkit-mask-image: linear-gradient(to bottom, #000 45%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 45%, transparent 100%);
+}
+.hero-shusha {
+  position: absolute; right: 0; top: 24px; z-index: -1; width: min(46%, 200px); height: auto;
+  filter: drop-shadow(0 10px 16px rgba(60, 36, 10, .18));
+}
+.hero-text { max-width: 70%; }
+/* «Сегодня»: the picture sets the mood, the tasks are the point; a smaller hero shows them on the first screen. */
+.hero-compact { min-height: 188px; padding-bottom: 12px; }
+.hero-compact .hero-scene { height: 236px; }
+.hero-compact .hero-shusha { top: 12px; width: min(34%, 140px); }
+.hero-compact .hero-title { font-size: clamp(1.625rem, 7.6vw, 2.125rem); }
+.hero-compact .hero-sub { margin-top: 8px; }
+.hero-caption { margin: 0 0 6px; color: var(--hero-muted); font-size: .875rem; }
+.hero-title {
+  margin: 0; font-family: var(--serif); font-weight: 500; letter-spacing: -.02em;
+  font-size: clamp(1.875rem, 9.2vw, 2.5rem); line-height: 1.04; color: inherit;
+}
+.hero-line { display: block; }
+.hero-sub { margin: 12px 0 0; color: var(--hero-muted); font-size: .9375rem; line-height: 1.38; }
+.hero .back-link { color: inherit; }
+.hero-light { --hero-text: #fff6ea; --hero-muted: rgba(255, 246, 234, .82); }
+.hero-light .hero-title, .hero-light .hero-sub, .hero-light .hero-caption { text-shadow: 0 1px 12px rgba(0, 0, 0, .35); }
+/* In the dark theme a daylight scene is dimmed, like a room in the evening, so light text reads on it. */
+:root[data-theme="dark"] .hero:not(.hero-light) { --hero-text: #fff6ea; --hero-muted: rgba(255, 246, 234, .8); }
+:root[data-theme="dark"] .hero:not(.hero-light) .hero-scene { filter: brightness(.48) saturate(.9); }
+:root[data-theme="dark"] .hero:not(.hero-light) .hero-title,
+:root[data-theme="dark"] .hero:not(.hero-light) .hero-sub,
+:root[data-theme="dark"] .hero:not(.hero-light) .hero-caption { text-shadow: 0 1px 12px rgba(0, 0, 0, .45); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .hero:not(.hero-light) { --hero-text: #fff6ea; --hero-muted: rgba(255, 246, 234, .8); }
+  :root:not([data-theme]) .hero:not(.hero-light) .hero-scene { filter: brightness(.48) saturate(.9); }
+}
+
+/* Inner screens: a small pose next to the title. */
+.page-header-art { position: relative; min-height: 96px; padding-right: 104px; }
+.header-shusha { position: absolute; right: 0; top: 0; width: 104px; height: 104px; }
+
+/* ---- Calm empty states (v9 empty.jpg) ---- */
+.empty.calm { max-width: 340px; padding: 8px 16px 24px; }
+.calm-art { display: block; width: min(220px, 70%); height: auto; margin: 0 auto 8px; }
+.calm-title { font-family: var(--serif); font-size: 1.75rem; font-weight: 500; line-height: 1.15; letter-spacing: -.01em; }
+
+/* ---- Avatars: pastel circles with a letter ---- */
+.avatar {
+  display: inline-grid; place-items: center; flex: none; width: 44px; height: 44px; border-radius: 50%;
+  font-weight: 700; font-size: 1.0625rem; color: #3a2a1a;
+}
+.avatar-0 { background: #fde2cf; } .avatar-1 { background: #dcebdc; } .avatar-2 { background: #dbe7f7; }
+.avatar-3 { background: #f6dcea; } .avatar-4 { background: #ece3f7; } .avatar-5 { background: #f8edc8; }
+
+/* ---- Tab bar: translucent, the active icon filled ---- */
+.tabs {
+  background: color-mix(in srgb, var(--surface-base) 74%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(170%); backdrop-filter: blur(20px) saturate(170%);
+  border-top: 0; box-shadow: 0 -1px 0 color-mix(in srgb, var(--text) 7%, transparent);
+}
+/* A weak or middling Android phone (app.js): blurring the page under the tabs on every scrolled frame stutters. */
+:root[data-perf="low"] .tabs, :root[data-perf="average"] .tabs {
+  -webkit-backdrop-filter: none; backdrop-filter: none; background: var(--surface-base);
+}
+.tab[aria-current="page"] { color: var(--button); }
+.tab[aria-current="page"] .tab-icon { fill: currentColor; }
+.tab[aria-current="page"]::after { display: none; }
+
+/* ---- «Поручите Шуше…» ---- */
+.ask-bar {
+  position: fixed; left: 12px; right: 12px; z-index: 15; max-width: 38rem; margin: 0 auto;
+  bottom: calc(8px + var(--tabs-space) + var(--safe-bottom));
+}
+/* A soft veil from the page colour behind the bar, down to the tabs: no card text shows through the gap. */
+.ask-bar::before {
+  content: ""; position: absolute; z-index: -1; left: -12px; right: -12px; top: -28px; bottom: -8px; pointer-events: none;
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--canvas) 0%, transparent), var(--canvas) 34px);
+}
+.ask-row {
+  display: flex; align-items: center; gap: 6px; min-height: 52px; padding: 4px 4px 4px 14px;
+  border-radius: 26px; background: var(--surface); box-shadow: var(--card-shadow);
+}
+.ask-spark { width: 20px; height: 20px; color: var(--button); }
+.ask-input { flex: 1; min-width: 0; min-height: 44px; border: 0; background: none; outline: none; font-size: 1rem; }
+.ask-input::placeholder { color: var(--muted); }
+.ask-mic, .ask-send {
+  display: grid; place-items: center; flex: none; width: 44px; height: 44px; border: 0; border-radius: 50%;
+}
+.ask-mic { background: var(--fill); color: var(--text); }
+.ask-send { background: var(--send-bg); color: var(--send-text); }
+.ask-mic .icon, .ask-send .icon { width: 22px; height: 22px; }
+.ask-chips { display: none; gap: 8px; overflow-x: auto; margin-bottom: 8px; scrollbar-width: none; }
+.ask-bar.is-open .ask-chips { display: flex; }
+.ask-chip { min-height: 40px; background: var(--surface); border: 0; box-shadow: var(--card-shadow); }
+.ask-errors .inline-error { margin: 0 0 8px; }
+
+/* ---- «Шуша сделала за вас» ---- */
+.made-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0 0 16px; padding: 0; list-style: none; }
+.made-grid > li { display: flex; }
+.made-tile {
+  display: flex; flex-direction: column; width: 100%; padding: 0; border: 0; overflow: hidden;
+  border-radius: 20px; background: var(--surface); box-shadow: var(--card-shadow); color: var(--text); text-align: left;
+}
+.made-thumb { aspect-ratio: 4 / 3; border-radius: 0; }
+.made-text { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px 12px; }
+.made-title { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; font-size: .9375rem; }
+.made-date { color: var(--muted); font-size: .8125rem; }
+
+/* ---- Entrance: the hero fades in, cards rise one after another ---- */
+@keyframes hero-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.is-entering .hero-scene, .is-entering .hero-shusha { animation: hero-in .6s ease-out both; }
+.is-entering > .card, .is-entering > section, .is-entering > .fold-stack, .is-entering > .card-stack, .is-entering > .empty, .is-entering > .home-block {
+  animation: rise .45s ease-out both;
+}
+.is-entering > :nth-child(2) { animation-delay: 30ms; } .is-entering > :nth-child(3) { animation-delay: 60ms; }
+.is-entering > :nth-child(4) { animation-delay: 90ms; } .is-entering > :nth-child(5) { animation-delay: 120ms; }
+.is-entering > :nth-child(6) { animation-delay: 150ms; } .is-entering > :nth-child(7) { animation-delay: 180ms; }
+.is-entering > :nth-child(n+8) { animation-delay: 210ms; }
+@media (prefers-reduced-motion: reduce) {
+  .is-entering *, .is-entering > * { animation: none !important; }
+}
+:root[data-perf="low"] .is-entering *, :root[data-perf="low"] .is-entering > * { animation: none !important; }
+
+@media (max-width: 359px) {
+  .hero { min-height: 230px; }
+  .hero-text { max-width: 64%; }
+  .page-header-art { padding-right: 84px; }
+  .header-shusha { width: 84px; height: 84px; }
+}
+
+/* ---- «Сегодня» blocks and «Настроить главную» ---- */
+.home-block > .card, .home-block > .board-block, .home-block > .fold-stack { margin-bottom: 16px; }
+.home-block > .fold-stack > .fold:last-child { margin-bottom: 0; }
+.home-list { padding-bottom: 4px; }
+.home-tune { display: block; margin: 4px auto 8px; color: var(--muted); font-weight: 400; font-size: .9375rem; text-decoration: underline; text-underline-offset: 3px; }
+.home-settings { margin-bottom: 16px; }
+.home-settings .switch-row { padding-right: 0; }
+.home-settings .switch-row + .switch-row { border-top: 1px solid var(--divider); }
+.home-move { width: 40px; color: var(--text); }
+.home-move:disabled { opacity: .25; }
+.home-move-icon { width: 20px; height: 20px; }
+.home-move-icon.is-up { transform: rotate(90deg); }
+.home-move-icon.is-down { transform: rotate(-90deg); }
+
+/* ---- «Знакомство»: the first-steps ring on the «Сегодня» hero (quest.js) ---- */
+.quest-pill {
+  position: absolute; right: 12px; bottom: 8px; display: inline-flex; align-items: center; gap: 6px;
+  min-height: 32px; padding: 4px 10px 4px 6px; border: 0; border-radius: 999px;
+  background: rgba(255, 255, 255, .9); color: var(--hero-text); font-size: .8125rem; font-weight: 600;
+  box-shadow: 0 4px 14px rgba(40, 28, 14, .12);
+}
+.quest-ring {
+  width: 20px; height: 20px; border-radius: 50%;
+  background: conic-gradient(var(--accent) calc(var(--quest-share) * 360deg), rgba(40, 28, 14, .12) 0);
+  -webkit-mask: radial-gradient(circle, transparent 5px, #000 6px); mask: radial-gradient(circle, transparent 5px, #000 6px);
+}
+.quest-pill-chevron { width: 14px; height: 14px; opacity: .6; }
+.quest-lead { margin: 0 0 12px; color: var(--muted); }
+.quest-steps { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 10px; }
+.quest-step { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.quest-step.is-done .quest-title { color: var(--muted); text-decoration: line-through; }
+.quest-mark {
+  display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 50%;
+  background: rgba(40, 28, 14, .06); font-weight: 700; font-size: .875rem;
+}
+.quest-step.is-done .quest-mark { background: var(--accent); color: #fff; }
+.quest-mark svg { width: 16px; height: 16px; }
+.quest-title { flex: 1; }
+.quest-try { width: 100%; margin-left: 38px; }

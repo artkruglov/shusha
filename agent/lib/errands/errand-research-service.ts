@@ -14,7 +14,7 @@ interface ResearchRun {
   eve_turn_id: string;
 }
 
-export function createErrandResearchService(research: (brief: string) => Promise<unknown>) {
+export function createErrandResearchService(research: (brief: string, familyId: string) => Promise<unknown>) {
   return async (auth: MemoryAuthorization, input: {id:string;version:number}, invocation: ErrandInvocation) => {
     const client = await database().connect();
     let brief = "";
@@ -51,7 +51,7 @@ export function createErrandResearchService(research: (brief: string) => Promise
 
     if (fresh) {
       try {
-        const result = errandResearchResult.parse(await research(brief));
+        const result = errandResearchResult.parse(await research(brief, auth.familyId));
         // Persist before the live reauthorization/queue transaction: recovery can reuse these bytes.
         await database().query(`UPDATE errand_research_runs SET state='completed',result=$3,completed_at=now()
           WHERE errand_id=$1 AND input_version=$2 AND state='started'`,

@@ -203,6 +203,31 @@ export async function deleteOrphanedPostgresEveRuns(client: WorkflowQueryClient)
   }
 }
 
+/**
+ * Задачи очереди graphile-worker, которые ждут уже удалённый ран. Чистка сирот убирает ран, а его
+ * отложенные задачи (`sessionTimeoutWorkflow` и подобные) остаются и ретраятся до 49 раз, каждый раз
+ * падая с `WorkflowRunNotFoundError` и засоряя лог (прод 2 октября 2026, 82 задачи, у части до 42 попыток).
+ * Задача считается мёртвой, только если она сама назвала ран в последней ошибке и этого рана в таблице
+ * нет; залоченные воркером не трогаются, удаляет публичная `graphile_worker.complete_jobs`.
+ */
+export async function deleteDeadWorkflowQueueJobs(client: WorkflowQueryClient): Promise<number> {
+  const result = await client.query(
+    `WITH dead AS (
+       SELECT job.id FROM graphile_worker._private_jobs job
+        WHERE job.locked_at IS NULL AND job.attempts > 0
+          AND job.last_error LIKE '%WorkflowRunNotFoundError%'
+          AND substring(job.last_error from 'wrun_[A-Z0-9]{26}') IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM workflow.workflow_runs run
+             WHERE run.id = substring(job.last_error from 'wrun_[A-Z0-9]{26}'))
+        ORDER BY job.id LIMIT $1
+     )
+     SELECT count(*)::int AS removed FROM graphile_worker.complete_jobs(ARRAY(SELECT id FROM dead))`,
+    [ORPHAN_SWEEP_BATCH],
+  );
+  return Number(result.rows[0]?.removed ?? 0);
+}
+
 export async function deleteConfiguredOrphanedPostgresEveRuns(): Promise<number> {
   const connectionString = process.env.WORKFLOW_POSTGRES_URL;
   if (!connectionString) {
@@ -221,6 +246,10 @@ export async function deleteConfiguredOrphanedPostgresEveRuns(): Promise<number>
       const deleted = await deleteOrphanedPostgresEveRuns(client);
       removed += deleted;
       if (deleted < ORPHAN_SWEEP_BATCH) break;
+    }
+    const deadJobs = await deleteDeadWorkflowQueueJobs(client);
+    if (deadJobs > 0) {
+      console.error(JSON.stringify({ code: "AGENT_WORKFLOW_DEAD_JOBS_DELETED", jobs: deadJobs }));
     }
     return removed;
   } finally {

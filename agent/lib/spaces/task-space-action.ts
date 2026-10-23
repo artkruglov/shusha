@@ -19,15 +19,23 @@ export async function lockTaskSpaceBoundary(client:PoolClient,familyId:string,id
     WHERE t.family_id=$1 AND t.id=$2 FOR SHARE OF s`,[familyId,id]);
 }
 
-/** Call after readTasks proves identity and live group access, before locking the task row. */
+/**
+ * Call after readTasks proves identity and live group access, before locking the task row.
+ *
+ * In the legacy mode a task's `space_id` is only where it came from (backfill 104, projects 161): reads
+ * ignore it, so a change must too, or an old task is visible and yet refused («страховка в прежней
+ * семейной области», прод 12 октября 2026). Identity, scope and assignee rules of readTasks and the
+ * transition still apply; areas narrow the action only once the family runs on them.
+ */
 export async function requireTaskRecordAction(client:PoolClient,auth:MemoryAuthorization,id:string,action:SpaceAction) {
   const row=(await client.query<{space_id:string|null;group_id:string|null;version:number}>(
     "SELECT space_id,group_id,version FROM shared_tasks WHERE id=$1 AND family_id=$2",[id,auth.familyId])).rows[0];
   if(!row) throw new AppError("AGENT_TASK_ACCESS_DENIED","Задача недоступна");
+  if(await readFamilySpaceMode(client,auth.familyId)!=="spaces") return row.version;
+  if(!row.space_id) throw new AppError("AGENT_SPACE_CONTEXT_REQUIRED","Область задачи не подтверждена");
   const groupId=auth.groupId ?? row.group_id;
-  if(row.space_id) await authorizeRecordSpaceAction(client,{familyId:auth.familyId,userId:auth.userId,spaceId:row.space_id,
+  await authorizeRecordSpaceAction(client,{familyId:auth.familyId,userId:auth.userId,spaceId:row.space_id,
     chat:groupId?{type:"group",groupId}:{type:"private"}},action);
-  else if(await readFamilySpaceMode(client,auth.familyId)==="spaces") throw new AppError("AGENT_SPACE_CONTEXT_REQUIRED","Область задачи не подтверждена");
   return row.version;
 }
 

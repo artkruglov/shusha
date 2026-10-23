@@ -28,11 +28,12 @@ async function finalizeRetirement(client: PoolClient, id: string): Promise<void>
     [id],
   );
   await client.query(
-    `INSERT INTO audit_events (family_id, event_type, subject_id, metadata)
-     SELECT family_id, 'session.noncanonical_retired', id,
+    `INSERT INTO audit_events (family_id, group_id, event_type, subject_id, metadata)
+     SELECT family_id, CASE WHEN family_id IS NULL THEN group_id END, 'session.noncanonical_retired', id,
             jsonb_build_object('kind', kind::text, 'taskState', task_state::text)
        FROM conversation_sessions
-      WHERE id = $1 AND retired_at IS NOT NULL AND kind <> 'canonical'`,
+      WHERE id = $1 AND retired_at IS NOT NULL AND kind <> 'canonical'
+        AND (family_id IS NOT NULL OR group_id IS NOT NULL)`,
     [id],
   );
 }

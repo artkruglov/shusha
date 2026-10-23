@@ -102,11 +102,17 @@ export const weeklyReviewRepository = {
   /** Содержание недели: те же дела, что и в утреннем обзоре, плюс счётчик закрытого за семь дней. */
   async review(recipient: WeeklyReviewRecipient, now: Date): Promise<WeeklyReviewInput> {
     const overview = await dailyOverviewRepository.overview(recipient);
+    // Закрытое считается по событиям выполнения, а не по `updated_at`: перенос старого сделанного дела
+    // при слиянии проектов делал его «закрытым за неделю», а выполнение повторяющегося дела, которое
+    // сразу получает следующую дату, не считалось вовсе. Каждое вхождение повтора идёт в счёт, обычное
+    // дело один раз и только если оно и сейчас закрыто.
     const closed = await database().query<{ count: string }>(
-      `SELECT count(*)::text FROM shared_tasks
-        WHERE family_id = $1 AND status = 'completed' AND kind <> 'project'
-          AND (assignee_telegram_id = $2 OR creator_telegram_id = $2)
-          AND updated_at > $3::timestamptz - make_interval(days => $4)`,
+      `SELECT count(DISTINCT CASE WHEN t.recurrence_unit IS NULL THEN t.id::text ELSE v.task_id::text || ':' || v.version END)::text
+         FROM shared_task_versions v JOIN shared_tasks t ON t.id = v.task_id
+        WHERE t.family_id = $1 AND t.kind = 'task' AND v.action = 'complete'
+          AND (t.recurrence_unit IS NOT NULL OR t.status = 'completed')
+          AND (t.assignee_telegram_id = $2 OR t.creator_telegram_id = $2)
+          AND v.created_at > $3::timestamptz - make_interval(days => $4)`,
       [recipient.familyId, recipient.telegramUserId, now, CLOSED_WINDOW_DAYS],
     );
     return {

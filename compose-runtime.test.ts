@@ -40,11 +40,11 @@ const REMOVED_ANTIVIRUS_PATHS = [
 ] as const;
 
 describe("Docker Compose runtime wiring", () => {
-  it("passes configured grocery and image providers into the production agent", () => {
+  it("passes configured grocery and image providers, and the groups flag, into the production agent", () => {
     const compose = readFileSync(new URL("compose.production.yaml", projectRoot), "utf8");
     const agent = compose.split("\n  agent:\n")[1]!.split("\n  migrate:\n")[0]!;
     for (const key of ["GROCERY_MCP_URL", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_AI_TOKEN",
-      "NEURALDEEP_IMAGE_API_KEY", "OPENROUTER_IMAGE_API_KEY", "OPENROUTER_IMAGE_MODEL"]) {
+      "NEURALDEEP_IMAGE_API_KEY", "OPENROUTER_IMAGE_API_KEY", "OPENROUTER_IMAGE_MODEL", "WEB_APP_GROUPS_ENABLED"]) {
       expect(agent).toContain(`      ${key}: \${${key}-}\n`);
     }
   });
@@ -234,5 +234,55 @@ describe("Docker Compose runtime wiring", () => {
     expect(nginx).toContain("  resolver 127.0.0.11 valid=10s ipv6=off;\n");
     expect(nginx).toContain("    zone eve_agent 64k;\n");
     expect(nginx).toContain("    server agent:3000 resolve;\n");
+  });
+
+  it("serves only the home and privacy pages Google's consent screen links to", () => {
+    const nginx = readFileSync(new URL("infra/nginx.conf", projectRoot), "utf8");
+    const dockerfile = readFileSync(new URL("Dockerfile", projectRoot), "utf8");
+
+    expect(dockerfile).toContain("COPY infra/public /usr/share/osinara-public\n");
+    expect(nginx).toContain("    location = / {\n      root /usr/share/osinara-public;");
+    expect(nginx).toContain("      try_files /index.html =404;\n");
+    expect(nginx).toContain("    location = /privacy {\n      root /usr/share/osinara-public;");
+    expect(nginx).toContain("      try_files /privacy.html =404;\n");
+    // Everything else stays behind the catch-all deny: no static directory listing, no Eve UI.
+    expect(nginx).toContain("    location / {\n      return 404;\n    }");
+    expect(readFileSync(new URL("infra/public/privacy.html", projectRoot), "utf8")).toContain("Limited Use");
+  });
+
+  it("serves the Mini App page with a strict policy and forwards only its API prefix", () => {
+    const nginx = readFileSync(new URL("infra/nginx.conf", projectRoot), "utf8");
+    expect(nginx).toContain("  include /etc/nginx/mime.types;\n");
+    const page = nginx.slice(nginx.indexOf("    location /app/ {"), nginx.indexOf("    location /app-api/ {"));
+    expect(page).toContain("      root /usr/share/osinara-public;\n");
+    expect(page).toContain("script-src 'self' https://telegram.org;");
+    expect(page).toContain("frame-ancestors https://web.telegram.org\"");
+    expect(page).not.toContain("unsafe-inline");
+    const api = nginx.slice(nginx.indexOf("    location /app-api/ {"), nginx.indexOf("    location / {\n      return 404;"));
+    expect(api).toContain("      limit_except GET POST { deny all; }\n");
+    expect(api).toContain("      client_max_body_size 4k;\n");
+    expect(api).toContain("      limit_req zone=web_app burst=40 nodelay;\n");
+    expect(api).toContain("      proxy_pass http://eve_agent;\n");
+    // Only the Studio's photo route takes a large body, POST only, at its own slower rate.
+    const upload = nginx.slice(nginx.indexOf("    location = /app-api/studio/upload {"), nginx.indexOf("    location /app-api/ {"));
+    expect(upload).toContain("      limit_except POST { deny all; }\n");
+    expect(upload).toContain("      client_max_body_size 10m;\n");
+    expect(upload).toContain("      limit_req zone=web_app_upload burst=5 nodelay;\n");
+    // The rate is per client, not per X-Forwarded-For string: the client's own header names no fresh bucket.
+    expect(nginx).toContain("  real_ip_header X-Forwarded-For;\n  real_ip_recursive on;\n");
+    expect(nginx).toContain("  limit_req_zone $binary_remote_addr zone=web_app:1m rate=5r/s;\n");
+    expect(nginx).not.toContain("$http_x_forwarded_for");
+    // The access log names no client: no address, no query string, no user agent.
+    const format = nginx.slice(nginx.indexOf("  log_format osinara"), nginx.indexOf("  access_log /dev/stdout osinara;"));
+    expect(format).not.toMatch(/\$remote_addr|\$request\b|\$args|\$http_|\$request_uri/u);
+    // The page is read fresh; only stamped scripts and styles stay on the phone for a year.
+    expect(page).toContain("      add_header Cache-Control $web_app_cache always;\n");
+    expect(nginx).toContain('    default "no-cache";\n');
+    expect(nginx).toContain('"~^/app/[a-z0-9-]+\\.(js|css)\\|[0-9a-f]{12}$" "public, max-age=31536000, immutable";');
+    const dockerfile = readFileSync(new URL("Dockerfile", projectRoot), "utf8");
+    expect(dockerfile).toContain("RUN sh /usr/local/bin/stamp-web-app-assets /usr/share/osinara-public/app");
+    // The page talks to the API only through the same origin and never inlines a script.
+    const html = readFileSync(new URL("infra/public/app/index.html", projectRoot), "utf8");
+    expect(html).not.toMatch(/<script>|<script(?![^>]*\bsrc=)[^>]*>|\son[a-z]+=/u);
   });
 });

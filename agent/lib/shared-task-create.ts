@@ -3,23 +3,67 @@ import type { PoolClient } from "pg";
 import { AppError } from "./app-error.js";
 import type { MemoryAuthorization, MemoryScope } from "./memory-context.js";
 import type { SharedTaskInput } from "./shared-tasks.js";
-import { denied, participants } from "./shared-task-access.js";
+import { denied, participants, readProjects } from "./shared-task-access.js";
 import { personalTimeRepository } from "./personal-time/personal-time-repository.js";
 import { requireTaskRecipientSpace } from "./spaces/task-space-action.js";
 import { isCurrentTelegramMember } from "./telegram-current-membership.js";
 import { CARE_AREA_VISIBILITY, careAreaSpaceValues } from "./care-areas/care-area-access.js";
-import { findOrCreateProject } from "./projects/project-resolver.js";
+import { findNamedProject } from "./projects/project-resolver.js";
+import { adoptFirstTaskVisibility, privateTaskScope, type TaskVisibility } from "./shared-task-visibility.js";
 
+/**
+ * Проект, выбранный по id, и область, в которую он ведёт. Имя проекта из лички пишет личное дело, а
+ * семейный «Дом» из справки получал личного двойника, и семья дела не видела (замечание Codex,
+ * 16 октября 2026). Решение владельца: явно названный семейный проект принимает дело из лички без
+ * подтверждения. Проект ищется тем же чтением, что и справка (`readProjects`): живой, этой семьи и
+ * видимый человеку здесь; дело получает область проекта, а не ту, что сказала модель.
+ */
+async function chosenProject(client: PoolClient, auth: MemoryAuthorization, scope: MemoryScope, id: string) {
+  const [listed] = await readProjects(client, auth, scope, { id });
+  if (!listed || listed.status !== "accepted") denied();
+  // Группа читает только свою область; из лички берутся свои личные проекты и семейные.
+  if (scope === "group" ? listed.scope !== "group" : listed.scope === "group") denied();
+  const row = (await client.query<{ space_id: string | null; title: string }>(
+    "SELECT space_id, title FROM shared_tasks WHERE id=$1 AND kind='project' AND status='accepted' FOR SHARE", [id])).rows[0];
+  if (!row) denied();
+  return { id, scope: listed.scope, spaceId: row.space_id, title: row.title };
+}
+
+/**
+ * `visibility` is the Mini App's «для семьи / только мне» for this one task, chosen by the person on the form; it
+ * never comes from the model's input, whose schema has no such field.
+ */
 export async function createTask(
-  client: PoolClient, auth: MemoryAuthorization, scope: MemoryScope, spaceId: string | null, input: SharedTaskInput,
+  client: PoolClient, auth: MemoryAuthorization, chatScope: MemoryScope, chatSpaceId: string | null, input: SharedTaskInput,
+  visibility?: TaskVisibility,
 ): Promise<string> {
+  if (input.projectRef && input.kind === "ritual") denied();
+  if (visibility !== undefined && chatScope !== "personal") denied();
+  const chosen = input.projectRef ? await chosenProject(client, auth, chatScope, input.projectRef) : null;
+  if (visibility !== undefined && chosen && chosen.scope !== visibility) {
+    throw new AppError("AGENT_TASK_VISIBILITY_PROJECT", "Дело в проекте видят те же, кто видит проект. Уберите проект или выбор, кому видно");
+  }
+  // A private chat writes personal by default; an assignment to another adult, or the person's «Для семьи»,
+  // writes a shared task (`shared-task-visibility.ts`). Asking oneself is still one's own task.
+  const own = input.assigneeRef === undefined ? undefined : await isOwnParticipant(client, auth, input.assigneeRef);
+  const fromPrivate = chatScope === "personal" && !chosen && !input.careAreaRef
+    ? await privateTaskScope(client, auth, chatSpaceId,
+      { assigneeRef: own === false ? input.assigneeRef : undefined, visibility })
+    : null;
+  if (visibility !== undefined) await adoptFirstTaskVisibility(client, auth, visibility);
+  const scope = chosen?.scope ?? fromPrivate?.scope ?? chatScope;
+  const spaceId = chosen ? chosen.spaceId : fromPrivate ? fromPrivate.spaceId : chatSpaceId;
+  // The private chat's own area narrows participants to its members; a shared task of a legacy family has none.
+  const participantAuth = fromPrivate?.scope === "family" ? { ...auth, space: undefined } : auth;
   // Свободное дело не назначается автору: вопрос «кто возьмёт» задают всей области, а взять
   // его может только тот, кто эту область читает. В личной области брать некому.
   if (input.unassigned && scope === "personal") denied();
   let assignee: string | null = input.unassigned ? null : auth.telegramUserId!;
-  if (input.assigneeRef) {
+  if (input.assigneeRef && own === true && scope === "personal") {
+    // «Запиши мне» from a private chat: the author is the assignee anyway.
+  } else if (input.assigneeRef) {
     if (scope === "personal") denied();
-    await participants(client, auth, scope);
+    await participants(client, participantAuth, scope);
     const result = await client.query<{ telegram_user_id: string }>(
       `SELECT p.telegram_user_id FROM shared_task_participants p
        WHERE p.id=$1 AND p.family_id=$2 AND p.group_id IS NOT DISTINCT FROM $3::uuid
@@ -68,14 +112,19 @@ export async function createTask(
       );
     }
   }
-  // Имя списка из слов человека это проект области (миграция 161): найденный по тождеству имени или
-  // новый. В проект входят дела и идеи, традиция остаётся сама по себе.
+  // Имя списка это существующий проект области (миграция 161), найденный по тождеству имени; новый проект
+  // заводит только manage_projects create после «да» человека. В проект входят дела и идеи, традиция нет.
   const kind = input.kind ?? "task";
   const groupId = scope === "group" ? auth.groupId : null;
-  const projectId = input.listName && kind !== "ritual"
-    ? await findOrCreateProject(client, { familyId: auth.familyId, groupId, scope, spaceId, ownerTelegramId: auth.telegramUserId! },
-      auth.telegramUserId!, input.listName, input.lifeArea ?? null)
+  const project = chosen ? { created: false, id: chosen.id, spaceId: chosen.spaceId } : input.listName && kind !== "ritual"
+    ? await findNamedProject(client, { familyId: auth.familyId, groupId, scope, spaceId, ownerTelegramId: auth.telegramUserId! },
+      auth.telegramUserId!, input.listName)
     : null;
+  const projectId = project?.id ?? null;
+  // Дело живёт в области своего проекта: в legacy это личная область автора у проекта, заведённого
+  // до переноса в области (`project-resolver.ts`). Получатель тот же автор, поэтому проверка та же.
+  const taskSpaceId = project?.spaceId ?? spaceId;
+  if (taskSpaceId !== spaceId) await requireTaskRecipientSpace(client, auth, taskSpaceId, assignee);
   const result = await client.query<{ id: string }>(
     `INSERT INTO shared_tasks(family_id,group_id,scope,creator_telegram_id,assignee_telegram_id,title,due_at,status,kind,list_name,details,due_on,
        space_id,recurrence_unit,recurrence_interval,recurrence_anchor_on,care_area_id,life_area,project_id)
@@ -83,13 +132,20 @@ export async function createTask(
     [auth.familyId, scope === "group" ? auth.groupId : null, scope, auth.telegramUserId, assignee,
       input.title, input.dueAt ?? null,
       assignee === null ? "open" : assignee === auth.telegramUserId ? "accepted" : "proposed",
-      input.kind ?? "task",input.listName ?? null,input.details ?? null,input.dueOn ?? null,
+      input.kind ?? "task",chosen?.title ?? input.listName ?? null,input.details ?? null,input.dueOn ?? null,
       // Область у дела это происхождение, а не право: доступ к нему остаётся по личности.
       // Но записать её надо сразу, иначе строка живёт без области до самого переключения.
-      spaceId, input.repeat?.unit ?? null, input.repeat?.interval ?? null,
+      taskSpaceId, input.repeat?.unit ?? null, input.repeat?.interval ?? null,
       // Якорь повтора это первая дата: от неё считаются все следующие, поэтому один
       // пропуск не сдвигает всё правило.
       input.repeat ? input.dueOn ?? null : null, careAreaId, input.lifeArea ?? null, projectId],
   );
   return result.rows[0]!.id;
+}
+
+/** Whether a participant reference names the caller: «запиши мне» is not an assignment to another adult. */
+async function isOwnParticipant(client: PoolClient, auth: MemoryAuthorization, ref: string): Promise<boolean> {
+  const { rows } = await client.query<{ telegram_user_id: string }>(
+    "SELECT telegram_user_id FROM shared_task_participants WHERE id = $1 AND family_id = $2", [ref, auth.familyId]);
+  return rows[0]?.telegram_user_id === auth.telegramUserId;
 }

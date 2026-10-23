@@ -75,7 +75,7 @@ describe("manage_family_invitation model input", () => {
 
     expect(schema.type).toBe("object");
     expect(schema.required).toContain("action");
-    expect(schema.properties.action?.enum).toEqual(["create", "approve", "members", "set_relation"]);
+    expect(schema.properties.action?.enum).toEqual(["create", "approve", "members", "set_relation", "remove_member", "restore_member"]);
   });
 
   it("rejects the same incomplete approval candidate before HITL and execution", async () => {
@@ -127,11 +127,12 @@ describe("manage_family_invitation model input", () => {
       invitationId: "00000000-0000-4000-8000-000000000001",
     } as const;
 
-    expect(approvalFor(input)).toBe("user-approval");
+    // Создание ссылки близкого кнопки не требует: ссылка вредит только после использования, а убрать участника можно.
+    expect(approvalFor(input)).toBe("not-applicable");
     await expect(manageFamilyInvitation.execute(input, context)).resolves.toMatchObject({
       delivered: true,
     });
-    expect(createInvitation).toHaveBeenCalledWith("family-1", "owner-1", "call-1", undefined);
+    expect(createInvitation).toHaveBeenCalledWith("family-1", "owner-1", "call-1", undefined, { autoApprove: true });
     expect(approveInvitation).not.toHaveBeenCalled();
   });
 
@@ -150,7 +151,7 @@ describe("manage_family_invitation model input", () => {
       "invitationId",
       "candidateTelegramUserId",
       "candidateDisplayName",
-      "берутся точно из list_pending_family_invitations",
+      "точно из списка",
     ]) expect(description).toContain(fragment);
   });
 });

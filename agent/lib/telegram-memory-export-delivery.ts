@@ -7,6 +7,7 @@
 import { resolveTelegramBotToken } from "eve/channels/telegram";
 
 import { AppError } from "./app-error.js";
+import { pacedTelegramMultipartSend } from "./telegram-send-pacer.js";
 
 const TELEGRAM_EXPORT_TIMEOUT_MILLISECONDS = 30_000;
 
@@ -37,14 +38,15 @@ export async function deliverMemoryExportFiles(
   );
   let response: Response;
   try {
-    response = await fetchImplementation(
-      `https://api.telegram.org/bot${token}/sendMediaGroup`,
-      {
-        body: form,
-        method: "POST",
-        signal: AbortSignal.timeout(TELEGRAM_EXPORT_TIMEOUT_MILLISECONDS),
-      },
-    );
+    response = await pacedTelegramMultipartSend("sendMediaGroup", input.chatId, () =>
+      fetchImplementation(
+        `https://api.telegram.org/bot${token}/sendMediaGroup`,
+        {
+          body: form,
+          method: "POST",
+          signal: AbortSignal.timeout(TELEGRAM_EXPORT_TIMEOUT_MILLISECONDS),
+        },
+      ));
   } catch (error) {
     console.error(JSON.stringify({
       code: "AGENT_MEMORY_EXPORT_DELIVERY_AMBIGUOUS",

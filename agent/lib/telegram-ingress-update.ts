@@ -4,6 +4,10 @@
  * Exports:
  * - `telegramUpdateId`: validated update id of the raw webhook body.
  * - `telegramQueueKey`: one FIFO per chat/topic, or per message-less callback.
+ * - `telegramGuestMessage`: the guest message (Bot API 10.0) of a raw update, if it is one.
+ * - `telegramGuestQueueKey`: one queue per guest query; guest answers never wait for a chat.
+ * - `isTelegramChatJoinRequest`, `telegramJoinQueueKey`: a request to enter a group by an invite link and
+ *   its own queue per group, apart from the group's messages: the greeting has five minutes.
  * - `telegramVoiceMetadata`: persisted voice fields of a raw update.
  * - `shouldTranscribeVoice`: every non-channel voice asks for a transcript; the voice authorizer decides.
  * - `withCaptionlessAttachmentText`: non-empty factual model text for a captionless attachment.
@@ -54,6 +58,40 @@ export function telegramQueueKey(update: TelegramUpdate): string {
     chatId: message.chat.id,
     messageThreadId: message.messageThreadId,
   });
+}
+
+export function telegramGuestMessage(raw: Record<string, unknown>): Record<string, unknown> | null {
+  const message = raw.guest_message;
+  return message !== null && typeof message === "object" && !Array.isArray(message)
+    ? message as Record<string, unknown>
+    : null;
+}
+
+export function telegramGuestQueueKey(raw: Record<string, unknown>): string {
+  const queryId = telegramGuestMessage(raw)?.guest_query_id;
+  if (typeof queryId !== "string" || queryId.length === 0) {
+    throw new AppError(
+      "AGENT_TELEGRAM_GUEST_QUERY_INVALID",
+      "Telegram передал гостевое сообщение без идентификатора запроса",
+    );
+  }
+  return `telegram:guest:${queryId}`;
+}
+
+export function isTelegramChatJoinRequest(raw: Record<string, unknown>): boolean {
+  const request = raw.chat_join_request;
+  return request !== null && typeof request === "object" && !Array.isArray(request);
+}
+
+export function telegramJoinQueueKey(raw: Record<string, unknown>): string {
+  const chatId = (raw.chat_join_request as { chat?: { id?: unknown } } | undefined)?.chat?.id;
+  if (!isTelegramChatJoinRequest(raw) || (typeof chatId !== "number" && typeof chatId !== "string") || !/^-\d+$/u.test(String(chatId))) {
+    throw new AppError(
+      "AGENT_TELEGRAM_JOIN_REQUEST_INVALID",
+      "Telegram передал заявку на вступление без группы",
+    );
+  }
+  return `telegram:join:${chatId}`;
 }
 
 export function telegramVoiceMetadata(raw: Record<string, unknown>) {

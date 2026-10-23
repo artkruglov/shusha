@@ -145,7 +145,8 @@ export async function recordProactiveDelivery(
                   WHERE run.id = $6::uuid)
                -- Бот начал личный разговор сам: сказанное живёт в личном пространстве адресата.
                WHEN $5::proactive_delivery_source_kind
-                 IN ('daily_overview', 'coach', 'partner_alert', 'weekly_review')
+                 IN ('daily_overview', 'coach', 'feedback_ask', 'partner_alert', 'weekly_review',
+                     'feature_tip', 'evening_reflection')
                  THEN (SELECT id FROM spaces WHERE family_id = $1
                         AND kind = 'personal' AND owner_user_id = $2 AND state = 'active'
                       ORDER BY created_at LIMIT 1)

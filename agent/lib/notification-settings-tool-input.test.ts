@@ -6,13 +6,16 @@
  * - Shared semantic validation before approval and execution.
  * - Explicit safe handling of MiniMax sibling-field materialization.
  * - Complete payload and bounded-correction guidance in the tool description.
+ * - The morning overview switch and hour (migration 180) by words, for the person's own row.
  */
 import type { ToolContext } from "eve/tools";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-const { configureNotifications, getNotificationSettings, requireAuthorization, setCoach, setGroupOverview, setWeeklyReview } = vi.hoisted(() => ({
+const { configureNotifications, getNotificationSettings, readOverview, requireAuthorization, setCoach, setGroupOverview, setWeeklyReview, writeOverview } = vi.hoisted(() => ({
   configureNotifications: vi.fn(),
+  readOverview: vi.fn(),
+  writeOverview: vi.fn(),
   getNotificationSettings: vi.fn(),
   requireAuthorization: vi.fn(),
   setCoach: vi.fn(),
@@ -22,6 +25,10 @@ const { configureNotifications, getNotificationSettings, requireAuthorization, s
 
 vi.mock("./reminders/reminder-context.js", () => ({ requireReminderAuthorization: requireAuthorization }));
 vi.mock("./initiative/group-overview-repository.js", () => ({ groupOverviewRepository: { setEnabled: setGroupOverview } }));
+vi.mock("./task-buttons/digest-settings.js", () => ({
+  DAILY_OVERVIEW_DEFAULT_HOUR: 8,
+  dailyOverviewSettings: { read: readOverview, write: writeOverview },
+}));
 vi.mock("./reminders/reminder-repository.js", () => ({
   reminderRepository: { configureNotifications, getNotificationSettings, setCoach, setWeeklyReview },
 }));
@@ -44,6 +51,9 @@ describe("notification_settings model input", () => {
     requireAuthorization.mockReturnValue({ familyId: "family-1", role: "member", telegramChatType: "private", userId: "user-1" });
     getNotificationSettings.mockReset();
     getNotificationSettings.mockResolvedValue({ timezone: "Europe/Moscow" });
+    readOverview.mockReset();
+    readOverview.mockResolvedValue({ enabled: true, hour: null });
+    writeOverview.mockReset();
   });
 
   it("publishes a required action enum in an object schema", () => {
@@ -55,7 +65,7 @@ describe("notification_settings model input", () => {
 
     expect(schema.type).toBe("object");
     expect(schema.required).toContain("action");
-    expect(schema.properties.action?.enum).toEqual(["get", "set", "coach", "weekly_review", "group_overview"]);
+    expect(schema.properties.action?.enum).toEqual(["get", "set", "coach", "weekly_review", "group_overview", "daily_overview"]);
   });
 
   it("turns the coach on or off without a button and only with an explicit value", async () => {
@@ -107,6 +117,8 @@ describe("notification_settings model input", () => {
 
     expect(approvalFor(input)).toBe("not-applicable");
     await expect(notificationSettings.execute(input, context)).resolves.toEqual({
+      dailyOverviewEnabled: true,
+      dailyOverviewHour: 8,
       timezone: "Europe/Moscow",
     });
     expect(getNotificationSettings).toHaveBeenCalledTimes(1);
@@ -133,7 +145,33 @@ describe("notification_settings model input", () => {
       "Не угадывай",
       '"action":"weekly_review"',
       "weeklyReviewEnabled",
+      "dailyOverviewEnabled",
+      "dailyOverviewHour",
     ]) expect(description).toContain(fragment);
+  });
+  it("switches the person's own morning overview and its hour without a button", async () => {
+    readOverview.mockResolvedValue({ enabled: true, hour: 9 });
+    const input = { action: "daily_overview", dailyOverviewEnabled: true, dailyOverviewHour: 9 };
+
+    expect(approvalFor(input)).toBe("not-applicable");
+    await expect(notificationSettings.execute(input as never, context))
+      .resolves.toEqual({ dailyOverviewEnabled: true, dailyOverviewHour: 9 });
+    expect(writeOverview).toHaveBeenCalledWith({ familyId: "family-1", setting: { enabled: true, hour: 9 }, userId: "user-1" });
+
+    writeOverview.mockClear();
+    readOverview.mockResolvedValue({ enabled: false, hour: 9 });
+    await expect(notificationSettings.execute({ action: "daily_overview", dailyOverviewEnabled: false } as never, context))
+      .resolves.toEqual({ dailyOverviewEnabled: false, dailyOverviewHour: 9 });
+    // Без часа прежний час сохраняется: репозиторий пишет null как «не менять».
+    expect(writeOverview).toHaveBeenCalledWith({ familyId: "family-1", setting: { enabled: false, hour: null }, userId: "user-1" });
+
+    for (const hour of [4, 13, 8.5, "9"]) {
+      expect(() => approvalFor({ action: "daily_overview", dailyOverviewEnabled: true, dailyOverviewHour: hour }))
+        .toThrowError(/AGENT_NOTIFICATION_SETTINGS_INPUT_INVALID.*dailyOverviewHour/u);
+    }
+    expect(() => approvalFor({ action: "daily_overview" })).toThrowError(/AGENT_NOTIFICATION_SETTINGS_INPUT_INVALID.*dailyOverviewEnabled/u);
+    expect(() => approvalFor({ action: "daily_overview", dailyOverviewEnabled: true, timezone: "UTC" }))
+      .toThrowError(/AGENT_NOTIFICATION_SETTINGS_INPUT_INVALID/u);
   });
   it("lets only the owner switch the family group's morning overview, without a button", async () => {
     setGroupOverview.mockResolvedValue(1);

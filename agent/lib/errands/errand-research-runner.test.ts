@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createConfiguredLanguageModel } from "../model-transport.js";
 import { runErrandResearch } from "./errand-research-runner.js";
 
+const FAMILY="0f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a";
 const selection={text:"Парк у реки",sources:[{url:"https://example.org/park",checkedAt:"2026-09-13T12:00:00Z"}]};
 function response(search=true){return Response.json({
   id:"msg_research",type:"message",role:"assistant",model:"deepseek-v4-flash",stop_reason:"end_turn",stop_sequence:null,
@@ -24,34 +25,44 @@ describe("isolated research provider request",()=>{
       expect(body.thinking).toEqual({type:"disabled"});
       expect(body.messages).toEqual(expect.arrayContaining([expect.objectContaining({role:"user",content:expect.arrayContaining([expect.objectContaining({text:"Парки на выходные"})])})]));
       expect(JSON.stringify(body)).not.toContain("Личная причина");
+      // The family that pays rides to the usage recorder only, never to the provider.
+      expect(JSON.stringify(body)).not.toContain(FAMILY);
+      expect(new Headers(init?.headers).has("x-osinara-usage-family")).toBe(false);
       return response();
     });
-    expect(await runErrandResearch(model(fetch),"Парки на выходные")).toMatchObject({text:selection.text,sources:[{url:selection.sources[0]!.url}]});
+    const billed:unknown[]=[];
+    const paid=createConfiguredLanguageModel({
+      apiKey:"unused-test",modelId:"deepseek-v4-flash",maxOutputTokens:4096,fetch,onUsage:usage=>billed.push(usage),
+      transport:{protocol:"anthropic-messages",baseUrl:"https://api.deepseek.com/anthropic/v1",authentication:"api-key",reasoning:{type:"none"}},
+    });
+    expect(await runErrandResearch(paid,"Парки на выходные",FAMILY)).toMatchObject({text:selection.text,sources:[{url:selection.sources[0]!.url}]});
     expect(fetch).toHaveBeenCalledTimes(1);
+    await new Promise(resolve=>setTimeout(resolve,10));
+    expect(billed).toEqual([expect.objectContaining({familyId:FAMILY})]);
   });
   it("preserves authored paragraphs and Markdown without requiring generated JSON",async()=>{
     const authored="**Подборка**\n\nПервый парк.\n\n- Второй парк\n- Третий парк";
     const fetch=async()=>{const body=await response().json();body.content[2].text=authored;return Response.json(body);};
-    expect((await runErrandResearch(model(fetch),"Парки")).text).toBe(authored);
+    expect((await runErrandResearch(model(fetch),"Парки",FAMILY)).text).toBe(authored);
   });
   it("preserves a detailed searched result beyond the chat-sized limit without another paid call",async()=>{
     const longText="Подробная проверенная подборка. ".repeat(180);
     const fetch=vi.fn(async()=>{const body=await response().json();body.content[2].text=longText;return Response.json(body);});
-    expect((await runErrandResearch(model(fetch),"Парки")).text).toBe(longText.trim());
+    expect((await runErrandResearch(model(fetch),"Парки",FAMILY)).text).toBe(longText.trim());
     expect(fetch).toHaveBeenCalledTimes(1);
   });
   it("rejects a token-limited partial selection even when it has text and sources",async()=>{
     const fetch=vi.fn(async()=>{const body=await response().json();body.stop_reason="max_tokens";return Response.json(body);});
-    await expect(runErrandResearch(model(fetch),"Парки")).rejects.toThrow("AGENT_MODEL_OUTPUT_TRUNCATED");
+    await expect(runErrandResearch(model(fetch),"Парки",FAMILY)).rejects.toThrow("AGENT_MODEL_OUTPUT_TRUNCATED");
     expect(fetch).toHaveBeenCalledTimes(1);
   });
   it("does not retry a 5xx",async()=>{
     const fetch=vi.fn(async()=>Response.json({error:{message:"unavailable"}},{status:503}));
-    await expect(runErrandResearch(model(fetch),"Парки")).rejects.toThrow();
+    await expect(runErrandResearch(model(fetch),"Парки",FAMILY)).rejects.toThrow();
     expect(fetch).toHaveBeenCalledTimes(1);
   });
   it("rejects a plausible answer without actual provider search",async()=>{
-    await expect(runErrandResearch(model(async()=>response(false)),"Парки")).rejects.toThrow("AGENT_ERRAND_SEARCH_NOT_EXECUTED");
+    await expect(runErrandResearch(model(async()=>response(false)),"Парки",FAMILY)).rejects.toThrow("AGENT_ERRAND_SEARCH_NOT_EXECUTED");
   });
   it("takes source URLs from the provider rather than the authored text",async()=>{
     const fetch=async()=>{
@@ -59,6 +70,6 @@ describe("isolated research provider request",()=>{
       body.content[1].content[0].url="https://example.org/another";
       return Response.json(body);
     };
-    expect((await runErrandResearch(model(fetch),"Парки")).sources.map(s=>s.url)).toEqual(["https://example.org/another"]);
+    expect((await runErrandResearch(model(fetch),"Парки",FAMILY)).sources.map(s=>s.url)).toEqual(["https://example.org/another"]);
   });
 });

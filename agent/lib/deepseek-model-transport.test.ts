@@ -55,6 +55,52 @@ function deepSeekModel(fetch: typeof globalThis.fetch) {
 }
 
 describe("DeepSeek model transport", () => {
+  // A group without a family pays from its monthly budget (migration 177): the transport bills its
+  // chat and never shows the provider the service header or option that carried it.
+  it("bills the call to the chat named by the resolver and sends the provider nothing of it", async () => {
+    let headers: Headers | undefined;
+    let body: Record<string, unknown> | undefined;
+    const billed: unknown[] = [];
+    const model = createConfiguredLanguageModel({
+      apiKey: "deepseek-secret",
+      fetch: async (_input, init) => {
+        headers = new Headers(init?.headers);
+        body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return completion({ content: "Ответ.", role: "assistant" }, "stop");
+      },
+      maxOutputTokens: 1_000,
+      modelId: "deepseek-v4-flash",
+      onUsage: (usage) => billed.push(usage),
+      transport: {
+        baseUrl: "https://api.deepseek.com",
+        protocol: "openai-chat-completions",
+        providerName: "deepseek",
+        reasoning: { effort: "high", format: "deepseek", type: "effort" },
+      },
+    });
+
+    await model.doGenerate({
+      prompt: [{ content: [{ text: "Проверка", type: "text" }], role: "user" }],
+      providerOptions: { osinara: { usageChatId: "-1001234567890" } },
+    } as LanguageModelV4CallOptions);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(headers?.has("x-osinara-usage-chat")).toBe(false);
+    expect(JSON.stringify(body)).not.toContain("usageChatId");
+    expect(billed).toEqual([expect.objectContaining({ familylessChatId: "-1001234567890", outputTokens: 10 })]);
+
+    // A family turn's call is billed to the family the same way (migration 181).
+    await model.doGenerate({
+      prompt: [{ content: [{ text: "Проверка", type: "text" }], role: "user" }],
+      providerOptions: { osinara: { usageFamilyId: "0f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a" } },
+    } as LanguageModelV4CallOptions);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(headers?.has("x-osinara-usage-family")).toBe(false);
+    expect(JSON.stringify(body)).not.toContain("0f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a");
+    expect(billed.at(-1)).toEqual(expect.objectContaining({ familyId: "0f8e7d6c-5b4a-4392-8170-6f5e4d3c2b1a" }));
+    expect(billed.at(-1)).not.toHaveProperty("familylessChatId");
+  });
+
   it("sends explicit thinking controls and keeps reasoning out of visible text", async () => {
     let body: Record<string, unknown> | undefined;
     const model = deepSeekModel(async (_input, init) => {

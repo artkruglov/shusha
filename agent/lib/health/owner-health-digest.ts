@@ -18,7 +18,11 @@ import { DEEPSEEK_BALANCE_ALERT_USD } from "../../config.js";
 import { isWithinQuietHours } from "../initiative/quiet-hours.js";
 import { readConfiguredDeepSeekBalance } from "./deepseek-balance.js";
 import { type DeepSeekBalance, formatDeepSeekBalance, formatModelSpend } from "./model-spend.js";
+import { formatFamilylessGroups, readFamilylessGroupsHealth } from "./familyless-groups-health.js";
+import { formatOtherFamilies, readOtherFamiliesHealth } from "./other-families-health.js";
+import { formatBackupHealth } from "./backup-health.js";
 import { formatStorageHeadroom } from "./storage-headroom.js";
+import { familyBudgetRepository, formatFamilySpend } from "../family-budget-repository.js";
 import {
   MemoryReviewOwnerAlertTransportError,
   memoryReviewOwnerAlertTransport,
@@ -79,6 +83,9 @@ export function formatOwnerHealthDigest(report: OwnerHealthReport, balance: Deep
   // Место на диске это не сбой за сутки, а условие, при котором откат вообще возможен.
   const storage = formatStorageHeadroom(report.storage);
   if (storage !== null) lines.push(storage);
+  // Копия, которая не ушла, это сбой дня; ушедшая во все хранилища это одна строка справки.
+  const backup = formatBackupHealth(report.backups, new Date(report.windowStart.getTime() + OWNER_HEALTH_DIGEST_WINDOW_MILLISECONDS));
+  if (backup?.warning) lines.push(backup.text);
   const written = report.memoryWritten.reduce((sum, entry) => sum + entry.count, 0);
   const breakdown = report.memoryWritten.map((entry) => `${entry.scope} ${entry.kind} ${entry.count}`).join(", ");
   const memory = written === 0 ? "Память: новых записей нет." : `Память: +${written} (${breakdown}).`;
@@ -94,6 +101,7 @@ export function formatOwnerHealthDigest(report: OwnerHealthReport, balance: Deep
   // Расход и здоровый баланс это справка: они не превращают тихий день в день со сбоями.
   const spend = formatModelSpend(report.modelSpend);
   const information = [
+    ...(backup !== null && !backup.warning ? [backup.text] : []),
     ...(spend === null ? [] : [spend]),
     ...(balanceLine !== null && !balanceLine.warning ? [balanceLine.text] : []),
   ];
@@ -108,6 +116,8 @@ interface OwnerHealthDigestDependencies {
   claim(familyId: string, digestDate: string, now: Date): Promise<boolean>;
   complete(familyId: string, digestDate: string, now: Date, textLength: number): Promise<void>;
   deliver(input: { chatId: string; text: string }): Promise<void>;
+  /** Блок о других семьях установки для оператора; без зависимости блока нет. */
+  otherFamilies?(operatorFamilyId: string, windowStart: Date): Promise<string | null>;
   recipients(): Promise<OwnerHealthRecipient[]>;
   release(familyId: string, digestDate: string): Promise<void>;
   report(familyId: string, windowStart: Date, now: Date): Promise<OwnerHealthReport>;
@@ -131,13 +141,11 @@ export function createOwnerHealthDigestDispatcher(dependencies: OwnerHealthDiges
       if (isWithinQuietHours(recipient, now)) continue;
       if (!await dependencies.claim(recipient.familyId, digestDate, now)) continue;
       try {
-        const report = await dependencies.report(
-          recipient.familyId,
-          new Date(now.getTime() - OWNER_HEALTH_DIGEST_WINDOW_MILLISECONDS),
-          now,
-        );
+        const windowStart = new Date(now.getTime() - OWNER_HEALTH_DIGEST_WINDOW_MILLISECONDS);
+        const report = await dependencies.report(recipient.familyId, windowStart, now);
         balance ??= dependencies.balance();
-        const text = formatOwnerHealthDigest(report, await balance);
+        const others = dependencies.otherFamilies ? await dependencies.otherFamilies(recipient.familyId, windowStart) : null;
+        const text = [formatOwnerHealthDigest(report, await balance), ...(others === null ? [] : [others])].join("\n");
         await dependencies.deliver({ chatId: recipient.ownerTelegramUserId, text });
         await dependencies.complete(recipient.familyId, digestDate, now, text.length);
         console.info(JSON.stringify({
@@ -173,6 +181,16 @@ export function dispatchOwnerHealthDigests(now = new Date()): Promise<number> {
     claim: (familyId, digestDate, at) => ownerHealthDigestRepository.claim(familyId, digestDate, at),
     complete: (familyId, digestDate, at, length) => ownerHealthDigestRepository.complete(familyId, digestDate, at, length),
     deliver: (input) => memoryReviewOwnerAlertTransport.deliver(input),
+    otherFamilies: async (operatorFamilyId, windowStart) => {
+      const [families, groups, spend] = await Promise.all([
+        readOtherFamiliesHealth(operatorFamilyId, windowStart),
+        readFamilylessGroupsHealth(now),
+        familyBudgetRepository.monthSpend(now),
+      ]);
+      const blocks = [formatOtherFamilies(families), formatFamilySpend(spend), formatFamilylessGroups(groups)]
+        .filter((block): block is string => block !== null);
+      return blocks.length === 0 ? null : blocks.join("\n");
+    },
     recipients: () => ownerHealthDigestRepository.recipients(),
     release: (familyId, digestDate) => ownerHealthDigestRepository.release(familyId, digestDate),
     report: (familyId, windowStart, at) => ownerHealthDigestRepository.report(familyId, windowStart, at),

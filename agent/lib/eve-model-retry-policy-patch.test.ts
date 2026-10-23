@@ -60,7 +60,9 @@ describe("Eve model retry policy patch", () => {
     expect(runtime).toContain("reissuing the model call once");
     expect(patchSource).not.toContain("async function attemptEmptyResponseRecovery(e){return{outcome:`skipped`}}");
     expect(runtime).not.toContain("disabling unsupported provider tool(s); retrying step once");
-    expect(compaction).toContain("EVE_COMPACTION_OUTPUT_TOO_LARGE");
+    // An oversized summary is kept and logged, not a turn failure (ilkruglov f074a2c).
+    expect(compaction).toContain("AGENT_COMPACTION_OUTPUT_OVER_LIMIT");
+    expect(compaction).not.toContain("EVE_COMPACTION_OUTPUT_TOO_LARGE");
   });
 
   it("keeps every patched model runtime syntactically valid", async () => {

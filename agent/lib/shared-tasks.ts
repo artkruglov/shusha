@@ -46,7 +46,11 @@ const sharedTaskFields = z.object({
   view: z.enum(["mine","promised","waiting","open","today","transfers","ideas","rituals","planned","inbox","done",
     ...LIFE_AREAS]).optional(),
   careAreaRef: z.uuid().optional(),
+  /** Проект по id из `<task_projects>`: так дело из лички входит в семейный проект, имя этого не делает. */
+  projectRef: z.uuid().optional(),
   cursor: z.string().max(300).optional(),
+  /** Человек просит показать дела: доску соберёт код и приложит к ответу канал (`telegram-turn-board.ts`). */
+  show: z.literal(true).optional(),
   id: z.uuid().optional(),
   status: z.enum(["open", "proposed", "accepted", "completed", "declined", "cancelled"]).optional(),
 });
@@ -55,16 +59,16 @@ type SharedTaskFields = z.infer<typeof sharedTaskFields> & { items?: unknown[] }
 function checkSharedTaskFields(v: SharedTaskFields, ctx: z.RefinementCtx) {
   const fields: Record<string,string[]> = {
     batch:["items"],
-    create:["title","assigneeRef","unassigned","dueAt","dueOn","kind","listName","lifeArea","details","repeat","careAreaRef"],
+    create:["title","assigneeRef","unassigned","dueAt","dueOn","kind","listName","lifeArea","details","repeat","careAreaRef","projectRef"],
     update:["id","version","title","dueAt","dueOn","listName","lifeArea","details"],
     clarify:["id","version","title","dueAt","dueOn","listName","lifeArea","details"],
-    list:["status","view","listName","lifeArea","from","until","cursor","careAreaRef"], lists:[], get:["id"],
+    list:["status","view","listName","lifeArea","from","until","cursor","careAreaRef","show"], lists:[], get:["id"],
     plan:["id","plannedFrom","plannedUntil"], unplan:["id"], activate:["id","version"],
     record:["id","occurredOn","note"], history:["id"], participants:[],
     // version необязателен: модель передаёт прочитанную в list, и тогда устаревшее изменение отвергается.
     accept:["id","version"],decline:["id","version"],complete:["id","version"],cancel:["id","version"],claim:["id","version"],
     reopen:["id","version"],
-    transfer:["id","version","assigneeRef"], accept_transfer:["id"], decline_transfer:["id"],
+    transfer:["id","version","assigneeRef"], accept_transfer:["id","version"], decline_transfer:["id","version"],
     release:["id","version"],
   };
   const fail = (message:string) => ctx.addIssue({code:"custom",message});
@@ -139,6 +143,8 @@ export function nextSharedTaskStatus(
   // Исполнителем становится закрывший (`applyTaskStatus`), а человек узнаёт об этом из ответа.
   if (status === "open" && action === "complete") return "completed";
   if (["proposed", "accepted"].includes(status) && (isCreator || isAssignee) && action === "cancel") return "cancelled";
+  // Ничьё дело снимает его автор: исполнителя нет, а запись его.
+  if (status === "open" && isCreator && action === "cancel") return "cancelled";
   // Причина названа словами: общий отказ модель пересказывала как «у меня нет прав».
   if (action === "complete" && status === "proposed") {
     throw new AppError("AGENT_TASK_TRANSITION_DENIED", isAssignee

@@ -7,6 +7,7 @@ import type { MemoryAuthorization, MemoryScope } from "./memory-context.js";
 import { CLOSED_TASK_STATUSES, UNFINISHED_TASK_STATUSES, type SharedTaskInput, type SharedTaskStatus } from "./shared-tasks.js";
 import { isCurrentTelegramMember } from "./telegram-current-membership.js";
 import { decodeDateUuidCursor, encodeDateUuidCursor, paginationFilterDigest } from "./keyset-pagination.js";
+import { readFamilySpaceMode } from "./spaces/family-space-mode.js";
 export interface TaskRow {
   id: string; family_id: string; space_id: string | null; group_id: string | null; scope: MemoryScope;
   creator_telegram_id: string; assignee_telegram_id: string | null; title: string;
@@ -21,7 +22,7 @@ export interface TaskRow {
   life_area: LifeArea | null;
   details: string|null; version: number; planned_from: string|null; planned_until: string|null;
   original_text?: { title: string; details: string | null };
-  reminder_created:boolean; created_at: Date; telegram_chat_id: string|null; status: SharedTaskStatus; source: string; assignee: string|null;
+  reminder_created:boolean; created_at: Date; updated_at?: Date; telegram_chat_id: string|null; status: SharedTaskStatus; source: string; assignee: string|null;
 }
 
 /** Текущая календарная дата в поясе человека, без переноса часов через полночь UTC. */
@@ -58,7 +59,7 @@ export async function authorize(client: PoolClient, auth: MemoryAuthorization): 
   return auth.groupId ? "family" : "personal";
 }
 
-function visible(scope: MemoryScope, view?: string): string {
+function visible(scope: MemoryScope, view?: string, byId = false, recipient = false): string {
   // Незанятое дело, заведённое мной, это тоже ожидание: его ещё никто не взял.
   const waiting = "t.creator_telegram_id=$2 AND t.assignee_telegram_id IS DISTINCT FROM $2";
   // «Что я обещал» это дело, которое поручил мне другой человек, а не моя собственная запись.
@@ -68,9 +69,19 @@ function visible(scope: MemoryScope, view?: string): string {
     if (view === "waiting") return waiting;
     if (view === "promised") return promised;
     if (view === "transfers") return "t.pending_assignee_telegram_id=$2";
+    // «Что свободно?» из лички: ничьи дела семьи (статус `open` у дела без исполнителя, `shared-task-create.ts`),
+    // а не свои принятые, как давал общий случай ниже. Только список: взять такое дело по id можно там, где задан
+    // вопрос «кто возьмёт», то есть в семейной группе.
+    if (view === "open") return "t.scope='family' AND t.status='open' AND t.assignee_telegram_id IS NULL";
     // Семейная традиция общая: её видят оба, иначе второй человек не знал бы о том, что семья
     // решила поддерживать. Чужая личная идея остаётся личной.
-    return "(t.assignee_telegram_id=$2 OR (t.kind<>'task' AND (pplan.telegram_user_id=$2 OR t.scope='family')))";
+    const mine = "(t.assignee_telegram_id=$2 OR (t.kind<>'task' AND (pplan.telegram_user_id=$2 OR t.scope='family')))";
+    // Дело из «жду ответа» читается и по id: иначе ничьё семейное дело, заведённое мной, было видно в
+    // списке, но не закрывалось и не отменялось из той же лички (замечание Codex, 16 октября 2026).
+    // Дело внешней группы остаётся в ней: его меняют только там. Получатель передачи (`recipient`) читает дело по id и
+    // отвечает на передачу, как видит его в «transfers», но до принятия не меняет его ничем другим.
+    const offered = recipient ? ` OR (t.pending_assignee_telegram_id=$2 AND t.scope<>'group')` : "";
+    return byId ? `(${mine} OR (${waiting} AND t.scope<>'group')${offered})` : mine;
   }
   const area = scope === "family" ? "t.scope='family'" : "t.scope='group' AND t.group_id=$3";
   if (view === "waiting") return `${area} AND ${waiting}`;
@@ -93,6 +104,8 @@ export interface ProjectListing {
   readonly details: string | null;
   readonly lifeArea: LifeArea | null;
   readonly source: string;
+  /** Область проекта: общий и личный проект с одним именем остаются двумя. */
+  readonly scope: MemoryScope;
   readonly status: "accepted" | "completed" | "cancelled";
   readonly version: number;
   readonly itemCount: number;
@@ -104,8 +117,8 @@ export async function readProjects(
   client: PoolClient, auth: MemoryAuthorization, scope: MemoryScope,
   options: { id?: string; includeClosed?: boolean } = {},
 ): Promise<ProjectListing[]> {
-  const result = await client.query<{ id: string; group_id: string | null; list_name: string; details: string | null; life_area: LifeArea | null; status: ProjectListing["status"]; version: number; source: string; item_count: number; unfinished_item_count: number; completed_item_count: number }>(
-    `SELECT t.id, t.title AS list_name, t.details, t.life_area, t.group_id, t.status, t.version,
+  const result = await client.query<{ id: string; group_id: string | null; list_name: string; scope: MemoryScope; details: string | null; life_area: LifeArea | null; status: ProjectListing["status"]; version: number; source: string; item_count: number; unfinished_item_count: number; completed_item_count: number }>(
+    `SELECT t.id, t.title AS list_name, t.scope, t.details, t.life_area, t.group_id, t.status, t.version,
         (SELECT count(*) FROM shared_tasks c WHERE c.project_id=t.id)::integer AS item_count,
         (SELECT count(*) FROM shared_tasks c WHERE c.project_id=t.id AND c.status IN ('open','proposed','accepted'))::integer AS unfinished_item_count,
         (SELECT count(*) FROM shared_tasks c WHERE c.project_id=t.id AND c.status='completed')::integer AS completed_item_count,
@@ -125,7 +138,7 @@ export async function readProjects(
   // действует здесь так же: без этой проверки вышедший из группы продолжал бы их видеть.
   const { rows } = await keepLiveGroupRows(client, auth, result.rows);
   return rows.map((row) => ({ projectId: row.id, listName: row.list_name, details: row.details, lifeArea: row.life_area,
-    source: row.source, status: row.status, version: row.version, itemCount: row.item_count,
+    source: row.source, scope: row.scope, status: row.status, version: row.version, itemCount: row.item_count,
     unfinishedItemCount: row.unfinished_item_count, completedItemCount: row.completed_item_count }));
 }
 
@@ -164,11 +177,11 @@ function listedStatuses(id: string | readonly string[] | null, input: SharedTask
 }
 
 export async function readTasks(client: PoolClient, auth: MemoryAuthorization, scope: MemoryScope,
-  id: string | readonly string[] | null = null, input: SharedTaskInput = {action:"list"}, timezone = "UTC") {
+  id: string | readonly string[] | null = null, input: SharedTaskInput = {action:"list"}, timezone = "UTC", recipient = false) {
   // Even filtering shared records by a private plan would reveal that plan in the group.
   if (auth.groupId && (input.view === "planned" || input.from || input.until)) denied();
   const binding=paginationFilterDigest([auth.familyId,auth.telegramUserId,auth.groupId,auth.space?.spaceId ?? null,auth.space ? String(auth.space.policyVersion) : null,scope,input.view ?? null,input.status ?? null,input.listName ?? null,input.from ?? null,input.until ?? null,input.careAreaRef ?? null,input.lifeArea ?? null]);
-  const cursor = input.cursor ? decodeDateUuidCursor(input.cursor,"AGENT_TASK_CURSOR_INVALID","Не удалось продолжить список",binding) : null;
+  const cursor = input.cursor ? decodeDateUuidCursor(input.cursor,"AGENT_TASK_CURSOR_INVALID","Курсор подходит только к тем же фильтрам (status, listName, view, from, until, lifeArea), с которыми он выдан. Повтори вызов с теми же фильтрами и этим cursor либо начни список заново без cursor",binding) : null;
   const result = await client.query<TaskRow>(
     `SELECT t.*, t.recurrence_anchor_on::text AS recurrence_anchor_on,
       COALESCE((SELECT jsonb_build_object('title',v.previous_record->'title','details',v.previous_record->'details')
@@ -194,7 +207,7 @@ export async function readTasks(client: PoolClient, auth: MemoryAuthorization, s
      LEFT JOIN users u ON u.telegram_user_id=t.assignee_telegram_id
      LEFT JOIN shared_task_participants p ON p.family_id=t.family_id
        AND p.group_id IS NOT DISTINCT FROM t.group_id AND p.telegram_user_id=t.assignee_telegram_id
-     WHERE t.family_id=$1 AND t.kind <> 'project' AND (${visible(scope, input.view)}) AND ($4::uuid[] IS NULL OR t.id=ANY($4::uuid[]))
+     WHERE t.family_id=$1 AND t.kind <> 'project' AND (${visible(scope, input.view, id !== null, recipient)}) AND ($4::uuid[] IS NULL OR t.id=ANY($4::uuid[]))
        AND ($5::text[] IS NULL OR t.status=ANY($5::text[]))
        AND ($3::uuid IS NULL OR TRUE) AND ($2::text IS NOT NULL)
        AND ($6::text IS NULL OR task_project_key(proj.title)=task_project_key($6))
@@ -208,6 +221,8 @@ export async function readTasks(client: PoolClient, auth: MemoryAuthorization, s
        AND ${spaceReadClause({alias:"t",parameters:{family:"$1",group:"$3",spaceId:"$17",version:"$18",user:"$19"}})}
        AND ($16::boolean=false OR (t.kind IN ('idea','task') AND t.status IN ('open','accepted')
          AND t.due_at IS NULL AND t.due_on IS NULL AND ($3::uuid IS NOT NULL OR pplan.task_id IS NULL)
+         -- Как раздел «Разобрать» доски: дело в проекте, списке или сфере уже разобрано.
+         AND t.project_id IS NULL AND t.list_name IS NULL AND t.life_area IS NULL
          AND NOT EXISTS(SELECT 1 FROM shared_task_versions v WHERE v.task_id=t.id AND v.action IN ('clarify','activate'))))
      ORDER BY ${input.view === "today" ? TODAY_ORDER : "date_trunc('milliseconds',t.created_at) DESC, t.id DESC"}
      LIMIT 101`,
@@ -220,8 +235,8 @@ export async function readTasks(client: PoolClient, auth: MemoryAuthorization, s
       input.lifeArea ?? (LIFE_AREAS.includes(input.view as LifeArea) ? input.view as LifeArea : null)],
   );
   const page = result.rows.slice(0,100);
-  const { rows, incomplete } = await keepLiveGroupRows(client, auth, page);
-  return {rows, incomplete, nextCursor:result.rows.length>100 ? encodeDateUuidCursor(result.rows[99]!.created_at,result.rows[99]!.id,binding):null};
+  const { rows, hidden } = await keepLiveGroupRows(client, auth, page);
+  return {rows, hidden, nextCursor:result.rows.length>100 ? encodeDateUuidCursor(result.rows[99]!.created_at,result.rows[99]!.id,binding):null};
 }
 
 /**
@@ -231,7 +246,7 @@ export async function readTasks(client: PoolClient, auth: MemoryAuthorization, s
  */
 export async function keepLiveGroupRows<Row extends { group_id: string | null }>(
   client: PoolClient, auth: MemoryAuthorization, page: readonly Row[],
-): Promise<{ rows: Row[]; incomplete: boolean }> {
+): Promise<{ rows: Row[]; hidden: number }> {
   // Права на группу проверяются по одному разу на группу и не больше чем для десяти групп страницы.
   const groupIds = [...new Set(page.flatMap((row) => row.group_id ? [row.group_id] : []))];
   const checked = groupIds.slice(0,10);
@@ -249,13 +264,15 @@ export async function keepLiveGroupRows<Row extends { group_id: string | null }>
     const chatId = registrations.get(groupId) ?? null;
     return [groupId, chatId !== null && await isCurrentTelegramMember(chatId,auth.telegramUserId!)];
   })));
+  // Строки групп сверх десяти и групп, где человека уже нет, скрыты; их число модель называет человеку,
+  // иначе пропавшие дела выглядели бы закрытыми (task-capture-repair-plan, этап 5).
   const rows: Row[]=[];
-  let incomplete = groupIds.length > checked.length;
+  let hidden = 0;
   for (const row of page) {
-    if (row.group_id && !grants.get(row.group_id)) { incomplete=true; continue; }
+    if (row.group_id && !grants.get(row.group_id)) { hidden += 1; continue; }
     rows.push(row);
   }
-  return { rows, incomplete };
+  return { rows, hidden };
 }
 
 export function present(row: TaskRow, personalPlan=true) {
@@ -283,10 +300,17 @@ export function presentSummary(row: TaskRow, personalPlan=true) {
     dueOn: full.dueOn, source: full.source, assignee: full.assignee, curator: full.curator,
     listName: full.listName, lifeArea: full.lifeArea, projectId: full.projectId, version: full.version, repeat: full.repeat,
     pendingAssignee: full.pendingAssignee, reminderCreated: full.reminderCreated,
-    plannedFrom: full.plannedFrom, plannedUntil: full.plannedUntil };
+    plannedFrom: full.plannedFrom, plannedUntil: full.plannedUntil,
+    // День последнего изменения: доска и сводка узнают по нему дело, которое давно не двигалось.
+    updatedOn: row.updated_at instanceof Date ? row.updated_at.toISOString().slice(0, 10) : null };
 }
 
-export async function participants(client: PoolClient, auth: MemoryAuthorization, scope: MemoryScope) {
+export async function participants(client: PoolClient, auth: MemoryAuthorization, requested: MemoryScope) {
+  // A private chat of a legacy family may ask another adult (the task then becomes shared,
+  // `shared-task-visibility.ts`), so it lists the family; with spaces the shared area is chosen in the chat.
+  const privateFamily = requested === "personal" && await readFamilySpaceMode(client, auth.familyId) === "legacy";
+  const scope: MemoryScope = privateFamily ? "family" : requested;
+  if (privateFamily) auth = { ...auth, space: undefined };
   if (scope === "group") {
     // Only real humans observed through the verified journal of this exact group are candidates.
     await client.query(

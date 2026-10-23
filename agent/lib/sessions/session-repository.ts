@@ -40,7 +40,8 @@ export interface PrepareSessionInput {
   /** Verified application selection; never populated from model arguments. */
   spaceContext?: SpaceContext;
   baseContinuationToken: string;
-  familyId: string;
+  /** `null` only in a group without a family (migration 175); its audit then names the group. */
+  familyId: string | null;
   groupId: string | null;
   kind: Exclude<ConversationSessionKind, "proactive">;
   now: Date;
@@ -72,7 +73,7 @@ interface SessionRow {
   completed_turns: number;
   continuation_token: string;
   eve_session_id: string | null;
-  family_id: string;
+  family_id: string | null;
   generation: number;
   group_id: string | null;
   id: string;
@@ -86,6 +87,11 @@ interface SessionRow {
   task_state: "completed" | "failed" | "pending" | "running" | null;
   telegram_forum_topic_id: string | null;
   thread_id: string;
+}
+
+/** An audit event names its group only when the session has no family (audit_events_family_or_group). */
+function auditGroupId(row: Pick<SessionRow, "family_id" | "group_id">): string | null {
+  return row.family_id === null ? row.group_id : null;
 }
 
 function assertSameScope(row: SessionRow, input: PrepareSessionInput): void {
@@ -273,9 +279,9 @@ async function rotateSession(
     [current.id, replacement.id],
   );
   await client.query(
-    `INSERT INTO audit_events (family_id, event_type, subject_id, metadata)
-     VALUES ($1, 'session.rotated', $2, jsonb_build_object('generation', $3::integer))`,
-    [current.family_id, current.id, generation],
+    `INSERT INTO audit_events (family_id, group_id, event_type, subject_id, metadata)
+     VALUES ($1, $4, 'session.rotated', $2, jsonb_build_object('generation', $3::integer))`,
+    [current.family_id, current.id, generation, auditGroupId(current)],
   );
   return replacement;
 }
@@ -323,10 +329,10 @@ export const sessionRepository = {
         current = await createInitialSession(client, input, generation, replacement?.threadId, space);
         if (replacement) {
           await client.query(
-            `INSERT INTO audit_events (family_id, event_type, subject_id, metadata)
-             VALUES ($1, 'session.canonical_replaced', $2,
+            `INSERT INTO audit_events (family_id, group_id, event_type, subject_id, metadata)
+             VALUES ($1, $4, 'session.canonical_replaced', $2,
                      jsonb_build_object('generation', $3::integer))`,
-            [current.family_id, current.id, current.generation],
+            [current.family_id, current.id, current.generation, auditGroupId(current)],
           );
         }
         // A non-zero ledger entry exists only after the previous Telegram trust zone was retired.
@@ -431,8 +437,8 @@ export const sessionRepository = {
           input.applicationSessionId,
         ]);
         await client.query(
-          `INSERT INTO audit_events (family_id, event_type, subject_id, metadata)
-           SELECT family_id, 'session.promoted_to_task', id,
+          `INSERT INTO audit_events (family_id, group_id, event_type, subject_id, metadata)
+           SELECT family_id, CASE WHEN family_id IS NULL THEN group_id END, 'session.promoted_to_task', id,
                   jsonb_build_object('pendingRequestId', $2::text)
              FROM conversation_sessions WHERE id = $1`,
           [input.applicationSessionId, input.pendingRequestId],

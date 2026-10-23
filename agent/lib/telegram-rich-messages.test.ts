@@ -157,8 +157,10 @@ describe("Telegram rich drafts", () => {
       startTelegramRichThinkingDraft(telegramTarget(), "turn_1"),
     ).rejects.toThrow("AGENT_TELEGRAM_RICH_DRAFT_DELIVERY_FAILED");
 
+    // A 429 without retry_after is logged by the send pacer and never repeated.
     expect(telegramFetch).toHaveBeenCalledTimes(1);
-    expect(errorLog).toHaveBeenCalledOnce();
+    expect(errorLog).toHaveBeenCalledTimes(2);
+    expect(errorLog).toHaveBeenCalledWith(expect.stringContaining("AGENT_TELEGRAM_RATE_LIMITED"));
   });
 });
 

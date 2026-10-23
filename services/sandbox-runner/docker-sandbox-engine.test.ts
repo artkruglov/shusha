@@ -13,7 +13,7 @@
 import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Readable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 
 import type Docker from "dockerode";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -22,6 +22,14 @@ import {
   buildSandboxContainerOptions,
   createDockerSandboxEngine,
 } from "./docker-sandbox-engine.js";
+
+// Isolation is exercised by its own tests; here every run is ready and nothing is swept.
+const TEST_HARDENING = {
+  diskQuota: { refusal: async () => null },
+  maxRunning: 10,
+  prepareRun: async () => undefined,
+  sweepStrays: async () => 0,
+};
 import { buildGoogleWorkspaceContainerOptions } from "./docker-sandbox-options.js";
 import { sandboxRequestHash } from "./docker-sandbox-lifecycle.js";
 
@@ -57,6 +65,7 @@ describe("buildSandboxContainerOptions", () => {
     const getContainer = vi.fn(() => ({ inspect: async () => { throw { statusCode: 404 }; } }));
     const createContainer = vi.fn();
     const engine = createDockerSandboxEngine({
+      hardening: TEST_HARDENING,
       docker: { getContainer, createContainer } as unknown as Docker,
       roots: { toolsRoot: join(root, "tools"), workspaceRoot: join(root, "workspaces") },
       runtime,
@@ -105,23 +114,20 @@ describe("buildSandboxContainerOptions", () => {
       NetworkMode: runtime.egressNetwork,
       PidsLimit: 1024,
       Privileged: false,
-      ReadonlyRootfs: false,
+      ReadonlyRootfs: true,
       SecurityOpt: ["no-new-privileges:true"],
       Tmpfs: expect.objectContaining({
         "/opt/osinara": expect.stringContaining("noexec"),
       }),
     });
     expect(options.Labels).toMatchObject({
-      "dev.osinara.sandbox.policy-version": "13",
+      "dev.osinara.sandbox.policy-version": "16",
       "dev.osinara.sandbox.project": "osinara",
       "dev.osinara.sandbox.session-id": SANDBOX_SESSION_ID,
     });
     expect(options.Env).toEqual(expect.arrayContaining([
       "AGENT_BROWSER_IDLE_TIMEOUT_MS=600000",
       "AGENT_BROWSER_PROXY=http://sandbox-egress-proxy:3128",
-      "AGENT_BROWSER_RESTORE=osinara",
-      "AGENT_BROWSER_RESTORE_SAVE=auto",
-      "AGENT_BROWSER_SESSION=osinara",
       "LIGHTPANDA_DISABLE_TELEMETRY=true",
       "HOME=/tools/personal/home",
       "HTTPS_PROXY=http://sandbox-egress-proxy:3128",
@@ -129,6 +135,8 @@ describe("buildSandboxContainerOptions", () => {
       "NODE_USE_ENV_PROXY=1",
       "NPM_CONFIG_PREFIX=/tools/personal/npm",
     ]));
+    // The logged-in browser lives in the companion: Bash gets no session or restore of it.
+    expect(options.Env?.filter((entry) => /^AGENT_BROWSER_(SESSION|RESTORE)/u.test(entry))).toEqual([]);
     expect(options.Env).not.toEqual(expect.arrayContaining([
       expect.stringContaining("GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE"),
       expect.stringContaining("/tools/family"),
@@ -232,15 +240,30 @@ describe("buildSandboxContainerOptions", () => {
       remove: vi.fn(async () => undefined),
     };
     const replacement = {
-      putArchive: vi.fn(async () => undefined),
+      inspect: vi.fn(async () => ({ Id: "replacement", State: { Running: true } })),
+      exec: vi.fn(async (_options: { Cmd: string[] }) => ({
+        inspect: vi.fn(async () => ({ ExitCode: 0, Running: false })),
+        start: vi.fn(async () => new PassThrough()),
+      })),
       remove: vi.fn(async () => undefined),
       start: vi.fn(async () => undefined),
     };
     const docker = {
       createContainer: vi.fn(async () => replacement),
       getContainer: vi.fn(() => stale),
+      modem: {
+        demuxStream: vi.fn((stream: PassThrough, stdout: PassThrough, stderr: PassThrough) => {
+          stream.on("end", () => {
+            stdout.end();
+            stderr.end();
+          });
+          stream.resume();
+        }),
+      },
+      listContainers: vi.fn(async () => []),
     } as unknown as Docker;
     const engine = createDockerSandboxEngine({
+      hardening: TEST_HARDENING,
       docker,
       roots: {
         toolsRoot: `${root}/tools`,
@@ -260,7 +283,9 @@ describe("buildSandboxContainerOptions", () => {
     expect(stale.remove).toHaveBeenCalledWith({ force: true, v: true });
     expect(docker.createContainer).toHaveBeenCalledOnce();
     expect(replacement.start).toHaveBeenCalledOnce();
-    expect(replacement.putArchive).toHaveBeenCalledOnce();
+    // The seed travels as one archive on stdin of the system tar, not through the archive API.
+    expect(replacement.exec).toHaveBeenCalledOnce();
+    expect(replacement.exec.mock.calls[0]![0].Cmd).toContain("/usr/bin/tar");
   });
 
   it("restarts a matching warm container without requesting or writing seeds", async () => {
@@ -289,8 +314,10 @@ describe("buildSandboxContainerOptions", () => {
     const docker = {
       createContainer: vi.fn(),
       getContainer: vi.fn(() => existing),
+      listContainers: vi.fn(async () => []),
     } as unknown as Docker;
     const engine = createDockerSandboxEngine({
+      hardening: TEST_HARDENING,
       docker,
       roots: {
         toolsRoot: `${root}/tools`,
@@ -349,6 +376,7 @@ describe("buildSandboxContainerOptions", () => {
       ]),
     } as unknown as Docker;
     const engine = createDockerSandboxEngine({
+      hardening: TEST_HARDENING,
       docker,
       roots: {
         toolsRoot: "/tools",
@@ -376,8 +404,10 @@ describe("buildSandboxContainerOptions", () => {
     };
     const docker = {
       getContainer: vi.fn(() => container),
+      listContainers: vi.fn(async () => []),
     } as unknown as Docker;
     const engine = createDockerSandboxEngine({
+      hardening: TEST_HARDENING,
       docker,
       roots: {
         toolsRoot: "/tools",
@@ -423,6 +453,7 @@ describe("buildSandboxContainerOptions", () => {
       ]),
     } as unknown as Docker;
     const engine = createDockerSandboxEngine({
+      hardening: TEST_HARDENING,
       docker,
       roots: {
         toolsRoot: "/tools",
@@ -447,6 +478,7 @@ describe("buildSandboxContainerOptions", () => {
     };
     const docker = { getContainer: vi.fn(() => container) } as unknown as Docker;
     const engine = createDockerSandboxEngine({
+      hardening: TEST_HARDENING,
       docker,
       roots: {
         toolsRoot: "/tools",

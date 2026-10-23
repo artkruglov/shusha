@@ -10,11 +10,15 @@
  * - DNS is resolved at the proxy and the validated IP is pinned for the connection.
  * - Private/reserved destinations and ports other than HTTP(S) are rejected.
  * - Proxy credentials and hop-by-hop headers are never forwarded.
+ * - Every allowed connection is logged once as `AGENT_SANDBOX_EGRESS` (`egress-log.ts`).
+ * - A sandbox past its daily byte budget gets 429 for new connections, and the connection that
+ *   crosses it is closed, until the next UTC day.
  */
 import { createServer, request as httpRequest, type IncomingHttpHeaders } from "node:http";
-import { connect, type Socket } from "node:net";
+import { connect, Socket } from "node:net";
 import type { Duplex } from "node:stream";
 
+import { createEgressBudget, createEgressMeter, egressDailyBytesFromEnv, type EgressBudget } from "./egress-log.js";
 import { resolvePublicInternetAddress } from "./public-dns-resolver.js";
 
 const ALLOWED_PORTS = new Set([80, 443]);
@@ -115,8 +119,14 @@ function guardClientSocket(socket: Duplex, phase: () => ConnectPhase): () => boo
   return () => unavailable;
 }
 
-export function createSandboxEgressProxy() {
+export function createSandboxEgressProxy(options: { budget?: EgressBudget } = {}) {
+  const budget = options.budget ?? createEgressBudget({ dailyBytes: egressDailyBytesFromEnv(process.env) });
   const server = createServer((incoming, outgoing) => {
+    if (!budget.admit(incoming.socket.remoteAddress)) {
+      outgoing.writeHead(429, { connection: "close" });
+      outgoing.end("AGENT_SANDBOX_EGRESS_DAILY_LIMIT: Daily egress budget of this sandbox is spent\n");
+      return;
+    }
     void (async () => {
       const targetUrl = new URL(incoming.url ?? "");
       if (targetUrl.protocol !== "http:" || targetUrl.username || targetUrl.password) {
@@ -124,7 +134,22 @@ export function createSandboxEgressProxy() {
       }
       const port = parsePort(targetUrl.port || "80");
       const target = await resolvePublicTarget(targetUrl.hostname, port);
-      const upstream = httpRequest({
+      let status: number | undefined;
+      let upstream: ReturnType<typeof httpRequest> | undefined;
+      const meter = createEgressMeter({
+        budget,
+        client: incoming.socket.remoteAddress,
+        host: target.hostname,
+        kind: "http",
+        onOverBudget: () => {
+          status = 429;
+          upstream?.destroy();
+          outgoing.destroy();
+        },
+        port,
+      });
+      outgoing.once("close", () => meter.finish({ status }));
+      upstream = httpRequest({
         family: target.family,
         headers: { ...filteredHeaders(incoming.headers), host: targetUrl.host },
         host: target.address,
@@ -133,6 +158,8 @@ export function createSandboxEgressProxy() {
         port: target.port,
         timeout: CONNECT_TIMEOUT_MS,
       }, (upstreamResponse) => {
+        status = upstreamResponse.statusCode ?? 502;
+        meter.countIn(upstreamResponse);
         outgoing.writeHead(
           upstreamResponse.statusCode ?? 502,
           filteredHeaders(upstreamResponse.headers),
@@ -143,10 +170,13 @@ export function createSandboxEgressProxy() {
         new Error("AGENT_SANDBOX_EGRESS_TIMEOUT: Upstream connection timed out"),
       ));
       upstream.on("error", (error) => {
+        if (outgoing.destroyed) return;
         console.error("Sandbox HTTP egress failed", { error, hostname: target.hostname, port });
+        status = 502;
         if (!outgoing.headersSent) outgoing.writeHead(502);
         outgoing.end("AGENT_SANDBOX_EGRESS_FAILED: Public destination request failed\n");
       });
+      meter.countOut(incoming);
       incoming.pipe(upstream);
     })().catch((error: unknown) => {
       console.error("Sandbox HTTP egress rejected", { error, url: incoming.url });
@@ -158,6 +188,11 @@ export function createSandboxEgressProxy() {
   server.on("connect", (request, clientSocket, initialData) => {
     let phase: ConnectPhase = "request";
     const clientUnavailable = guardClientSocket(clientSocket, () => phase);
+    const client = clientSocket instanceof Socket ? clientSocket.remoteAddress : undefined;
+    if (!budget.admit(client)) {
+      rejectSocket(clientSocket, 429, "Too Many Requests");
+      return;
+    }
     void (async () => {
       const match = /^\[?([^\]]+)\]?:([0-9]+)$/u.exec(request.url ?? "");
       if (!match) throw new Error("AGENT_SANDBOX_EGRESS_CONNECT_INVALID: Invalid CONNECT target");
@@ -178,6 +213,21 @@ export function createSandboxEgressProxy() {
       }
       upstream.once("connect", () => {
         phase = "tunnel";
+        const meter = createEgressMeter({
+          budget,
+          client,
+          host: target.hostname,
+          kind: "connect",
+          onOverBudget: () => {
+            upstream.destroy();
+            clientSocket.destroy();
+          },
+          port,
+        });
+        clientSocket.once("close", () => meter.finish({ status: 200 }));
+        upstream.once("close", () => meter.finish({ status: 200 }));
+        meter.countOut(clientSocket, initialData.byteLength);
+        meter.countIn(upstream);
         clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
         if (initialData.byteLength > 0) upstream.write(initialData);
         upstream.pipe(clientSocket);

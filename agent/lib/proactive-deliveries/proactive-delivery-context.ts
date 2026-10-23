@@ -8,7 +8,8 @@
 import { escapeUntrustedContextJson } from "../untrusted-context-json.js";
 
 export type ProactiveDeliverySourceKind =
-  | "agent_schedule" | "coach" | "daily_overview" | "group_overview" | "partner_alert" | "reminder" | "weekly_review";
+  | "agent_schedule" | "coach" | "daily_overview" | "evening_reflection" | "feature_tip" | "feedback_ask" | "group_overview"
+  | "partner_alert" | "reminder" | "stale_task" | "weekly_review";
 
 export interface ProactiveDeliveryRecord {
   content: string;

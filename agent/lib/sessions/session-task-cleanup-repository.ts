@@ -42,16 +42,17 @@ export const sessionTaskCleanupRepository = {
                  delete_after = $1::timestamptz + $5::integer * interval '1 day'
            FROM candidates
           WHERE session.id = candidates.id
-         RETURNING session.id, session.family_id, session.kind, session.task_state
+         RETURNING session.id, session.family_id, session.group_id, session.kind, session.task_state
        ), removed_routes AS (
          DELETE FROM conversation_session_routes route
           USING retired
           WHERE route.session_id = retired.id
        ), audited AS (
-         INSERT INTO audit_events (family_id, event_type, subject_id, metadata)
-         SELECT family_id, 'session.abandoned_task_retired', id,
+         INSERT INTO audit_events (family_id, group_id, event_type, subject_id, metadata)
+         SELECT family_id, CASE WHEN family_id IS NULL THEN group_id END, 'session.abandoned_task_retired', id,
                 jsonb_build_object('kind', kind::text, 'taskState', task_state::text)
            FROM retired
+          WHERE family_id IS NOT NULL OR group_id IS NOT NULL
        )
        SELECT count(*)::integer AS retired_count FROM retired`,
       [

@@ -76,6 +76,12 @@ describe("prepareMemoryQuery", () => {
     expect(prepare("Шуша,   напомни    🎂   про  торт")).toBe("напомни про торт");
   });
 
+  it("takes @yuna_agent for an address once the bot is Юна (the Latin alias gives the stem)", () => {
+    const yuna = { aliases: ["Юны", "Yuna"], name: "Юна" };
+    expect(prepareMemoryQuery("@yuna_agent напомни про резину", yuna)).toBe("напомни про резину");
+    expect(prepareMemoryQuery("Юна, напомни про резину", yuna)).toBe("напомни про резину");
+  });
+
   it("follows a differently named installation", () => {
     expect(prepareMemoryQuery("Осинара, где бэкап", { aliases: [], name: "Осинара" })).toBe("где бэкап");
     expect(prepareMemoryQuery("Шуша, где бэкап", { aliases: [], name: "Осинара" })).toBe("Шуша, где бэкап");

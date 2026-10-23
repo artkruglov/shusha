@@ -3,6 +3,8 @@
  *
  * Exports:
  * - `deliverFamilyInvitation`: sends a one-time invitation without model exposure.
+ * - `notifyWaitlistPerson`: tells someone from the signup queue that a place has opened.
+ * - `notifyOwnerMemberJoined`: tells the owner, outside the model, that someone joined by their link.
  */
 import { sendTelegramMessage } from "eve/channels/telegram";
 
@@ -69,5 +71,75 @@ export async function deliverFamilyInvitation(input: FamilyInvitationDelivery): 
         "AGENT_TELEGRAM_INVITATION_DELIVERY_FAILED: Не удалось связаться с Telegram. Попробуйте еще раз";
     }
     throw error;
+  }
+}
+
+/** Сбой уведомления не отменяет вход: человек уже в семье, владелец узнает из списка участников. */
+export async function notifyOwnerMemberJoined(input: {
+  memberName: string;
+  ownerTelegramUserId: string;
+  /** Как человек вошёл: по вашей ссылке или сам, написав в подключённой группе. */
+  via?: "group" | "link";
+}): Promise<void> {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) return;
+  try {
+    await sendTelegramMessage({
+      body: {
+        text: `${input.via === "group" ? "Новый участник вошёл в семью через вашу группу" : "По вашей ссылке в семью добавлен"}: ${input.memberName}. Если это не тот человек, напишите мне «убери ${input.memberName}».`,
+      },
+      chatId: input.ownerTelegramUserId,
+      credentials: { botToken },
+      fetch: (request, init) => fetch(request, { ...init, signal: AbortSignal.timeout(TELEGRAM_API_REQUEST_TIMEOUT_MS) }),
+    });
+  } catch (error) {
+    console.error(JSON.stringify({
+      code: "AGENT_OWNER_JOIN_NOTICE_FAILED",
+      errorName: error instanceof Error ? error.name : "UnknownError",
+    }));
+  }
+}
+
+/** Оператору: новый человек просится в закрытую Юну. Сбой доставки не мешает ответу самому человеку. */
+export async function notifyOperatorWaitlist(input: { name: string; username?: string; operatorTelegramUserId: string }): Promise<void> {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) return;
+  const who = input.username ? `${input.name} (@${input.username})` : input.name;
+  try {
+    await sendTelegramMessage({
+      body: { text: `Новая заявка: ${who} ждёт приглашения. Пустить первых из очереди: /signup open <число мест> [слово].` },
+      chatId: input.operatorTelegramUserId,
+      credentials: { botToken },
+      fetch: (request, init) => fetch(request, { ...init, signal: AbortSignal.timeout(TELEGRAM_API_REQUEST_TIMEOUT_MS) }),
+    });
+  } catch (error) {
+    console.error(JSON.stringify({
+      code: "AGENT_SIGNUP_OPERATOR_NOTICE_FAILED",
+      errorName: error instanceof Error ? error.name : "UnknownError",
+    }));
+  }
+}
+
+/** Сбой одному человеку из очереди не должен останавливать остальных. */
+export async function notifyWaitlistPerson(telegramUserId: string, word: string | null): Promise<boolean> {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) return false;
+  // С заданным словом простой /start отказал бы: ссылка обязана нести то же слово, по которому выделялось место.
+  const bot = process.env.TELEGRAM_BOT_USERNAME;
+  const how = word !== null && bot ? `Откройте ссылку https://t.me/${bot}?start=${word} и я подключу вашу семью.` : "Напишите мне /start, и я подключу вашу семью.";
+  try {
+    await sendTelegramMessage({
+      body: { text: `Появились места. ${how}` },
+      chatId: telegramUserId,
+      credentials: { botToken },
+      fetch: (request, init) => fetch(request, { ...init, signal: AbortSignal.timeout(TELEGRAM_API_REQUEST_TIMEOUT_MS) }),
+    });
+    return true;
+  } catch (error) {
+    console.error(JSON.stringify({
+      code: "AGENT_SIGNUP_WAITLIST_NOTICE_FAILED",
+      errorName: error instanceof Error ? error.name : "UnknownError",
+    }));
+    return false;
   }
 }

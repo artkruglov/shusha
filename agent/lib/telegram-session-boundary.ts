@@ -96,7 +96,7 @@ export async function waitForSessionBoundary(
       }
       throw new AppError(
         "AGENT_TELEGRAM_SESSION_BOUNDARY_MISSING",
-        "Eve завершил поток без подтверждения состояния сессии Telegram",
+        "Ответ на сообщение оборвался до конца хода",
       );
     } finally {
       try {
@@ -119,7 +119,7 @@ export async function waitForSessionBoundary(
       timedOut = true;
       reject(new AppError(
         "AGENT_TELEGRAM_SESSION_BOUNDARY_TIMEOUT",
-        "Eve не сообщил состояние сессии за отведённое время. Отправьте сообщение ещё раз",
+        "Ответ на сообщение не пришёл за отведённое время",
       ));
       // The queue must not wait for a stuck cancellation; consume owns its rejection.
       void cancelReader()?.catch(() => {});

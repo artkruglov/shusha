@@ -50,6 +50,8 @@ describe("createWorkspaceImageInspector", () => {
     expect(analyze).toHaveBeenCalledWith(expect.objectContaining({
       mediaType: "image/png",
       question: "Что изображено?",
+      // The turn's family pays for the vision call from its monthly budget.
+      usageFamilyId: "family-1",
     }));
   });
 

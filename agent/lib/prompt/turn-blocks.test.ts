@@ -192,6 +192,28 @@ describe("mode block resolution", () => {
     expect(markdown).not.toContain("`web_fetch`");
   });
 
+  it("tells a group without a family that memory and files are absent, and offers no workspace", async () => {
+    const { familyId: _familyId, ...attributes } = externalAuth.current!.attributes;
+    const loadCapabilities = vi.fn().mockResolvedValue(new Set<ExternalGroupToolName>(["web_search"]));
+    const loadGrantedSkills = vi.fn();
+    const resolve = createModeBlockResolver({
+      loadCapabilities, loadGrantedSkills, loadReactionPolicy: vi.fn().mockResolvedValue(null),
+    });
+
+    const markdown = await resolve(context(auth({
+      ...attributes, groupId: "6f1c2f9e-3b1a-4c55-9d8e-0a1b2c3d4e5f", telegramChatId: "-1001", toolAllowlist: ["web_search"],
+    })));
+
+    expect(loadCapabilities).toHaveBeenCalledWith({ familyId: null, groupId: "6f1c2f9e-3b1a-4c55-9d8e-0a1b2c3d4e5f" });
+    expect(loadGrantedSkills).not.toHaveBeenCalled();
+    expect(markdown).toContain("## Чего здесь нет");
+    expect(markdown).toContain("искать свежие сведения в интернете");
+    expect(markdown).not.toContain("/workspace/group");
+    expect(markdown).not.toContain("workspace группы");
+    expect(markdown).not.toContain("`read_file`");
+    expect(markdown).not.toContain("load_skill");
+  });
+
   it("describes authored skills granted to the group and survives a failed grant lookup", async () => {
     const loadCapabilities = vi.fn().mockResolvedValue(new Set<ExternalGroupToolName>(["remember"]));
     const loadGrantedSkills = vi.fn()
@@ -262,5 +284,15 @@ describe("preference block resolution", () => {
     });
 
     expect(await resolve(context(privateAuth))).toBeNull();
+  });
+
+  it("reads nothing for a group without a family, so its turns log no failure", async () => {
+    const authorize = vi.fn();
+    const resolve = createPreferenceBlockResolver({ authorize, get: vi.fn() });
+    const { familyId: _familyId, ...attributes } = externalAuth.current!.attributes;
+    const familyless = auth({ ...attributes, groupId: "6f1c2f9e-3b1a-4c55-9d8e-0a1b2c3d4e5f", telegramChatId: "-1001" });
+
+    expect(await resolve(context(familyless))).toBeNull();
+    expect(authorize).not.toHaveBeenCalled();
   });
 });

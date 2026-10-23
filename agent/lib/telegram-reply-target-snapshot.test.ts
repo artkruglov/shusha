@@ -47,6 +47,15 @@ describe("telegramReplyTargetSnapshot", () => {
     });
   });
 
+  it("reads the text of a rich target from its blocks when text and caption are empty", () => {
+    const message = productionReply();
+    const target = message.raw.reply_to_message as Record<string, unknown>;
+    const { text: _text, ...textless } = target;
+    const rich = { ...textless, rich_message: { blocks: [{ photo: [{ file_id: "p" }], type: "photo" }, { text: "пост про эвалы", type: "paragraph" }] } };
+
+    expect(telegramReplyTargetSnapshot({ ...message, raw: { ...message.raw, reply_to_message: rich } })?.contentText).toBe("пост про эвалы");
+  });
+
   it("rejects a raw target that does not match the parsed reply identity", () => {
     const message = productionReply();
     const raw = message.raw.reply_to_message as Record<string, unknown>;

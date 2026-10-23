@@ -18,6 +18,7 @@ import { provisionGroupSpace } from "./spaces/space-provisioning.js";
 import { requireAdministrationSpace } from "./spaces/administration-space.js";
 import type { SpaceAttributes } from "./spaces/space-attributes.js";
 import { database } from "./database.js";
+import { withSystemDatabaseContext } from "./database-context.js";
 import type {
   RegisteredGroupType,
   StandardTelegramGroupMessageMode,
@@ -25,6 +26,10 @@ import type {
 } from "./family-access.js";
 
 interface TelegramGroupRegistrationBase {
+  /** Включить автоподключение людей без семьи тем же шагом, что и регистрация (команда /family). */
+  autoJoinMembers?: boolean;
+  /** Только создать: уже существующая строка не меняется и не пересоздаётся, а отказ `AGENT_GROUP_ALREADY_REGISTERED`. */
+  createOnly?: boolean;
   space?:SpaceAttributes;
   familyId: string;
   requestedBy: string;
@@ -85,6 +90,34 @@ export interface TelegramGroupAdministrationRepository {
     requestedCanonicalSessions: number;
   }>;
   updatePolicy(input: TelegramGroupPolicyUpdate): Promise<{ groupId: string }>;
+}
+
+function openTasksWord(count: number): string {
+  const lastTwo = count % 100;
+  const last = count % 10;
+  if (lastTwo >= 11 && lastTwo <= 14) return "незакрытых дел";
+  if (last === 1) return "незакрытое дело";
+  return last >= 2 && last <= 4 ? "незакрытых дела" : "незакрытых дел";
+}
+
+/**
+ * A chat registered to someone else. A group without a family (migration 175) has no owner family at all: its
+ * administrator turned the bot on with /start, and only /stop in that group frees the chat (15 October 2026 the
+ * owner heard «другой семье» instead).
+ */
+async function registrationConflict(telegramChatId: string): Promise<AppError> {
+  // The owner's turn runs in their family's row scope, where a group without a family is invisible (migration
+  // 175): only the system scope can tell it from another family's group. The answer says no more than that.
+  const familyless = await withSystemDatabaseContext(() => database().query<{ familyless: boolean }>(
+    "SELECT family_id IS NULL AS familyless FROM telegram_groups WHERE telegram_chat_id = $1",
+    [telegramChatId],
+  ));
+  return new AppError(
+    "AGENT_GROUP_REGISTRATION_CONFLICT",
+    familyless.rows[0]?.familyless === true
+      ? "В этой группе бот включён без семьи. Чтобы подключить её к семье, администратор группы пишет в ней /stop (это стирает переписку и данные группы), затем подключите её снова"
+      : "Группа уже принадлежит другой семье",
+  );
 }
 
 export const telegramGroupAdministrationRepository: TelegramGroupAdministrationRepository = {
@@ -169,11 +202,9 @@ export const telegramGroupAdministrationRepository: TelegramGroupAdministrationR
         [input.telegramChatId],
       );
       const current = existing.rows[0];
-      if (current && current.family_id !== input.familyId) {
-        throw new AppError(
-          "AGENT_GROUP_REGISTRATION_CONFLICT",
-          "Группа уже принадлежит другой семье",
-        );
+      if (current && current.family_id !== input.familyId) throw await registrationConflict(input.telegramChatId);
+      if (current && input.createOnly) {
+        throw new AppError("AGENT_GROUP_ALREADY_REGISTERED", "Группа уже подключена");
       }
       if (current && current.type !== input.type) {
         await client.query("DELETE FROM telegram_groups WHERE id = $1", [current.id]);
@@ -182,8 +213,8 @@ export const telegramGroupAdministrationRepository: TelegramGroupAdministrationR
       // A conflicting chat owned by another family is never reassigned through an upsert.
       const result = await client.query<{ id: string }>(
         `INSERT INTO telegram_groups
-           (family_id, telegram_chat_id, title, type, tool_allowlist, message_mode)
-         VALUES ($1, $2, $3, $4, $5, $6)
+           (family_id, telegram_chat_id, title, type, tool_allowlist, message_mode, auto_join_members)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (telegram_chat_id)
          DO UPDATE SET title = EXCLUDED.title,
                        type = EXCLUDED.type,
@@ -198,14 +229,12 @@ export const telegramGroupAdministrationRepository: TelegramGroupAdministrationR
           input.type,
           input.toolAllowlist,
           input.messageMode,
+          input.autoJoinMembers === true,
         ],
       );
       const row = result.rows[0];
       if (!row) {
-        throw new AppError(
-          "AGENT_GROUP_REGISTRATION_CONFLICT",
-          "Группа уже принадлежит другой семье",
-        );
+        throw await registrationConflict(input.telegramChatId);
       }
 
       // Группа без области после включения режима отказана навсегда, поэтому привязка выдаётся
@@ -323,6 +352,30 @@ export const telegramGroupAdministrationRepository: TelegramGroupAdministrationR
         "SELECT pg_advisory_xact_lock(hashtextextended($1, $2))",
         [input.telegramChatId, TELEGRAM_GROUP_TRUST_LOCK_HASH_SEED],
       );
+
+      // An external group's own tasks go with its registration (`shared_tasks.group_id` cascades): open ones
+      // would vanish without a word, so the owner closes or cancels them first (task-capture-repair-plan, stage 5).
+      // The row lock first: creating a group task holds the row FOR SHARE, so a task cannot appear between
+      // the count and the delete below.
+      await client.query(
+        "SELECT id FROM telegram_groups WHERE family_id = $1 AND telegram_chat_id = $2 FOR UPDATE",
+        [input.familyId, input.telegramChatId],
+      );
+      const open = await client.query<{ count: number }>(
+        `SELECT count(*)::int AS count
+           FROM shared_tasks AS task
+           JOIN telegram_groups AS chat ON chat.id = task.group_id
+          WHERE chat.family_id = $1 AND chat.telegram_chat_id = $2
+            AND task.status NOT IN ('completed', 'declined', 'cancelled')`,
+        [input.familyId, input.telegramChatId],
+      );
+      const openCount = open.rows[0]?.count ?? 0;
+      if (openCount > 0) {
+        throw new AppError(
+          "AGENT_GROUP_HAS_OPEN_TASKS",
+          `В этой группе ${openCount} ${openTasksWord(openCount)}: при отключении они удалятся. Сначала закройте или отмените их`,
+        );
+      }
 
       // Both group keys remain mandatory so another family's registration is never deleted.
       const result = await client.query<{ id: string }>(

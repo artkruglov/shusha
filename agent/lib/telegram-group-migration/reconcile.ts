@@ -1,6 +1,9 @@
 /** Operator reconciliation with writers paused; never a model-facing tool.
  * Reads the authority from durable verified ingress, owns one transaction, and refuses in-flight
  * delivery. Runtime draining/late delivery recovery must use the same boundary when connected.
+ * A group without a family (migration 175) moves the same way, but its ledger row stays out of
+ * `telegram_group_migrations` (a family's table); its audit names the group, and the month's spend
+ * and budget notice follow it to the new chat id, so the move does not reset its budget.
  */
 import { INGRESS_SOURCE_CHAT_SQL } from "./retire-ingress.js";
 import { retireMigratedGroupReviews } from "./retire-reviews.js";
@@ -35,7 +38,7 @@ export async function reconcileVerifiedGroupMigration(updateId: string) {
       await client.query("COMMIT");
       return { groupId: prior.rows[0].group_id, replayed: true };
     }
-    const groups = await client.query<{ id: string; family_id: string; telegram_chat_id: string }>(
+    const groups = await client.query<{ id: string; family_id: string | null; telegram_chat_id: string }>(
       "SELECT id,family_id,telegram_chat_id FROM telegram_groups WHERE telegram_chat_id=ANY($1::text[]) ORDER BY id FOR UPDATE",
       [[event.oldChatId,event.newChatId]],
     );
@@ -81,11 +84,20 @@ export async function reconcileVerifiedGroupMigration(updateId: string) {
     // Telegram migrates only into a supergroup; a learned 'group' type would hide the new address.
     await client.query("UPDATE telegram_groups SET telegram_chat_id=$2,telegram_chat_type='supergroup' WHERE id=$1",
       [group.id,event.newChatId]);
-    await client.query(`INSERT INTO telegram_group_migrations(family_id,group_id,old_chat_id,new_chat_id,source_update_id)
-      VALUES($1,$2,$3,$4,$5)`, [group.family_id,group.id,event.oldChatId,event.newChatId,updateId]);
-    await client.query(`INSERT INTO audit_events(family_id,event_type,subject_id,metadata)
-      VALUES($1,'telegram.group_migrated',$2,jsonb_build_object('sourceUpdateId',$3::text,'oldChatId',$4::text,'newChatId',$5::text))`,
-      [group.family_id,group.id,updateId,event.oldChatId,event.newChatId]);
+    if (group.family_id === null) {
+      await client.query("UPDATE model_usage_events SET familyless_chat_id=$2 WHERE familyless_chat_id=$1",
+        [event.oldChatId,event.newChatId]);
+      await client.query(`INSERT INTO familyless_group_budget_notices(telegram_chat_id,month,notified_at)
+        SELECT $2,month,notified_at FROM familyless_group_budget_notices WHERE telegram_chat_id=$1
+        ON CONFLICT DO NOTHING`, [event.oldChatId,event.newChatId]);
+      await client.query("DELETE FROM familyless_group_budget_notices WHERE telegram_chat_id=$1", [event.oldChatId]);
+    } else {
+      await client.query(`INSERT INTO telegram_group_migrations(family_id,group_id,old_chat_id,new_chat_id,source_update_id)
+        VALUES($1,$2,$3,$4,$5)`, [group.family_id,group.id,event.oldChatId,event.newChatId,updateId]);
+    }
+    await client.query(`INSERT INTO audit_events(family_id,group_id,event_type,subject_id,metadata)
+      VALUES($1,$6,'telegram.group_migrated',$2,jsonb_build_object('sourceUpdateId',$3::text,'oldChatId',$4::text,'newChatId',$5::text))`,
+      [group.family_id,group.id,updateId,event.oldChatId,event.newChatId,group.family_id === null ? group.id : null]);
     await client.query("COMMIT");
     return { groupId: group.id, replayed: false };
   } catch (error) {

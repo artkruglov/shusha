@@ -13,6 +13,13 @@ MAX_BYTES = 20 * 1024 * 1024
 MAX_SECONDS = 180
 SAMPLE_RATE = 16000
 MODEL_NAME = 'multilingual_ctc'
+# Telegram voice notes are Ogg/Opus; a recording made in the Mini App is WebM/Opus (Android, desktop) or MP4/AAC
+# (iPhone). Each type is accepted only with its own container signature, and ffmpeg is told the container.
+FORMATS = {
+    'audio/ogg': ('ogg', lambda data: data.startswith(b'OggS') and b'OpusHead' in data),
+    'audio/webm': ('webm', lambda data: data.startswith(b'\x1a\x45\xdf\xa3')),
+    'audio/mp4': ('mp4', lambda data: data[4:8] == b'ftyp'),
+}
 
 
 def segments(samples):
@@ -39,15 +46,15 @@ class Engine:
         self.model = gigaam.load_model(MODEL_NAME, device='cpu', fp16_encoder=False,
                                       download_root='/models')
 
-    def transcribe(self, data):
+    def transcribe(self, data, container='ogg'):
         import numpy as np
         import soundfile as sf
         started = time.monotonic()
         with tempfile.TemporaryDirectory() as tmp:
-            source = Path(tmp) / 'voice.ogg'
+            source = Path(tmp) / ('voice.' + container)
             source.write_bytes(data)
             result = subprocess.run(['ffmpeg','-nostdin','-v','error','-protocol_whitelist','file,pipe',
-                '-i',str(source),'-t',str(MAX_SECONDS+1),'-f','f32le','-ac','1','-ar',str(SAMPLE_RATE),'pipe:1'],
+                '-f',container,'-i',str(source),'-t',str(MAX_SECONDS+1),'-f','f32le','-ac','1','-ar',str(SAMPLE_RATE),'pipe:1'],
                 capture_output=True, timeout=25)
             if result.returncode:
                 raise ValueError('invalid audio')
@@ -91,7 +98,8 @@ def handler(engine, secret):
                 return self.answer(404,{})
             if not hmac.compare_digest(self.headers.get('Authorization',''), 'Bearer '+secret):
                 return self.answer(401,{})
-            if self.headers.get('Content-Type') != 'audio/ogg':
+            kind = FORMATS.get(self.headers.get('Content-Type'))
+            if kind is None:
                 return self.answer(415,{})
             try:
                 size = int(self.headers.get('Content-Length','0'))
@@ -104,9 +112,9 @@ def handler(engine, secret):
             started = time.monotonic()
             try:
                 data = self.rfile.read(size)
-                if len(data) != size or not data.startswith(b'OggS') or b'OpusHead' not in data:
+                if len(data) != size or not kind[1](data):
                     return self.answer(422,{})
-                text = engine.transcribe(data)
+                text = engine.transcribe(data, kind[0])
                 self.answer(200,{'text':text,'model':MODEL_NAME})
                 print(json.dumps({'event':'transcribed','seconds':round(time.monotonic()-started,3),
                                   'inputBytes':size,'outputChars':len(text)}),flush=True)

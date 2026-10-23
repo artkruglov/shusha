@@ -23,6 +23,7 @@ function dependencies(overrides: Partial<GroupOverviewDispatcherDependencies> = 
   return {
     claim: vi.fn().mockResolvedValue("ref-1"),
     groups: vi.fn().mockResolvedValue([group]),
+    keyboard: vi.fn().mockResolvedValue({ inline_keyboard: [[{ callback_data: "tb:1", text: "Беру · Вынести мусор" }]] }),
     overview: vi.fn().mockResolvedValue({ now: NOW, tasks: [task], timezone: group.timezone }),
     record: vi.fn().mockResolvedValue(undefined),
     send: vi.fn().mockResolvedValue("555"),
@@ -40,10 +41,27 @@ describe("group overview dispatcher", () => {
     await expect(createGroupOverviewDispatcher(deps)(NOW)).resolves.toBe(1);
 
     expect(deps.claim).toHaveBeenCalledWith(group, "2026-09-29");
-    expect(deps.send).toHaveBeenCalledWith({ chatId: "-1001", text: expect.stringContaining("Юля: Забрать посылку") });
+    expect(deps.send).toHaveBeenCalledWith({
+      chatId: "-1001", replyMarkup: expect.any(Object), text: expect.stringContaining("Юля: Забрать посылку"),
+    });
     expect(deps.record).toHaveBeenCalledWith(expect.objectContaining({
       deliveryRef: "ref-1", groupId: "group-1", messageId: "555", telegramChatId: "-1001",
     }));
+  });
+
+  it("puts «Беру» under unowned tasks and always offers the keyboard with «Мои дела»", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const unowned = { ...task, assigneeName: null, id: "t-2", status: "open", title: "Вынести мусор", version: 4 };
+    const deps = dependencies({ overview: vi.fn().mockResolvedValue({ now: NOW, tasks: [task, unowned], timezone: group.timezone }) });
+
+    await createGroupOverviewDispatcher(deps)(NOW);
+
+    expect(deps.keyboard).toHaveBeenCalledWith(group, [{ id: "t-2", title: "Вынести мусор", version: 4 }], NOW);
+    expect(deps.send).toHaveBeenCalledWith(expect.objectContaining({ replyMarkup: expect.any(Object) }));
+
+    const plain = dependencies();
+    await createGroupOverviewDispatcher(plain)(NOW);
+    expect(plain.keyboard).toHaveBeenCalledWith(group, [], NOW);
   });
 
   it("waits for the family's morning", async () => {
