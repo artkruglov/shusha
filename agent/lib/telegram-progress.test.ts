@@ -5,6 +5,8 @@
  * - `completedTelegramOutput`: separates visible text from terminal reaction directives.
  * - Pre-tool assistant chunks remain hidden because Telegram cannot render them ephemerally.
  * - Empty model steps remain invisible to avoid technical Telegram noise.
+ * - A misspelled reaction directive around one emoji is repaired into the reaction; an empty tag pair
+ *   is never sent; words inside a tag that merely resembles the directive stay text.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -151,6 +153,47 @@ describe("completedTelegramOutput", () => {
   ])("rejects malformed or mixed reaction output: %s", (message) => {
     expect(() => completedTelegramOutput({ finishReason: "stop", message }))
       .toThrowError(/AGENT_TELEGRAM_REACTION_DIRECTIVE_INVALID/u);
+  });
+
+  // 16 October 2026: the whole answer to a short remark was `<telegereaction>😁</telegereaction>`,
+  // a misspelled directive that neither matched nor carried the fragment, so the chat received the tag
+  // as text. A lone tag pair that only wraps an emoji is the gesture the model meant.
+  it.each([
+    ["<telegereaction>😁</telegereaction>", "😁"],
+    ["<telegram-reactoin>👍</telegram-reactoin>", "👍"],
+    ["<reaction>❤️</reaction>", "❤"],
+    ["<telegereaction>👍</telegram-reaction>", "👍"],
+    ["\n<telegereaction>😸</telegereaction>\n<memory-used></memory-used>", "🥰"],
+  ])("repairs a misspelled reaction directive %s into the reaction %s", (message, emoji) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(completedTelegramOutput({ finishReason: "stop", message })).toEqual({ emoji, kind: "reaction" });
+    const repaired = warn.mock.calls.map(([line]) => String(line)).find((line) => line.includes("AGENT_TELEGRAM_REACTION_DIRECTIVE_REPAIRED"));
+    // The log names the tags the model wrote, never what it wrapped.
+    expect(repaired).toBeDefined();
+    expect(repaired).toContain('"open":"');
+    expect(repaired).not.toContain(emoji);
+  });
+
+  it("drops interim text that is only a misspelled reaction directive", () => {
+    expect(completedTelegramOutput({ finishReason: "tool-calls", message: "<telegereaction>😁</telegereaction>" })).toBeNull();
+  });
+
+  it("never sends an answer or progress that is only an empty tag pair", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(completedTelegramOutput({ finishReason: "stop", message: "<foo></foo>" })).toBeNull();
+    expect(completedTelegramOutput({ finishReason: "stop", message: "<telegereaction></telegereaction>" })).toBeNull();
+    expect(completedTelegramOutput({ finishReason: "tool-calls", message: "<foo></foo>" })).toBeNull();
+  });
+
+  // Words inside a tag that merely resembles the directive are an answer, not a broken gesture.
+  it.each([
+    "<b>Привет</b>",
+    "<reaction>Скорость реакции выросла</reaction>",
+    "<telegereaction>не emoji</telegereaction>",
+  ])("keeps text wrapped in a tag that is not a reaction: %s", (message) => {
+    expect(completedTelegramOutput({ finishReason: "stop", message }))
+      .toEqual({ kind: "message", memoryUsedDeclared: false, memoryUsedRefs: [], message });
+    expect(completedTelegramOutput({ finishReason: "tool-calls", message })).toEqual({ kind: "progress", message });
   });
 
   it.each([

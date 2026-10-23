@@ -10,12 +10,14 @@
  * - Lease ownership: expired work can be reclaimed while stale workers are rejected.
  * - Continuation aliases: Telegram group re-keying keeps one logical FIFO.
  * - Voice transcript persistence: paid provider results survive delivery retries.
+ * - `claimStalledIngress`: a message dispatched long ago and still processing is claimed for one alert.
  */
 import type { TelegramMessage } from "eve/channels/telegram";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 import { closeDatabase, database } from "./database.js";
 import { telegramIngressRepository } from "./telegram-ingress-repository.js";
+import { claimStalledIngress } from "./telegram-ingress-stall.js";
 import {
   BOT_USERNAME,
   groupMessage,
@@ -514,6 +516,21 @@ describeWithDatabase("telegramIngressRepository", () => {
         1,
       ),
     ).rejects.toThrowError(/AGENT_TELEGRAM_LEASE_LOST/);
+  });
+
+  // 2 October 2026: a dispatched private message stayed processing for 8.5 hours unnoticed.
+  it("claims a long-dispatched message for one stall alert", async () => {
+    await telegramIngressRepository.enqueue(updateInput("3051", "telegram:private:111", "ты тут?"));
+    const claim = await telegramIngressRepository.claimNext(LEASE_MILLISECONDS);
+    await telegramIngressRepository.beginDispatch(claim!.updateId, claim!.leaseToken);
+    await expect(claimStalledIngress(30 * 60 * 1000)).resolves.toEqual([]);
+
+    await database().query(
+      "UPDATE telegram_ingress_updates SET dispatch_started_at = now() - interval '31 minutes' WHERE update_id = 3051",
+    );
+    await expect(claimStalledIngress(30 * 60 * 1000)).resolves.toMatchObject([{ chatType: "private", updateId: "3051" }]);
+    // The claim is written with the alert, so the next tick does not repeat it.
+    await expect(claimStalledIngress(30 * 60 * 1000)).resolves.toEqual([]);
   });
 
   it("releases every live processing lease so a restarted process can reclaim at once", async () => {
