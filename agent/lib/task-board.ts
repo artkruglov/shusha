@@ -62,6 +62,11 @@ export interface TaskBoardInput {
   readonly tasks: readonly BoardTask[];
   /** Его просьбы другим, на которые ещё не ответили. */
   readonly waiting?: readonly BoardTask[];
+  /**
+   * Дела, которые ему передают (`shared-task-handover.ts`): до его «беру» их ведёт прежний исполнитель, поэтому
+   * в `tasks` их нет, а на доске они стоят в «Ждут согласия», как поручение.
+   */
+  readonly offered?: readonly BoardTask[];
   readonly now: Date;
   readonly timezone: string;
   /** plain для служебных сообщений без разметки, rich для ответа модели. */
@@ -150,6 +155,8 @@ export interface BoardRow {
   readonly suffix: string;
   /** Проект строки «Проекты без шага» и «где всё сделано». */
   readonly project?: BoardProject;
+  /** Дело из `offered`: его принимают или отклоняют, а не закрывают, хотя по статусу оно принятое. */
+  readonly offered?: boolean;
 }
 
 /** Что это за раздел: чат печатает заголовок, Mini App раскладывает разделы по своим местам. */
@@ -195,6 +202,7 @@ export function taskBoardSections(input: TaskBoardInput): { commitments: number;
   const ideas = open.filter((task) => task.kind === "idea");
   const rituals = open.filter((task) => task.kind === "ritual");
   const waiting = (input.waiting ?? []).filter((task) => OPEN_TASK_STATUSES.has(task.status));
+  const offered = (input.offered ?? []).filter((task) => OPEN_TASK_STATUSES.has(task.status));
 
   const sections: BoardSection[] = [];
   const row = (task: BoardTask, suffix = "", withNote = true): BoardRow =>
@@ -211,7 +219,13 @@ export function taskBoardSections(input: TaskBoardInput): { commitments: number;
   section("unowned", "Ничьи", unowned, (task) => row(task, task.listName ? ` · ${cleanTaskTitle(task.listName, input.style)}` : "", false), UNOWNED_HINT,
     // Ничьё это то, что нужно разобрать, а не фон: полный десяток, а не пять строк и «ещё N».
     Math.max(perGroup, UNOWNED_SECTION_LIMIT));
-  section("unaccepted", "Ждут согласия", unaccepted, (task) => row(task, task.assignee ? ` — ${cleanTaskTitle(task.assignee, input.style)}` : "", false));
+  // A handover waits for the same yes as a request: the row names who hands it over (its current assignee).
+  const handover = (task: BoardTask): BoardRow =>
+    ({ offered: true, suffix: task.assignee ? ` — передаёт: ${cleanTaskTitle(task.assignee, input.style)}` : " — передают", task, title: task.title });
+  section("unaccepted", "Ждут согласия", [
+    ...unaccepted.map((task) => row(task, task.assignee ? ` — ${cleanTaskTitle(task.assignee, input.style)}` : "", false)),
+    ...offered.map(handover),
+  ], (line) => line);
   section("unsorted", "Разобрать", unsorted, (task) => row(task), UNSORTED_HINT);
   // Раздел это проект: один на проект, как бы ни различались сферы его дел (прод 15 октября 2026:
   // «Даня · Учёба» трижды с одним «сделано 5 из 9»). Источник отделяет одноимённые проекты разных

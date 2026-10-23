@@ -16,6 +16,7 @@
  * - «Добавить дело» takes «для семьи» or «только мне»; the first explicit choice becomes the default.
  * - «Закрытые» lists the week's done and removed tasks the person may see, with «Вернуть» on their own.
  * - «Передать…» offers a family task to another person, who only answers it; it stays the sender's until taken.
+ * - The recipient's board shows the handover in «Ждут согласия» with «Беру / Не могу»; the sender's board does not.
  */
 import { createHmac, randomUUID } from "node:crypto";
 
@@ -155,6 +156,40 @@ function initData(telegramUserId: string, token = TOKEN): string {
     expect((await row()).assignee_telegram_id).toBe("700102");
     expect((await change("700101", "transfer", task.id, { assigneeRef: "Юля", nonce: randomUUID(), version: again.task.version + 2 })).status)
       .toBe(400);
+  });
+
+  it("shows a handover on the recipient's board in «Ждут согласия», until they take it", async () => {
+    const own = await makeTask(owner, "Записать Мишу к врачу");
+    const people = (await (await api.participants(new Request("https://x/app-api/participants", { headers: auth("700101") }))).json()) as {
+      participants: Array<{ me: boolean; ref: string }>;
+    };
+    const yulia = people.participants.find((person) => !person.me)!;
+    const { task } = (await (await change("700101", "share", own.id, { nonce: randomUUID(), version: own.version })).json()) as {
+      task: { id: string; version: number };
+    };
+    expect((await rowsOf("700102")).find((row) => row.id === task.id)).toBeUndefined();
+    const sent = await change("700101", "transfer", task.id, { assigneeRef: yulia.ref, nonce: randomUUID(), version: task.version });
+    expect(sent.status).toBe(200);
+    const { task: offered } = (await sent.json()) as { task: { version: number } };
+
+    const theirs = (await (await board("700102")).json()) as {
+      open: number; sections: Array<{ kind: string; rows: Array<{ actions: string[]; detail: string; id: string | null; version: number | null }> }>;
+    };
+    const section = theirs.sections.find((candidate) => candidate.rows.some((row) => row.id === task.id));
+    expect(section?.kind).toBe("unaccepted");
+    expect(section!.rows.find((row) => row.id === task.id)).toMatchObject({
+      actions: ["accept_transfer", "decline_transfer"], detail: expect.stringMatching(/^передаёт: /u), version: offered.version,
+    });
+    // Not the recipient's commitment yet; the sender still sees it as their own, without the offer row.
+    expect(theirs.open).toBe(0);
+    const senders = (await rowsOf("700101")).filter((row) => row.id === task.id);
+    expect(senders).toHaveLength(1);
+    expect(senders[0]!.actions).not.toContain("accept_transfer");
+
+    expect((await change("700102", "accept_transfer", task.id, { nonce: randomUUID(), version: offered.version })).status).toBe(200);
+    const taken = (await rowsOf("700102")).find((row) => row.id === task.id)!;
+    expect(taken.actions).toContain("complete");
+    expect((await rowsOf("700101")).find((row) => row.id === task.id)).toBeUndefined();
   });
 
   it("answers a request to the person with «Беру» or «Не могу», as offered on their board", async () => {

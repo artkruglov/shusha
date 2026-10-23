@@ -32,6 +32,8 @@ export interface DailyOverview {
   readonly tasks: readonly OverviewTask[];
   /** Личные просьбы автора, на которые получатель ещё не ответил. */
   readonly waiting: readonly BoardTask[];
+  /** Дела, которые человеку передают и которые ждут его «беру» (`shared-task-handover.ts`). */
+  readonly offered?: readonly OverviewTask[];
   readonly now: Date;
   /** Пояс человека: «сегодня» и «просрочено» считаются в его дне. */
   readonly timezone: string;
@@ -70,6 +72,7 @@ export function formatDailyOverview(
   const board = formatTaskBoard({
     now: overview.now, style: "plain", tasks: overview.tasks,
     timezone: overview.timezone, waiting: overview.waiting,
+    ...(overview.offered ? { offered: overview.offered } : {}),
     ...(overview.projects ? { projects: overview.projects } : {}),
   });
   if (board === null) return null;

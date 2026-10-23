@@ -199,7 +199,8 @@ export function handleTaskButtonCallback(query: TelegramCallbackQuery): Promise<
       });
       // The same board «покажи дела» sends, with «✓» in its text (ревью 21 октября 2026: был простой текст).
       const board = await boardMarkdown({ auth, now: overview.now, query: { source: "overview" }, tasks: overview.tasks, timezone,
-        waiting: overview.waiting, ...(overview.projects ? { projects: overview.projects } : {}) });
+        waiting: overview.waiting, ...(overview.offered ? { offered: overview.offered } : {}),
+        ...(overview.projects ? { projects: overview.projects } : {}) });
       if (board === null) await memoryReviewOwnerAlertTransport.send({ chatId, text: "Открытых дел нет." });
       else await sendBoardMessage(chatId, board);
     },

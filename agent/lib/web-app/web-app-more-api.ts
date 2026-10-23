@@ -17,6 +17,7 @@ import { withFamilyDatabaseContext } from "../database-context.js";
 import type { MemoryAuthorization } from "../memory-context.js";
 import { MEMORY_REF_PATTERN } from "../model-memory.js";
 import { memoryReviewOwnerAlertTransport } from "../memory-review/memory-review-owner-alert-transport.js";
+import { splitShoppingLine } from "../shopping/shopping-line.js";
 import { shoppingRepository } from "../shopping/shopping-repository.js";
 import {
   authorizeWebApp, readWebAppJson, webAppApiDependencies, webAppBadRequest, webAppFailure, webAppJson,
@@ -199,9 +200,10 @@ export function createWebAppMoreApi(dependencies: WebAppMoreDependencies) {
     addShopping: handle(async (auth, request) => {
       const { nonce, title } = await readWebAppJson(request);
       if (typeof title !== "string") webAppBadRequest();
-      // «молоко, хлеб, яйца» is three items, as people write a list; each has its own operation key, so a retry
-      // of the whole line adds none twice. One item keeps the key it always had.
-      const titles = title.split(/[,;\n]+/u).map((part) => part.trim()).filter((part) => part.length > 0);
+      // «молоко, хлеб, яйца» is three items, as people write a list, while «Молоко 3,2 %» and «Сметана, 2 банки»
+      // are one (`shopping-line.ts`); each has its own operation key, so a retry of the whole line adds none twice.
+      // One item keeps the key it always had.
+      const titles = splitShoppingLine(title);
       if (titles.length === 0 || titles.length > SHOPPING_LINE_MAX
         || titles.some((part) => Array.from(part).length > SHOPPING_TITLE_MAX)) webAppBadRequest();
       for (const [index, item] of titles.entries()) {

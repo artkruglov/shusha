@@ -149,6 +149,8 @@ export const dailyOverviewRepository = {
       if (!cursor) break;
     }
     const waiting = await sharedTaskRepository.execute(auth, { action: "list", view: "waiting", status: "proposed" }, "overview");
+    // Handovers to the person («Передать…»): the task stays the sender's until taken, so the own list leaves it out.
+    const offered = await sharedTaskRepository.execute(auth, { action: "list", view: "transfers" }, "overview");
     // Названия областей, которые человек ведёт: только имена, без числа дел и сравнения (Fair Play).
     const owned = await database().query<{ title: string }>(
       `SELECT title FROM care_areas
@@ -159,7 +161,7 @@ export const dailyOverviewRepository = {
     const projects = await loadBoardProjects(auth, options);
     // `withoutGroups`: the Mini App's board, which never shows an external group's tasks (scope `group`).
     // The list row leaves the scope out to stay short for the model, so it is read here by id.
-    const ids = [...tasks, ...(waiting.tasks ?? [])].map((task) => (task as { id?: string }).id)
+    const ids = [...tasks, ...(waiting.tasks ?? []), ...(offered.tasks ?? [])].map((task) => (task as { id?: string }).id)
       .filter((id): id is string => typeof id === "string");
     const groupIds = options.withoutGroups && ids.length > 0
       ? new Set((await database().query<{ id: string }>(
@@ -168,8 +170,11 @@ export const dailyOverviewRepository = {
       )).rows.map((row) => row.id))
       : new Set<string>();
     const outsideGroups = (task: BoardTask) => !groupIds.has((task as { id?: string }).id ?? "");
+    // A task the person already sees among their own is not listed twice.
+    const own = new Set(tasks.map((task) => (task as { id?: string }).id));
     return {
       areas: owned.rows.map((row) => row.title), now: new Date(), ...(projects ? { projects } : {}),
+      offered: (offered.tasks ?? []).filter((task) => outsideGroups(task) && !own.has((task as { id?: string }).id)),
       tasks: tasks.filter(outsideGroups), timezone: recipient.settings.timezone,
       waiting: (waiting.tasks ?? []).filter(outsideGroups),
     };

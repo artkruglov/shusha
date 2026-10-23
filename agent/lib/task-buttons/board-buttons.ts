@@ -42,11 +42,14 @@ export async function boardMarkdown(input: {
   tasks: readonly ListedTask[];
   timezone: string;
   waiting?: readonly BoardTask[];
+  /** Handovers to the person (`task-board.ts`): shown in «Ждут согласия», never with a «✓». */
+  offered?: readonly BoardTask[];
 }): Promise<string | null> {
   const { auth } = input;
   const chatId = auth.groupId === null && auth.telegramUserId !== null ? auth.telegramUserId : null;
   const content = { now: input.now, tasks: input.tasks, timezone: input.timezone,
-    ...(input.projects ? { projects: input.projects } : {}), ...(input.waiting ? { waiting: input.waiting } : {}) };
+    ...(input.projects ? { projects: input.projects } : {}), ...(input.waiting ? { waiting: input.waiting } : {}),
+    ...(input.offered ? { offered: input.offered } : {}) };
   if (chatId === null) return formatRichTaskBoard(content);
   const { sections } = taskBoardSections({ now: input.now, style: "rich", tasks: input.tasks, timezone: input.timezone,
     ...(input.projects ? { projects: input.projects } : {}) });
@@ -114,7 +117,8 @@ export function isRichBoardPress(query: TelegramCallbackQuery): boolean {
 
 export interface BoardRedrawDependencies {
   read(auth: MemoryAuthorization, query: BoardQuery): Promise<{
-    projects?: readonly BoardProject[]; tasks: readonly ListedTask[]; timezone: string; waiting?: readonly BoardTask[];
+    offered?: readonly BoardTask[]; projects?: readonly BoardProject[]; tasks: readonly ListedTask[]; timezone: string;
+    waiting?: readonly BoardTask[];
   }>;
   resolve(ids: readonly string[]): Promise<ReadonlyMap<string, { action: string; id: string; status?: string | null; title: string | null } | null>>;
   /** The buttons the redrawn board no longer shows: settled, so the table does not keep them for a week. */
@@ -132,7 +136,8 @@ export const boardRedrawDependencies: BoardRedrawDependencies = {
       const overview = await dailyOverviewRepository.overview({
         familyId: auth.familyId, settings: { timezone }, telegramUserId: auth.telegramUserId, userId: auth.userId,
       });
-      return { tasks: overview.tasks, timezone, waiting: overview.waiting, ...(overview.projects ? { projects: overview.projects } : {}) };
+      return { tasks: overview.tasks, timezone, waiting: overview.waiting, ...(overview.offered ? { offered: overview.offered } : {}),
+        ...(overview.projects ? { projects: overview.projects } : {}) };
     }
     const filters = query.source === "list" ? query.filters : {};
     const result = await sharedTaskRepository.execute(auth, { action: "list", ...filters } as never, "board-redraw") as { tasks?: readonly ListedTask[] };
@@ -174,10 +179,10 @@ export async function redrawBoard(
     }
     // The board the pressed button was drawn in; an older button without one redraws the whole open list.
     const boardQuery = row.boardQuery ?? { filters: {}, source: "list" as const };
-    const { projects, tasks, timezone, waiting } = await dependencies.read(auth, boardQuery);
+    const { offered, projects, tasks, timezone, waiting } = await dependencies.read(auth, boardQuery);
     const markdown = await dependencies.board({
       auth, closed: [...closed.values()], now: dependencies.now(), query: boardQuery, tasks, timezone,
-      ...(projects ? { projects } : {}), ...(waiting ? { waiting } : {}),
+      ...(projects ? { projects } : {}), ...(waiting ? { waiting } : {}), ...(offered ? { offered } : {}),
     });
     if (markdown === null) return;
     await dependencies.edit({ chatId: message.chat.id, markdown, messageId: message.messageId });

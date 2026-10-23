@@ -43,6 +43,19 @@ describe("webAppBoard", () => {
     expect(board.today).toBe("2026-10-18");
   });
 
+  it("answers a handover with «Беру / Не могу», not with «Сделано» of the sender's accepted task", () => {
+    const board = webAppBoard({
+      now: NOW, offered: [task("Записать Мишу к врачу", { assignee: "Юля", dueOn: null })], tasks: [task("Своё")], timezone: "UTC",
+    }, "2026-10-18");
+    const section = board.sections.find((candidate) => candidate.kind === "unaccepted")!;
+    expect(section.title).toBe("Ждут согласия");
+    expect(section.rows).toEqual([{
+      actions: ["accept_transfer", "decline_transfer"], detail: "передаёт: Юля", id: "id-Записать Мишу к врачу", repeat: false,
+      title: "Записать Мишу к врачу", version: 3,
+    }]);
+    expect(board.open).toBe(1);
+  });
+
   it("offers no «Перенести» to a child, who may close their own task but not edit it", () => {
     const board = webAppBoard({ now: NOW, tasks: [task("Своё")], timezone: "UTC" }, "2026-10-18", { canMove: false });
     expect(board.sections[0]!.rows[0]!.actions).toEqual(["complete"]);

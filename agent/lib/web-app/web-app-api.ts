@@ -380,6 +380,7 @@ export const webAppApiDependencies: WebAppApiDependencies = {
     const today = localDate(timezone, overview.now);
     return { ...webAppBoard({
       now: overview.now, tasks: overview.tasks, timezone, waiting: overview.waiting,
+      ...(overview.offered ? { offered: overview.offered } : {}),
       ...(overview.projects ? { projects: overview.projects } : {}),
     }, today, { canMove: await canMove(auth) }), stale: await staleOfOverview(auth.userId, overview.tasks, today) };
   },

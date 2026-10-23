@@ -8,7 +8,7 @@
  * Разбор дел по разделам один на чат и приложение (`task-board.ts`), поэтому они не расходятся.
  * Страница показывает все строки раздела, а не пять, как чат. У строки список действий, которые к ней
  * подходят: «Сделано» и «Перенести» у моего принятого дела, «Беру» у ничьего, «Беру / Не могу» у поручения
- * мне. Это только какие кнопки рисовать; можно ли этому человеку, решает репозиторий дел при нажатии.
+ * мне и у дела, которое мне передают (`offered`). Это только какие кнопки рисовать; можно ли этому человеку, решает репозиторий дел при нажатии.
  * Id есть у каждой строки дела, даже без кнопок: по нему открывается карточка (`web-app-task-card.ts`).
  * `kind` раздела говорит странице, куда его положить: просрочено, сегодня, проекты, ничьи, жду ответа.
  */
@@ -17,7 +17,7 @@ import type { OverviewTask } from "../initiative/daily-overview.js";
 import { taskBoardSections, cleanTaskTitle, type BoardSectionKind, type TaskBoardInput } from "../task-board.js";
 
 /** What a row's buttons do; the API accepts only these (`web-app-api.ts`). */
-export type WebAppAction = "accept" | "claim" | "complete" | "decline" | "postpone";
+export type WebAppAction = "accept" | "accept_transfer" | "claim" | "complete" | "decline" | "decline_transfer" | "postpone";
 
 export interface WebAppRow {
   readonly actions: readonly WebAppAction[];
@@ -80,7 +80,8 @@ export function webAppBoard(
       project: section.project ?? null,
       rows: section.rows.map((row) => {
         const task = row.task as OverviewTask | null;
-        const actions = actionsOf(task, waiting, options.canMove ?? true);
+        // A handover is answered, not done: its status is the sender's «accepted», not the viewer's.
+        const actions: WebAppAction[] = row.offered ? ["accept_transfer", "decline_transfer"] : actionsOf(task, waiting, options.canMove ?? true);
         const known = task !== null && typeof task.id === "string" && typeof task.version === "number";
         return {
           actions,
