@@ -18,7 +18,7 @@ import { reinforceExactClaim } from "./memory-exact-reinforcement.js";
 import {
   findNearDuplicateClaims,
   isSemanticMemoryKind,
-  nearDuplicateError,
+  NearDuplicateRefusal,
 } from "./memory-near-duplicate.js";
 import { lockSlot, supersedeSlotClaims, type SlotIdentity } from "./memory-slot-supersede.js";
 import { enforceMemoryQuota } from "./memory-quota.js";
@@ -395,7 +395,7 @@ export async function createMemoryClaim(
           scope: input.scope,
           topSimilarity: Number(neighbours[0]!.similarity.toFixed(3)),
         }));
-        throw nearDuplicateError(neighbours);
+        throw new NearDuplicateRefusal(neighbours);
       }
     }
     if (reinforced) {

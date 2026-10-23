@@ -4,15 +4,16 @@
  * Exports:
  * - `findNearDuplicateClaims`: active records of the same subject whose embedding is close to
  *   the candidate content; bounded to a few candidates.
- * - `nearDuplicateError`: the model-facing refusal that lists the candidates and the three ways
- *   to proceed (`reinforces`, `attribute`, `distinct`).
+ * - `NearDuplicateRefusal`: the stop thrown inside the write transaction; its message is the code
+ *   alone, the candidates travel in a field.
+ * - `nearDuplicateRefusalResult`: the ordinary tool answer the model gets instead: the candidates
+ *   and the three ways to proceed (`reinforces`, `attribute`, `distinct`).
  *
  * The prod embedder keeps distinct facts about one subject above the threshold too, so the gate
  * never merges on its own: the model that is already writing decides.
  */
 import type { PoolClient } from "pg";
 
-import { AppError } from "./app-error.js";
 import { resolveClaimPartition } from "./memory-claim-partition.js";
 import {
   MEMORY_EMBEDDING_MODEL_VERSION,
@@ -88,12 +89,31 @@ export async function findNearDuplicateClaims(
   }));
 }
 
-export function nearDuplicateError(candidates: readonly NearDuplicateCandidate[]): AppError {
-  const listed = candidates.map(({ attribute, content, memoryRef }) => ({ attribute, content, memoryRef }));
-  return new AppError(
-    "AGENT_MEMORY_NEAR_DUPLICATE",
-    `Похожие записи уже есть: ${JSON.stringify(listed)}. ` +
-      "Если это то же самое, повтори remember с reinforces=memoryRef; если факт изменился, повтори с attribute " +
-      "(или исправь через manage_memory edit); если это другой факт, повтори с distinct=true.",
-  );
+/**
+ * Not a failure: the write stops so the model looks at what is already stored. Thrown to abort the
+ * transaction, but the candidates are memory content, and Eve logs every thrown tool error whole;
+ * so the message carries the code alone and `remember` turns the stop into an answer (upstream
+ * nyxandro/osinara v0.27.1, 20 September 2026, found the same leak into their log store).
+ */
+export class NearDuplicateRefusal extends Error {
+  readonly code = "AGENT_MEMORY_NEAR_DUPLICATE";
+  readonly candidates: readonly NearDuplicateCandidate[];
+
+  constructor(candidates: readonly NearDuplicateCandidate[]) {
+    super("AGENT_MEMORY_NEAR_DUPLICATE");
+    this.name = "NearDuplicateRefusal";
+    this.candidates = candidates;
+  }
+}
+
+export function nearDuplicateRefusalResult(refusal: NearDuplicateRefusal) {
+  return {
+    code: refusal.code,
+    instruction:
+      "Похожие записи уже есть, новая не сохранена. Если это то же самое, повтори remember с reinforces=memoryRef; " +
+      "если факт изменился, повтори с attribute (или исправь через manage_memory edit); если это другой факт, " +
+      "повтори с distinct=true.",
+    saved: false as const,
+    similar: refusal.candidates.map(({ attribute, content, memoryRef }) => ({ attribute, content, memoryRef })),
+  };
 }
