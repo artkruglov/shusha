@@ -98,6 +98,11 @@ export interface TelegramIngressRepository {
   }): Promise<void>;
   release(updateId: string, leaseToken: string, failure: TelegramIngressFailure): Promise<void>;
   /**
+   * Returns a message Eve provably did not receive (its session hook was missing) to the queue and
+   * clears the dispatch marker, so the next attempt is not refused as possibly delivered twice.
+   */
+  releaseUndelivered(updateId: string, leaseToken: string, failure: TelegramIngressFailure): Promise<void>;
+  /**
    * Expires every live `processing` lease. Only the single agent process holds leases, so the
    * leases found alive at process start belong to a predecessor that died mid-turn; without this
    * the chat behind such an item stays silent until the lease times out.

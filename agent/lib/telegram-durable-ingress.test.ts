@@ -13,11 +13,15 @@
  * - A rich message (Bot API 10.1) reaches dispatch with its text unfolded from the blocks.
  * - A turn silent for a lease, or a stream closed without a boundary, fails and rotates the session.
  * - Button presses have their own small drain pool, so long model turns cannot hold them.
+ * - A failure takes down only the message in flight; the rest of its series is queued again and
+ *   the person in a private chat is told.
+ * - A message refused for a missing session hook goes back to the queue a bounded number of times.
  */
 import type { TelegramVerifiedUpdateContext } from "eve/channels/telegram";
 import { parseTelegramUpdate } from "eve/channels/telegram";
 import { describe, expect, it, vi } from "vitest";
 
+import { AppError } from "./app-error.js";
 import type { TelegramIngressRepository } from "./telegram-ingress-contract.js";
 import { createTelegramDurableIngress } from "./telegram-durable-ingress.js";
 
@@ -71,6 +75,7 @@ function repository() {
       rekeyQueue: vi.fn(),
       release: vi.fn(),
       releaseStaleLeases: vi.fn().mockResolvedValue(0),
+      releaseUndelivered: vi.fn(),
       renewLease: vi.fn(),
       sessionEventStreamCursor: vi.fn().mockResolvedValue(0),
       saveVoiceTranscript: vi.fn(),
@@ -917,7 +922,7 @@ describe("createTelegramDurableIngress", () => {
     expect(storage.value.renewLease.mock.calls.map((call) => call[0])).not.toContain("5001");
   });
 
-  it("fails the rest of a series when one dispatch throws and keeps the finished part completed", async () => {
+  it("fails the message whose dispatch throws, requeues the rest and keeps the finished part completed", async () => {
     const storage = repository();
     const head = seriesClaim(storage, 3001, "первое");
     const second = seriesClaim(storage, 3002, "второе");
@@ -943,8 +948,165 @@ describe("createTelegramDurableIngress", () => {
     await expect(backgroundTask).rejects.toThrowError(/AGENT_TEST_DISPATCH_FAILED/u);
 
     expect(storage.value.complete.mock.calls.map((call) => call[0])).toEqual(["3001"]);
-    expect(storage.value.fail.mock.calls.map((call) => call[0])).toEqual(["3002", "3003"]);
+    // Only the message whose dispatch threw fails; the one after it never reached Eve and is queued again.
+    expect(storage.value.fail.mock.calls.map((call) => call[0])).toEqual(["3002"]);
+    expect(storage.value.release.mock.calls.map((call) => call[0])).toEqual(["3003"]);
+    expect(storage.value.release.mock.calls[0]![2]).toMatchObject({ code: "AGENT_TELEGRAM_SERIES_RETURNED" });
     expect(dispatch).toHaveBeenCalledTimes(2);
+  });
+
+  // A restart re-claimed a private message whose dispatch had begun before a model outage, together
+  // with a later message that had never reached Eve. The head was refused as possibly double, and
+  // the fresh message was failed with it, silently.
+  it("fails only the interrupted message, returns the rest to the queue and tells the person", async () => {
+    const storage = repository();
+    const privateChat = { first_name: "Пух", id: 202, type: "private" };
+    const inPrivate = (claim: ReturnType<typeof seriesClaim>) => ({
+      ...claim,
+      payload: { ...claim.payload, message: { ...claim.payload.message, chat: privateChat } },
+    });
+    const head = inPrivate(seriesClaim(storage, 3001, "Шуша, ты тут?"));
+    const second = inPrivate(seriesClaim(storage, 3002, "ау"));
+    Object.assign(storage.claim, { payload: head.payload, updateId: head.updateId, voice: null });
+    storage.value.claimNext = vi.fn().mockResolvedValueOnce(head).mockResolvedValueOnce(null);
+    storage.value.claimFollowing = vi.fn().mockResolvedValue([second]);
+    storage.value.beginDispatch = vi.fn().mockRejectedValueOnce(new AppError(
+      "AGENT_TELEGRAM_DISPATCH_RECOVERY_REQUIRED",
+      "Передача сообщения в Eve была прервана",
+    ));
+    const notifyFailure = vi.fn();
+    const dispatch = vi.fn();
+    const handle = createTelegramDurableIngress({
+      acceptMedia: vi.fn().mockResolvedValue(true),
+      authorizeVoice: vi.fn(),
+      botUsername: "osinara_bot",
+      handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
+      leaseMilliseconds: 60_000,
+      notifyFailure,
+      repository: storage.value,
+      requestSessionRotation: vi.fn(),
+      transcribeVoice: vi.fn(),
+    });
+    const update = parseTelegramUpdate(head.payload);
+    if (!update) throw new Error("AGENT_TEST_TELEGRAM_UPDATE_INVALID: Не создано тестовое обновление");
+    let backgroundTask: Promise<unknown> | undefined;
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await handle({
+      dispatch,
+      raw: head.payload,
+      update,
+      waitUntil(task) {
+        backgroundTask = task;
+      },
+    } as TelegramVerifiedUpdateContext);
+    await backgroundTask?.catch(() => undefined);
+    consoleError.mockRestore();
+
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(storage.value.fail.mock.calls.map((call) => call[0])).toEqual(["3001"]);
+    expect(storage.value.release.mock.calls.map((call) => call[0])).toEqual(["3002"]);
+    expect(notifyFailure).toHaveBeenCalledTimes(1);
+    expect(notifyFailure.mock.calls[0]?.[0].message.messageId).toBe("3001");
+    expect(notifyFailure.mock.calls[0]?.[1]).toMatchObject({ code: "AGENT_TELEGRAM_DISPATCH_RECOVERY_REQUIRED" });
+  });
+
+  it("keeps a group chat silent when its message fails", async () => {
+    const storage = repository();
+    const head = seriesClaim(storage, 3101, "Шуша, привет");
+    Object.assign(storage.claim, { payload: head.payload, updateId: head.updateId, voice: null });
+    storage.value.claimNext = vi.fn().mockResolvedValueOnce(head).mockResolvedValueOnce(null);
+    const notifyFailure = vi.fn();
+    const dispatch = vi.fn().mockRejectedValueOnce(new Error("AGENT_TEST_DISPATCH_FAILED: сбой"));
+    const handle = createTelegramDurableIngress({
+      acceptMedia: vi.fn().mockResolvedValue(true),
+      authorizeVoice: vi.fn(),
+      botUsername: "osinara_bot",
+      handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
+      leaseMilliseconds: 60_000,
+      notifyFailure,
+      repository: storage.value,
+      requestSessionRotation: vi.fn(),
+      transcribeVoice: vi.fn(),
+    });
+    const update = parseTelegramUpdate(head.payload);
+    if (!update) throw new Error("AGENT_TEST_TELEGRAM_UPDATE_INVALID: Не создано тестовое обновление");
+    let backgroundTask: Promise<unknown> | undefined;
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await handle({
+      dispatch,
+      raw: head.payload,
+      update,
+      waitUntil(task) {
+        backgroundTask = task;
+      },
+    } as TelegramVerifiedUpdateContext);
+    await expect(backgroundTask).rejects.toThrowError(/AGENT_TEST_DISPATCH_FAILED/u);
+    consoleError.mockRestore();
+
+    expect(storage.value.fail.mock.calls.map((call) => call[0])).toEqual(["3101"]);
+    expect(notifyFailure).not.toHaveBeenCalled();
+  });
+
+  // When the Workflow queue lags, a chat's next message reaches a session whose hook was not created
+  // yet; Eve refuses it before delivery ("Hook not found") and the queue used to fail the message for
+  // good. Nothing was delivered, so it goes back to the queue a few times.
+  function hookMissing() {
+    return Object.assign(new Error("Hook not found"), { name: "HookNotFoundError" });
+  }
+
+  async function runHookMissing(attemptCount: number) {
+    const storage = repository();
+    const head = { ...seriesClaim(storage, 4001, "Шуша, привет"), attemptCount };
+    storage.value.claimNext = vi.fn().mockResolvedValueOnce(head).mockResolvedValueOnce(null);
+    const dispatch = vi.fn().mockRejectedValueOnce(hookMissing());
+    const notifyFailure = vi.fn();
+    const handle = createTelegramDurableIngress({
+      acceptMedia: vi.fn().mockResolvedValue(true),
+      authorizeVoice: vi.fn(),
+      botUsername: "osinara_bot",
+      handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
+      hookMissingRetryDelayMilliseconds: 1,
+      leaseMilliseconds: 60_000,
+      notifyFailure,
+      repository: storage.value,
+      requestSessionRotation: vi.fn(),
+      transcribeVoice: vi.fn(),
+    });
+    const update = parseTelegramUpdate(head.payload);
+    if (!update) throw new Error("AGENT_TEST_TELEGRAM_UPDATE_INVALID: Не создано тестовое обновление");
+    let backgroundTask: Promise<unknown> | undefined;
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await handle({
+      dispatch,
+      raw: head.payload,
+      update,
+      waitUntil(task) {
+        backgroundTask = task;
+      },
+    } as TelegramVerifiedUpdateContext);
+    const outcome = await backgroundTask!.then(() => "settled", () => "rejected");
+    consoleError.mockRestore();
+    return { notifyFailure, outcome, storage };
+  }
+
+  it("returns a message whose session hook does not exist yet to the queue without a failure notice", async () => {
+    const { notifyFailure, outcome, storage } = await runHookMissing(1);
+
+    expect(outcome).toBe("settled");
+    expect(storage.value.releaseUndelivered.mock.calls.map((call) => call[0])).toEqual(["4001"]);
+    expect(storage.value.releaseUndelivered.mock.calls[0]![2]).toMatchObject({ code: "AGENT_TELEGRAM_SESSION_HOOK_PENDING" });
+    expect(storage.value.fail).not.toHaveBeenCalled();
+    expect(notifyFailure).not.toHaveBeenCalled();
+  });
+
+  it("fails the message once the hook stays missing for every allowed attempt", async () => {
+    const { outcome, storage } = await runHookMissing(10);
+
+    expect(outcome).toBe("rejected");
+    expect(storage.value.releaseUndelivered).not.toHaveBeenCalled();
+    expect(storage.value.fail.mock.calls.map((call) => call[0])).toEqual(["4001"]);
   });
 
   it("leaves a message alone while the chat has an unanswered confirmation", async () => {

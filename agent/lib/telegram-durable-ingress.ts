@@ -18,6 +18,7 @@ import { TELEGRAM_INGRESS_LEASE_MS } from "../config.js";
 import { AppError, isAppError } from "./app-error.js";
 import { transcribeTelegramVoice } from "./groq-voice-transcription.js";
 import type { TelegramIngressClaim, TelegramIngressRepository } from "./telegram-ingress-contract.js";
+import { sendTelegramFailureNotice } from "./telegram-failure-notice.js";
 import { telegramIngressRepository } from "./telegram-ingress-repository.js";
 import {
   classifyTelegramInboundMedia,
@@ -74,10 +75,17 @@ interface DurableIngressDependencies {
    * wait until one of the message loops, each possibly holding a turn of several minutes, frees up.
    */
   maxConcurrentCallbackDrains?: number;
+  /** Pause before a message whose session hook is not there yet goes back to the queue. */
+  hookMissingRetryDelayMilliseconds?: number;
   handleSoftwareUpdateCallback(
     query: Extract<TelegramUpdate, { kind: "callback_query" }>["callbackQuery"],
   ): Promise<boolean>;
   leaseMilliseconds: number;
+  /**
+   * Tells the person in a private chat that a message of theirs was not processed. Failure texts are
+   * written for people; without this they only reached the log.
+   */
+  notifyFailure?(update: TelegramUpdate, failure: { code: string; message: string }): Promise<void>;
   repository: TelegramIngressRepository;
   /**
    * Marks the application session of an Eve session for rotation after its turn boundary was
@@ -100,6 +108,15 @@ const LEASE_HEARTBEAT_DIVISOR = 3;
 
 const DEFAULT_MAX_CONCURRENT_DRAINS = 3;
 const DEFAULT_MAX_CONCURRENT_CALLBACK_DRAINS = 2;
+// When the Workflow queue lags, a chat's next message can reach a session whose hook does not exist
+// yet and Eve refuses it before delivery; ten tries two seconds apart cover that lag, a session that
+// never gets its hook still fails the message as before.
+const HOOK_MISSING_MAX_ATTEMPTS = 10;
+const DEFAULT_HOOK_MISSING_RETRY_DELAY_MILLISECONDS = 2_000;
+
+function isHookMissing(error: unknown): boolean {
+  return error instanceof Error && error.name === "HookNotFoundError";
+}
 
 export function createTelegramDurableIngress(dependencies: DurableIngressDependencies) {
   const drainPools = {
@@ -162,6 +179,22 @@ export function createTelegramDurableIngress(dependencies: DurableIngressDepende
   // out the full lease. A redispatched update is deduplicated by the journal, so no turn repeats.
   // Every pool waits for the same single release, so no loop claims before it has finished.
   let staleLeasesRelease: Promise<void> | undefined;
+
+  // A lost lease means another drain owns the message; anything else is the person's to know.
+  async function notifyFailure(failed: TelegramIngressClaim, failure: { code: string; message: string }): Promise<void> {
+    if (!dependencies.notifyFailure || failure.code === "AGENT_TELEGRAM_LEASE_LOST") return;
+    const update = parseTelegramUpdate(failed.payload);
+    if (update?.kind !== "message" || update.message.chat.type !== "private") return;
+    try {
+      await dependencies.notifyFailure(update, failure);
+    } catch (error) {
+      console.error(JSON.stringify({
+        code: "AGENT_TELEGRAM_FAILURE_NOTICE_FAILED",
+        error: error instanceof Error ? error.message : String(error),
+        updateId: failed.updateId,
+      }));
+    }
+  }
 
   type LeasedUpdate = { claim: TelegramIngressClaim; update: TelegramUpdate };
 
@@ -246,7 +279,8 @@ export function createTelegramDurableIngress(dependencies: DurableIngressDepende
         heartbeatControllers.delete(updateId);
       };
       startHeartbeat(claim);
-      // Every leased update that has not reached a terminal state yet; a failure marks them all.
+      // Every leased update that has not reached a terminal state yet; a failure marks the first
+      // of them and returns the rest to the queue.
       const pending: TelegramIngressClaim[] = [claim];
 
       async function dispatchLeased(
@@ -411,11 +445,35 @@ export function createTelegramDurableIngress(dependencies: DurableIngressDepende
             ...(pending.length > 1 ? { seriesUpdateIds: pending.map((item) => item.updateId) } : {}),
           }),
         );
-        for (const leased of pending) {
-          stopHeartbeat(leased.updateId);
-          await dependencies.repository.fail(leased.updateId, leased.leaseToken, failure);
+        // Only the message being prepared or dispatched failed; the rest of its series never reached
+        // Eve and goes back to the queue (otherwise a head refused as possibly double took two fresh
+        // messages down with it, silently).
+        const [failed, ...untouched] = pending;
+        const retryUndelivered = failed !== undefined && isHookMissing(error) &&
+          failed.attemptCount < HOOK_MISSING_MAX_ATTEMPTS;
+        if (failed && retryUndelivered) {
+          stopHeartbeat(failed.updateId);
+          await new Promise((resolve) => setTimeout(
+            resolve,
+            dependencies.hookMissingRetryDelayMilliseconds ?? DEFAULT_HOOK_MISSING_RETRY_DELAY_MILLISECONDS,
+          ));
+          await dependencies.repository.releaseUndelivered(failed.updateId, failed.leaseToken, {
+            code: "AGENT_TELEGRAM_SESSION_HOOK_PENDING",
+            message: "Сессия ещё не готова принять сообщение; оно вернулось в очередь",
+          });
+        } else if (failed) {
+          stopHeartbeat(failed.updateId);
+          await dependencies.repository.fail(failed.updateId, failed.leaseToken, failure);
+          await notifyFailure(failed, failure);
         }
-        throw error;
+        for (const leased of untouched) {
+          stopHeartbeat(leased.updateId);
+          await dependencies.repository.release(leased.updateId, leased.leaseToken, {
+            code: "AGENT_TELEGRAM_SERIES_RETURNED",
+            message: "Сообщение вернулось в очередь: предыдущее сообщение серии не обработано",
+          });
+        }
+        if (!retryUndelivered) throw error;
       } finally {
         for (const controller of heartbeatControllers.values()) controller.abort();
         await Promise.all(heartbeats);
@@ -493,6 +551,7 @@ export const handleTelegramDurableIngress = createTelegramDurableIngress({
   botUsername: process.env.TELEGRAM_BOT_USERNAME as string,
   handleSoftwareUpdateCallback,
   leaseMilliseconds: TELEGRAM_INGRESS_LEASE_MS,
+  notifyFailure: sendTelegramFailureNotice,
   repository: telegramIngressRepository,
   async requestSessionRotation(eveSessionId) {
     const applicationSessionId = await sessionRepository.findActiveIdByEveSessionId(eveSessionId);

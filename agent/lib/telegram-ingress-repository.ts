@@ -451,6 +451,21 @@ export const telegramIngressRepository: TelegramIngressRepository = {
     });
   },
 
+  async releaseUndelivered(updateId, leaseToken, failure) {
+    requireFailure(failure);
+    await requireActiveLease(updateId, leaseToken, async () => {
+      const result = await database().query(
+        `UPDATE telegram_ingress_updates
+         SET status = 'pending', lease_token = NULL, lease_expires_at = NULL, dispatch_started_at = NULL,
+             last_error_code = $3, last_error_message = $4, updated_at = now()
+         WHERE update_id = $1 AND status = 'processing' AND lease_token = $2
+           AND lease_expires_at > now()`,
+        [updateId, leaseToken, failure.code, failure.message],
+      );
+      return result.rowCount ?? 0;
+    });
+  },
+
   async fail(updateId, leaseToken, failure) {
     requireFailure(failure);
     await requireActiveLease(updateId, leaseToken, async () => {
