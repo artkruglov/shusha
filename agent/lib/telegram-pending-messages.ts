@@ -16,7 +16,7 @@
 import { parseTelegramUpdate, type TelegramMessage, type TelegramUpdate } from "eve/channels/telegram";
 
 import { classifyTelegramInboundMedia } from "./telegram-message-policy.js";
-import { withRichMessageText } from "./telegram-rich-message.js";
+import { normalizeRichMessage } from "./telegram-rich-message.js";
 
 export const TELEGRAM_PENDING_MESSAGES_MAX = 10;
 export const TELEGRAM_PENDING_MARKER_KEY = "osinara_pending";
@@ -44,7 +44,7 @@ export function pendingMessagesFromPayloads(
   for (const row of rows) {
     const parsed = parseTelegramUpdate(row.payload);
     if (!parsed || parsed.kind !== "message") continue;
-    const update = withRichMessageText(parsed);
+    const update = normalizeRichMessage(parsed);
     if (update.kind !== "message") continue;
     const message: TelegramMessage = update.message;
     const text = message.text.trim();

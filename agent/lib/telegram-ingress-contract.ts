@@ -49,6 +49,8 @@ export interface TelegramIngressRepository {
     chatId: string;
     chatType: "channel" | "group" | "private" | "supergroup";
     mediaKind: Exclude<TelegramInboundMediaKind, "none">;
+    /** The update still has text to deliver when its media is refused: no tombstone, it is queued. */
+    textFallback?: boolean;
     updateId: string;
   }): Promise<boolean>;
   beginVoiceTranscription(updateId: string, leaseToken: string): Promise<"completed" | "started">;

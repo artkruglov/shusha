@@ -86,6 +86,36 @@ describeWithDatabase("telegramIngressRepository", () => {
     expect(count.rows[0]?.count).toBe("1");
   });
 
+  it("leaves no tombstone for a refused photo whose post still has text, so the text is queued", async () => {
+    const family = await database().query<{ id: string }>(
+      "INSERT INTO families (name) VALUES ('Ingress rich family') RETURNING id",
+    );
+    await database().query(
+      `INSERT INTO telegram_groups
+         (family_id, telegram_chat_id, title, type, message_mode, tool_allowlist)
+       VALUES ($1, '-100-rich', 'Rich group', 'external', 'addressed_only', '{}')`,
+      [family.rows[0]!.id],
+    );
+    const update = updateInput("1003", "telegram:group:-100-rich", "пост канала с фото");
+
+    await expect(telegramIngressRepository.acceptMedia({
+      chatId: "-100-rich", chatType: "supergroup", mediaKind: "native_photo", textFallback: true, updateId: update.updateId,
+    })).resolves.toBe(false);
+    await expect(telegramIngressRepository.enqueue(update)).resolves.toBe("inserted");
+    const ignored = await database().query("SELECT 1 FROM telegram_ingress_ignored_updates WHERE update_id = $1", [update.updateId]);
+    expect(ignored.rowCount).toBe(0);
+  });
+
+  it("treats a redelivered rich post with its file as the duplicate of its stored text-only shape", async () => {
+    const blocks = [{ photo: [{ file_id: "p-redelivered", file_unique_id: "u" }], type: "photo" }, { text: "пост", type: "paragraph" }];
+    const withFile = { ...updateInput("1004", "telegram:group:-100-rich-again", "пост"), payload: { message: { chat: { id: -100 }, rich_message: { blocks } }, update_id: 1004 } };
+    const textOnly = { ...withFile, payload: { message: { chat: { id: -100 }, rich_message: { blocks: [{ text: "пост", type: "paragraph" }] } }, update_id: 1004 } };
+
+    await expect(telegramIngressRepository.enqueue(textOnly)).resolves.toBe("inserted");
+    await expect(telegramIngressRepository.enqueue(withFile)).resolves.toBe("duplicate");
+    await expect(telegramIngressRepository.enqueue({ ...withFile, payload: { ...withFile.payload, update_id: 1005 } })).rejects.toMatchObject({ code: "AGENT_TELEGRAM_UPDATE_CONFLICT" });
+  });
+
   it("keeps a rejected update tombstoned after the group becomes family-private", async () => {
     const family = await database().query<{ id: string }>(
       "INSERT INTO families (name) VALUES ('Ingress policy family') RETURNING id",

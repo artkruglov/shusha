@@ -7,6 +7,8 @@
  */
 import type { TelegramMessage } from "eve/channels/telegram";
 
+import { richMessagePlainText } from "./telegram-rich-message.js";
+
 export interface TelegramReplyTargetSnapshot {
   contentText: string;
   quotedText?: string;
@@ -63,9 +65,10 @@ export function telegramReplyTargetSnapshot(
   const rawChatId = exactIdentifier(record(rawTarget.chat)?.id);
   if (rawMessageId !== parsedTarget.messageId || rawChatId !== parsedTarget.chat.id) return null;
 
+  // A rich target (a channel post with blocks) has no `text`; its blocks are what the reader saw.
   const contentText = [nonEmptyText(rawTarget.text), nonEmptyText(rawTarget.caption)]
     .filter((part): part is string => part !== null)
-    .join("\n");
+    .join("\n") || richMessagePlainText(rawTarget) || "";
   if (!contentText) return null;
 
   const quotedText = nonEmptyText(record(message.raw.quote)?.text);

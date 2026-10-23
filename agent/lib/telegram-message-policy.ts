@@ -5,6 +5,7 @@
  * - `TelegramInboundMediaKind`: strict none/photo/readable-text/unsupported-media decision.
  * - `classifyTelegramInboundMedia`: fail-closed classifier over raw and Eve-parsed media.
  * - `hasTelegramInboundMedia`: identifies file-bearing updates without downloading their bytes.
+ * - `hasTelegramRawMediaBesidesLifted`: a rich post's media beyond the one lifted file.
  * - `isAgentNameMentioned`: recognizes configured names at Unicode word boundaries.
  * - `isMessageAddressedToBot`: preserves private, mention, and reply behavior.
  * - `isTelegramSlashCommand`: identifies command-shaped text reserved for application handlers.
@@ -15,6 +16,7 @@ import type { TelegramMessage } from "eve/channels/telegram";
 
 import { isTelegramImageDocumentCandidate } from "./attachments/telegram-vision-attachment.js";
 import { isReadableTextDocumentCandidate } from "./attachments/attachment-policy.js";
+import { richMediaIsLifted, richMessageMedia, richMessagePlainText } from "./telegram-rich-message.js";
 import { matchesTelegramAgentName } from "./telegram-agent-identity.js";
 
 interface TelegramDispatchMessage {
@@ -72,6 +74,30 @@ export type TelegramInboundMediaKind =
   | "text_document_candidate"
   | "unsupported_media";
 
+/**
+ * A conditional structure counts as media only when it carries a file and nothing to read: a rich
+ * message with paragraphs is a text message whose photo, if any, was lifted into `photo` before
+ * this check; a file left inside its blocks (a video a post embeds) must not refuse the post.
+ */
+function conditionalFieldIsMedia(raw: Record<string, unknown>, field: string): boolean {
+  if (!Object.hasOwn(raw, field)) return false;
+  if (field === "rich_message" && (richMessagePlainText(raw) !== null || richMediaIsLifted(raw))) return false;
+  return containsTelegramFileReference(raw[field]);
+}
+
+/**
+ * True when the raw message carries any file besides the one lifted out of its rich blocks: a
+ * voice field, a second file, a poll with a file. The ingress keeps the text of a refused rich
+ * post only when the lifted file was the whole of its media.
+ */
+export function hasTelegramRawMediaBesidesLifted(raw: Record<string, unknown>): boolean {
+  const lifted = richMessageMedia(raw);
+  if (lifted === null) return true;
+  const liftedField = lifted.kind === "photo" ? "photo" : "document";
+  return TELEGRAM_INBOUND_MEDIA_FIELDS.some((field) => field !== liftedField && Object.hasOwn(raw, field)) ||
+    TELEGRAM_CONDITIONAL_MEDIA_FIELDS.some((field) => field !== "rich_message" && conditionalFieldIsMedia(raw, field));
+}
+
 function containsTelegramFileReference(value: unknown): boolean {
   // Conditional structures can be text-only, so search only their own subtree for actual files.
   const pending = [value];
@@ -96,9 +122,7 @@ export function classifyTelegramInboundMedia(
 ): TelegramInboundMediaKind {
   const hasRawMedia = TELEGRAM_INBOUND_MEDIA_FIELDS.some(
     (field) => Object.hasOwn(message.raw, field),
-  ) || TELEGRAM_CONDITIONAL_MEDIA_FIELDS.some(
-    (field) => Object.hasOwn(message.raw, field) && containsTelegramFileReference(message.raw[field]),
-  );
+  ) || TELEGRAM_CONDITIONAL_MEDIA_FIELDS.some((field) => conditionalFieldIsMedia(message.raw, field));
   if (message.attachments.length === 0 && !hasRawMedia) return "none";
 
   // The normalized attachment and raw Telegram shape must agree exactly. Documents remain only
@@ -106,9 +130,7 @@ export function classifyTelegramInboundMedia(
   const rawPhoto = message.raw.photo;
   const hasOtherRawMedia = TELEGRAM_INBOUND_MEDIA_FIELDS.some(
     (field) => field !== "photo" && field !== "document" && Object.hasOwn(message.raw, field),
-  ) || TELEGRAM_CONDITIONAL_MEDIA_FIELDS.some(
-    (field) => Object.hasOwn(message.raw, field) && containsTelegramFileReference(message.raw[field]),
-  );
+  ) || TELEGRAM_CONDITIONAL_MEDIA_FIELDS.some((field) => conditionalFieldIsMedia(message.raw, field));
   if (!hasOtherRawMedia && !Object.hasOwn(message.raw, "document") &&
     Array.isArray(rawPhoto) && rawPhoto.length > 0 &&
     message.attachments.length === 1 && message.attachments[0]?.kind === "photo") {

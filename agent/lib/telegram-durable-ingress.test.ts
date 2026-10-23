@@ -1002,11 +1002,136 @@ describe("createTelegramDurableIngress", () => {
     const response = await handle({ dispatch, raw, update, waitUntil } as TelegramVerifiedUpdateContext);
 
     expect(response.status).toBe(200);
-    expect(acceptMedia).toHaveBeenCalledWith(update.message, "1001", "unsupported_media");
+    expect(acceptMedia).toHaveBeenCalledWith(update.message, "1001", "unsupported_media", false);
     expect(storage.value.enqueue).not.toHaveBeenCalled();
     expect(transcribeVoice).not.toHaveBeenCalled();
     expect(dispatch).not.toHaveBeenCalled();
     expect(waitUntil).not.toHaveBeenCalled();
+  });
+
+  // 23 October 2026: a channel post forwarded into «Дизраптим» (one photo block, paragraphs) was
+  // refused as external media and its text never reached the chat; 56 replies pointed at nothing.
+  it("keeps the text of a rich post whose photo the external group may not read", async () => {
+    const storage = repository();
+    storage.value.claimNext.mockReset().mockResolvedValue(null);
+    const acceptMedia = vi.fn().mockResolvedValue(false);
+    const raw = {
+      message: {
+        chat: { id: -1_003_576_522_523, type: "supergroup" },
+        date: 1_792_736_474,
+        from: { first_name: "Telegram", id: 777_000, is_bot: false },
+        message_id: 96_491,
+        rich_message: { blocks: [
+          { photo: [{ file_id: "p-small", file_unique_id: "u1", height: 89, width: 90 }, { file_id: "p-large", file_unique_id: "u1", height: 1_280, width: 1_280 }], type: "photo" },
+          { text: "пост про эвалы", type: "paragraph" },
+        ] },
+        sender_chat: { id: -1_003_674_400_630, title: "Остриков пилит агентов", type: "channel" },
+      },
+      update_id: 85_121_293,
+    };
+    const update = parseTelegramUpdate(raw);
+    if (!update || update.kind !== "message") throw new Error("AGENT_TEST_TELEGRAM_UPDATE_INVALID");
+    const handle = createTelegramDurableIngress({
+      acceptMedia, authorizeVoice: vi.fn(), botUsername: "osinara_bot", handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
+      leaseMilliseconds: 60_000, repository: storage.value, requestSessionRotation: vi.fn(), transcribeVoice: vi.fn(),
+    });
+
+    const response = await handle({ dispatch: vi.fn(), raw, update, waitUntil: vi.fn() } as unknown as TelegramVerifiedUpdateContext);
+
+    expect(response.status).toBe(200);
+    // The lifted photo met the gate as a native photo, with the largest size as the attachment.
+    expect(acceptMedia).toHaveBeenCalledWith(expect.objectContaining({ attachments: [expect.objectContaining({ fileId: "p-large", kind: "photo" })], text: "пост про эвалы" }), "85121293", "native_photo", true);
+    // The stored update keeps the paragraphs and no file: nothing can lift the photo later.
+    const stored = storage.value.enqueue.mock.calls[0]![0] as { payload: { message: { rich_message: { blocks: unknown[] } } }; updateId: string };
+    expect(stored.updateId).toBe("85121293");
+    expect(stored.payload.message.rich_message.blocks).toEqual([{ text: "пост про эвалы", type: "paragraph" }]);
+    expect(JSON.stringify(stored.payload)).not.toContain("p-large");
+  });
+
+  it("refuses a rich post with text when its media is not the lifted photo alone", async () => {
+    const storage = repository();
+    storage.value.claimNext.mockReset().mockResolvedValue(null);
+    const acceptMedia = vi.fn().mockResolvedValue(false);
+    const raw = {
+      message: {
+        chat: { id: -1_003_576_522_523, type: "supergroup" },
+        date: 1_792_736_474,
+        from: { first_name: "Telegram", id: 777_000, is_bot: false },
+        message_id: 96_493,
+        rich_message: { blocks: [{ type: "video", video: { file_id: "v1" } }, { text: "пост с видео", type: "paragraph" }] },
+        voice: { duration: 3, file_id: "voice-1", mime_type: "audio/ogg" },
+      },
+      update_id: 85_121_295,
+    };
+    const update = parseTelegramUpdate(raw);
+    if (!update || update.kind !== "message") throw new Error("AGENT_TEST_TELEGRAM_UPDATE_INVALID");
+    const handle = createTelegramDurableIngress({
+      acceptMedia, authorizeVoice: vi.fn(), botUsername: "osinara_bot", handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
+      leaseMilliseconds: 60_000, repository: storage.value, requestSessionRotation: vi.fn(), transcribeVoice: vi.fn(),
+    });
+
+    const response = await handle({ dispatch: vi.fn(), raw, update, waitUntil: vi.fn() } as unknown as TelegramVerifiedUpdateContext);
+
+    expect(response.status).toBe(200);
+    expect(acceptMedia).toHaveBeenCalledWith(expect.anything(), "85121295", "unsupported_media", false);
+    expect(storage.value.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("meets the gate with a lifted rich document and keeps the text when the file is refused", async () => {
+    const storage = repository();
+    storage.value.claimNext.mockReset().mockResolvedValue(null);
+    const acceptMedia = vi.fn().mockResolvedValue(false);
+    const document = { file_id: "d1", file_name: "правила.md", file_size: 512, file_unique_id: "ud", mime_type: "text/markdown" };
+    const raw = {
+      message: {
+        chat: { id: -1_003_576_522_523, type: "supergroup" },
+        date: 1_792_736_474,
+        from: { first_name: "Telegram", id: 777_000, is_bot: false },
+        message_id: 96_494,
+        rich_message: { blocks: [{ document, type: "document" }, { text: "правила группы в файле", type: "paragraph" }] },
+      },
+      update_id: 85_121_296,
+    };
+    const update = parseTelegramUpdate(raw);
+    if (!update || update.kind !== "message") throw new Error("AGENT_TEST_TELEGRAM_UPDATE_INVALID");
+    const handle = createTelegramDurableIngress({
+      acceptMedia, authorizeVoice: vi.fn(), botUsername: "osinara_bot", handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
+      leaseMilliseconds: 60_000, repository: storage.value, requestSessionRotation: vi.fn(), transcribeVoice: vi.fn(),
+    });
+
+    await handle({ dispatch: vi.fn(), raw, update, waitUntil: vi.fn() } as unknown as TelegramVerifiedUpdateContext);
+
+    expect(acceptMedia).toHaveBeenCalledWith(expect.objectContaining({ attachments: [expect.objectContaining({ fileId: "d1", fileName: "правила.md", kind: "document" })], text: "правила группы в файле" }), "85121296", "text_document_candidate", true);
+    const stored = storage.value.enqueue.mock.calls[0]![0] as { payload: { message: { rich_message: { blocks: unknown[] } } } };
+    expect(stored.payload.message.rich_message.blocks).toEqual([{ text: "правила группы в файле", type: "paragraph" }]);
+    expect(JSON.stringify(stored.payload)).not.toContain("d1");
+  });
+
+  it("stores an accepted rich post with its file intact", async () => {
+    const storage = repository();
+    storage.value.claimNext.mockReset().mockResolvedValue(null);
+    const acceptMedia = vi.fn().mockResolvedValue(true);
+    const raw = {
+      message: {
+        chat: { id: -1_003_576_522_523, type: "supergroup" },
+        date: 1_792_736_474,
+        from: { first_name: "Telegram", id: 777_000, is_bot: false },
+        message_id: 96_492,
+        rich_message: { blocks: [{ photo: [{ file_id: "p1", file_unique_id: "u1", height: 640, width: 640 }], type: "photo" }, { text: "с правом", type: "paragraph" }] },
+      },
+      update_id: 85_121_294,
+    };
+    const update = parseTelegramUpdate(raw);
+    if (!update || update.kind !== "message") throw new Error("AGENT_TEST_TELEGRAM_UPDATE_INVALID");
+    const handle = createTelegramDurableIngress({
+      acceptMedia, authorizeVoice: vi.fn(), botUsername: "osinara_bot", handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
+      leaseMilliseconds: 60_000, repository: storage.value, requestSessionRotation: vi.fn(), transcribeVoice: vi.fn(),
+    });
+
+    await handle({ dispatch: vi.fn(), raw, update, waitUntil: vi.fn() } as unknown as TelegramVerifiedUpdateContext);
+
+    expect(acceptMedia).toHaveBeenCalledWith(expect.anything(), "85121294", "native_photo", true);
+    expect(storage.value.enqueue).toHaveBeenCalledWith(expect.objectContaining({ payload: raw }));
   });
 
   it("dispatches a captionless photo with a non-empty factual model message", async () => {
