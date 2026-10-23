@@ -474,6 +474,9 @@ export function createTelegramDurableIngress(dependencies: DurableIngressDepende
       if (!textFallback) return new Response("ok");
       payload = withoutRichMediaBlocks(context.raw);
     }
+    // A rich post that lifted nothing (two files, a video) is text for the chat: its file
+    // references are dropped from the stored update too, so nothing can read them later.
+    if (update.kind === "message" && mediaKind === "none") payload = withoutRichMediaBlocks(payload);
     const voice = telegramVoiceMetadata(context.raw);
     await dependencies.repository.enqueue({
       continuationKey: telegramQueueKey(update),

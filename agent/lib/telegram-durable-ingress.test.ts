@@ -1107,6 +1107,35 @@ describe("createTelegramDurableIngress", () => {
     expect(JSON.stringify(stored.payload)).not.toContain("d1");
   });
 
+  it("stores a rich post that lifted nothing as text without its file references", async () => {
+    const storage = repository();
+    storage.value.claimNext.mockReset().mockResolvedValue(null);
+    const acceptMedia = vi.fn().mockResolvedValue(true);
+    const raw = {
+      message: {
+        chat: { id: -1_003_576_522_523, type: "supergroup" },
+        date: 1_792_736_474,
+        from: { first_name: "Telegram", id: 777_000, is_bot: false },
+        message_id: 96_495,
+        rich_message: { blocks: [{ type: "video", video: { file_id: "v-1" } }, { caption: { text: "кадр" }, photo: [{ file_id: "p-1" }], type: "photo" }, { text: "два вложения", type: "paragraph" }] },
+      },
+      update_id: 85_121_297,
+    };
+    const update = parseTelegramUpdate(raw);
+    if (!update || update.kind !== "message") throw new Error("AGENT_TEST_TELEGRAM_UPDATE_INVALID");
+    const handle = createTelegramDurableIngress({
+      acceptMedia, authorizeVoice: vi.fn(), botUsername: "osinara_bot", handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
+      leaseMilliseconds: 60_000, repository: storage.value, requestSessionRotation: vi.fn(), transcribeVoice: vi.fn(),
+    });
+
+    await handle({ dispatch: vi.fn(), raw, update, waitUntil: vi.fn() } as unknown as TelegramVerifiedUpdateContext);
+
+    expect(acceptMedia).not.toHaveBeenCalled();
+    const stored = storage.value.enqueue.mock.calls[0]![0] as { payload: { message: { rich_message: { blocks: unknown[] } } } };
+    expect(stored.payload.message.rich_message.blocks).toEqual([{ text: "кадр", type: "paragraph" }, { text: "два вложения", type: "paragraph" }]);
+    expect(JSON.stringify(stored.payload)).not.toContain("file_id");
+  });
+
   it("stores an accepted rich post with its file intact", async () => {
     const storage = repository();
     storage.value.claimNext.mockReset().mockResolvedValue(null);
