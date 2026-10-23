@@ -17,6 +17,8 @@
  * - Telegram dispatch extensions: Session return, message/token override, reply routing, and HITL auth.
  * - Telegram topic normalization: accepts thread IDs only on explicit forum-topic updates.
  * - Telegram public types: exposes only the reviewed application seams.
+ * - Telegram send pacing: Bot API calls take a slot under Telegram's limits and a 429 with
+ *   `retry_after` is waited out and the request sent once more instead of losing the reply.
  * - Provider web search: dynamic provider models select the native backend by provider prefix.
  * - Compaction: a tool result already truncated is never truncated again, and every compaction
  *   check is logged with its session and turn.
@@ -25,6 +27,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { patchPostgresConnectionRecovery } from "./eve-patches/postgres-connection-recovery.ts";
 import { patchStreamRecovery } from "./eve-patches/stream-recovery.ts";
+import { patchTelegramSendPacing } from "./eve-patches/telegram-send-pacing.ts";
 import { patchWorkflowTransport } from "./eve-patches/workflow-transport.ts";
 
 const EXPECTED_EVE_VERSION = "0.40.0";
@@ -136,6 +139,9 @@ await patchPostgresConnectionRecovery(replaceExact);
 // Upstream nyxandro 33c935f + 795ae11: a flow request may outlive Node's 300 s header deadline, and
 // a redelivery of that live message must join the running execution instead of starting another.
 await patchWorkflowTransport(replaceExact);
+// Osinara 1.8.23: Telegram answered 429 with retry_after under load and Eve sent once without a
+// pause, so the delivery failed and the reply to the person was lost.
+await patchTelegramSendPacing(replaceExact);
 
 // A cold production start may prepare sandbox images before the child server becomes healthy.
 await replaceExact(
