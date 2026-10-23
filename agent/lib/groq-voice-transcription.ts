@@ -4,6 +4,7 @@
  * Exports:
  * - `TelegramVoiceFile`: trusted subset of Telegram voice metadata.
  * - `createTelegramVoiceTranscriber`: dependency-injected validation/download pipeline.
+ * - `transcribeVoiceAudio`: one recording to text through the configured provider, for the chat and the Mini App.
  * - `transcribeTelegramVoice`: production Eve Telegram and Groq implementation.
  */
 import { transcribe } from "ai";
@@ -16,7 +17,7 @@ import {
 } from "../config.js";
 import { AppError } from "./app-error.js";
 import { modelProviderConfig } from "./model-provider-config.js";
-import { transcribeLocalVoice } from "./local-voice-transcription.js";
+import { transcribeLocalVoice, type VoiceMediaType } from "./local-voice-transcription.js";
 import { voiceTranscriptionModel } from "./model-registry.js";
 
 const OGG_SIGNATURE = new Uint8Array([0x4f, 0x67, 0x67, 0x53]);
@@ -140,6 +141,29 @@ function telegramFetchWithTimeout(input: URL | RequestInfo, init?: RequestInit):
   });
 }
 
+/**
+ * One recording to text through the configured voice provider (GigaAM on the host, or Groq): the Telegram voice note
+ * above and a recording made in the Mini App (`web-app-voice.ts`) take the same path.
+ */
+export async function transcribeVoiceAudio(audio: Uint8Array, mediaType: VoiceMediaType = "audio/ogg"): Promise<string> {
+  if (modelProviderConfig.voice.enabled && modelProviderConfig.voice.provider === "gigaam") {
+    return transcribeLocalVoice(audio, process.env.GIGAAM_API_KEY, fetch, mediaType);
+  }
+  if (voiceTranscriptionModel === null) {
+    throw new AppError(
+      "AGENT_VOICE_NOT_CONFIGURED",
+      "Распознавание голосовых сообщений пока не подключено. Владелец может добавить ключ Groq в настройках",
+    );
+  }
+  const result = await transcribe({
+    abortSignal: AbortSignal.timeout(GROQ_TRANSCRIPTION_TIMEOUT_MS),
+    audio,
+    maxRetries: 0,
+    model: voiceTranscriptionModel,
+  });
+  return result.text;
+}
+
 export const transcribeTelegramVoice = createTelegramVoiceTranscriber({
   downloadFile: (filePath) => downloadTelegramFile({ fetch: telegramFetchWithTimeout, filePath }),
   getFile: async (fileId) => {
@@ -147,22 +171,5 @@ export const transcribeTelegramVoice = createTelegramVoiceTranscriber({
     return { filePath: file.filePath };
   },
   maxBytes: TELEGRAM_VOICE_MAX_BYTES,
-  transcribe: async (audio) => {
-    if (modelProviderConfig.voice.enabled && modelProviderConfig.voice.provider === "gigaam") {
-      return transcribeLocalVoice(audio, process.env.GIGAAM_API_KEY);
-    }
-    if (voiceTranscriptionModel === null) {
-      throw new AppError(
-        "AGENT_VOICE_NOT_CONFIGURED",
-        "Распознавание голосовых сообщений пока не подключено. Владелец может добавить ключ Groq в настройках",
-      );
-    }
-    const result = await transcribe({
-      abortSignal: AbortSignal.timeout(GROQ_TRANSCRIPTION_TIMEOUT_MS),
-      audio,
-      maxRetries: 0,
-      model: voiceTranscriptionModel,
-    });
-    return result.text;
-  },
+  transcribe: (audio) => transcribeVoiceAudio(audio, "audio/ogg"),
 });

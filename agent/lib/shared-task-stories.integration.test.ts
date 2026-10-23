@@ -11,6 +11,7 @@ vi.mock('./telegram-current-membership.js',()=>({isCurrentTelegramMember:current
 import { closeDatabase, database } from "./database.js";
 import type { MemoryAuthorization } from "./memory-context.js";
 import { reminderRepository } from "./reminders/reminder-repository.js";
+import { projectRepository as projects } from "./projects/project-repository.js";
 import { sharedTaskRepository as tasks } from "./shared-task-repository.js";
 import { createTaskFamilyFixture, makeTask } from "./shared-task.integration-fixtures.js";
 
@@ -84,6 +85,7 @@ suite('planner user stories',()=>{
   it('edits and plans several tasks in one batch, and one stale version stops all of them',async()=>{
     // Прод 14 сентября: один ход потратил 18 подряд `update`, потому что правка не шла в пакет.
     const [a,b]=[await makeTask(owner,'Отвезти матрас'),await makeTask(owner,'Зарядить аккумулятор')];
+    await projects.execute(owner,{action:'create',title:'Переезд'},'move-project');
     const edited=await tasks.execute(owner,{action:'batch',items:[
       {action:'update',id:a.id,version:a.version,listName:'Переезд'},
       {action:'update',id:b.id,version:b.version,title:'Зарядить аккумулятор опеля'},

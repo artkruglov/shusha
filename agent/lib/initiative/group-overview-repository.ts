@@ -36,6 +36,8 @@ interface GroupRow {
 
 interface TaskRow {
   assignee_name: string | null;
+  id: string;
+  version: number;
   due_at: Date | null;
   due_on: string | null;
   kind: string;
@@ -78,7 +80,7 @@ export const groupOverviewRepository = {
       // из них группе видны: молчание безопаснее, чем показать лишнее.
       if (await readFamilySpaceMode(client, group.familyId) !== "legacy") return [];
       const { rows } = await client.query<TaskRow>(
-        `SELECT task.title, task.status, task.kind, COALESCE(project.title, task.list_name) AS list_name,
+        `SELECT task.id, task.version, task.title, task.status, task.kind, COALESCE(project.title, task.list_name) AS list_name,
                 task.due_on::text AS due_on, task.due_at, task.life_area, assignee.display_name AS assignee_name
            FROM shared_tasks AS task
            LEFT JOIN shared_tasks AS project ON project.id = task.project_id
@@ -93,12 +95,14 @@ export const groupOverviewRepository = {
         assigneeName: row.assignee_name,
         dueAt: row.due_at?.toISOString() ?? null,
         dueOn: row.due_on,
+        id: row.id,
         kind: row.kind,
         lifeArea: row.life_area as GroupOverviewTask["lifeArea"],
         listName: row.list_name,
         source: "Семейное",
         status: row.status,
         title: row.title,
+        version: row.version,
       }));
     } finally {
       client.release();

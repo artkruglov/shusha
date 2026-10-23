@@ -192,6 +192,42 @@ const POST_V0101_MIGRATIONS = [
   "159_coach_care_area_offer.sql",
   "160_coach_situation_followup.sql",
   "161_task_projects.sql",
+  "162_telegram_turn_interjections.sql",
+  "163_bootstrap_new_family.sql",
+  "164_signup_settings.sql",
+  "165_invitation_auto_approve.sql",
+  "166_group_auto_join.sql",
+  "167_signup_waitlist.sql",
+  "168_telegram_ingress_completed_index.sql",
+  "169_family_member_bans.sql",
+  "170_telegram_ingress_stall_alert.sql",
+  "171_family_row_level_security.sql",
+  "172_backup_runs.sql",
+  "173_telegram_guest_usage.sql",
+  "174_telegram_guest_chats.sql",
+  "175_familyless_group_scope.sql",
+  "176_familyless_group_settings.sql",
+  "177_familyless_group_budget.sql",
+  "178_merge_legacy_personal_project_twins.sql",
+  "179_task_button_actions.sql",
+  "180_daily_overview_settings.sql",
+  "181_family_model_budget.sql",
+  "182_feedback_messages.sql",
+  "183_erased_eve_sessions.sql",
+  "184_feedback_ask.sql",
+  "185_feedback_ask_claim.sql",
+  "186_default_task_visibility.sql",
+  "187_image_generation_description.sql",
+  "188_group_join_invitations.sql",
+  "189_task_button_to_group.sql",
+  "190_task_overview_shows.sql",
+  "191_stale_task_kind.sql",
+  "192_stale_task_claims.sql",
+  "193_project_complete_button.sql",
+  "194_task_button_board_query.sql",
+  "195_feature_tips_and_evening.sql",
+  "196_feature_tip_evening_claims.sql",
+  "197_onboarding_quest.sql",
 ] as const;
 
 const EXPECTED_R0_R7_TABLES = [
@@ -306,6 +342,10 @@ describeWithDatabase("v0.10.1 production ledger upgrade to current memory migrat
       expect(after.rows.map(({ name }) => name).filter((name) => !namesBefore.has(name)))
         .toEqual(POST_V0101_MIGRATIONS);
       expect(after.rows).toHaveLength(V0101_LEDGER.length + POST_V0101_MIGRATIONS.length);
+      // Migration 171: the view must run with the caller's rights, or the owner bypasses row-level security.
+      expect((await client.query<{ options: string[] | null }>(
+        "SELECT reloptions AS options FROM pg_class WHERE oid = 'memory_items'::regclass",
+      )).rows[0]?.options).toContain("security_invoker=true");
       // The real upgrade preserves a legacy group's exact boundary and archives a family with no readers.
       expect((await client.query(
         "SELECT kind,state FROM spaces WHERE family_id='00000000-0000-4000-8000-000000000083' ORDER BY kind",

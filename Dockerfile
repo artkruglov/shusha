@@ -17,6 +17,7 @@ COPY scripts/apply-eve-patches.ts ./scripts/apply-eve-patches.ts
 COPY scripts/eve-patches ./scripts/eve-patches
 COPY scripts/eve-runtime ./scripts/eve-runtime
 COPY scripts/install-google-workspace-cli.ts ./scripts/install-google-workspace-cli.ts
+COPY vendor/google-workspace-cli ./vendor/google-workspace-cli
 RUN npm ci --ignore-scripts \
     && npm run postinstall \
     && npm run install:gws
@@ -53,6 +54,7 @@ COPY scripts/apply-eve-patches.ts ./scripts/apply-eve-patches.ts
 COPY scripts/eve-patches ./scripts/eve-patches
 COPY scripts/eve-runtime ./scripts/eve-runtime
 COPY scripts/install-google-workspace-cli.ts ./scripts/install-google-workspace-cli.ts
+COPY vendor/google-workspace-cli ./vendor/google-workspace-cli
 RUN npm ci --omit=dev --ignore-scripts \
     && npm run postinstall \
     && npm run install:gws
@@ -93,6 +95,9 @@ RUN apt-get update \
       findutils \
       grep \
       git \
+      # The runner's firewall helper runs this image with NET_ADMIN in a sandbox's namespace;
+      # the sandbox itself has no capabilities, so the binaries give the model nothing.
+      iptables \
       jq \
       libasound2 \
       libatk-bridge2.0-0 \
@@ -193,4 +198,7 @@ LABEL org.opencontainers.image.source="${OCI_SOURCE}" \
       org.opencontainers.image.version="${OCI_VERSION}" \
       org.opencontainers.image.revision="${OCI_REVISION}"
 COPY infra/nginx.conf /etc/nginx/nginx.conf
+COPY infra/public /usr/share/osinara-public
+COPY scripts/stamp-web-app-assets.sh /usr/local/bin/stamp-web-app-assets
+RUN sh /usr/local/bin/stamp-web-app-assets /usr/share/osinara-public/app && rm /usr/local/bin/stamp-web-app-assets
 EXPOSE 80

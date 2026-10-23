@@ -4,6 +4,8 @@
  * Export:
  * - `describeDeepSeekHttpError`: stable application code, Russian explanation and retryability
  *   for every documented status; undocumented statuses fall back to the generic transport error.
+ * - `describeDeepSeekContextOverflow`: a 400 whose body says the request exceeds the model's
+ *   context window; it gets its own code, because repeating the same history cannot help.
  */
 export interface DeepSeekHttpErrorDescription {
   readonly code: string;
@@ -23,4 +25,18 @@ const DOCUMENTED: Readonly<Record<number, DeepSeekHttpErrorDescription>> = {
 
 export function describeDeepSeekHttpError(status: number): DeepSeekHttpErrorDescription | null {
   return DOCUMENTED[status] ?? null;
+}
+
+// DeepSeek answers an over-window request with a plain 400 "invalid_request_error"; only the text
+// tells it apart from a rejected schema. The OpenAI-style code is accepted too.
+const CONTEXT_OVERFLOW_TEXT = /maximum context length|context_length_exceeded|context window/iu;
+
+export const DEEPSEEK_CONTEXT_OVERFLOW: DeepSeekHttpErrorDescription = {
+  code: "AGENT_MODEL_CONTEXT_OVERFLOW",
+  message: "Разговор не помещается в контекст модели",
+  retryable: false,
+};
+
+export function describeDeepSeekContextOverflow(status: number, body: string): DeepSeekHttpErrorDescription | null {
+  return status === 400 && CONTEXT_OVERFLOW_TEXT.test(body) ? DEEPSEEK_CONTEXT_OVERFLOW : null;
 }

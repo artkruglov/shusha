@@ -3,7 +3,8 @@
  *
  * Constructs:
  * - Polls the private Eve drain route so leased/pending updates recover after process restarts.
- * - Uses the existing Telegram webhook secret and never exposes the route through Nginx.
+ * - Authenticates with the internal token, not the webhook secret Telegram holds; the route is
+ *   never exposed through Nginx.
  */
 import { installSecretRedaction } from "../agent/lib/logging/redact-secrets.ts";
 
@@ -17,11 +18,11 @@ const DRAIN_REQUEST_TIMEOUT_MS = 15_000;
 const INTERNAL_AGENT_HOST = "agent";
 const INTERNAL_AGENT_PORT = "3000";
 const internalBaseUrl = process.env.AGENT_INTERNAL_BASE_URL;
-const webhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET_TOKEN;
+const internalToken = process.env.AGENT_INTERNAL_TOKEN;
 
-if (!internalBaseUrl || !webhookSecret) {
+if (!internalBaseUrl || !internalToken) {
   throw new Error(
-    "AGENT_TELEGRAM_WORKER_CONFIG_MISSING: Не заданы внутренний адрес агента или Telegram webhook secret",
+    "AGENT_TELEGRAM_WORKER_CONFIG_MISSING: Не заданы внутренний адрес агента или внутренний токен",
   );
 }
 
@@ -43,7 +44,7 @@ while (true) {
   try {
     const response = await fetch(drainUrl, {
       body: "{}",
-      headers: { "x-telegram-bot-api-secret-token": webhookSecret },
+      headers: { "x-telegram-bot-api-secret-token": internalToken },
       method: "POST",
       redirect: "error",
       signal: AbortSignal.timeout(DRAIN_REQUEST_TIMEOUT_MS),

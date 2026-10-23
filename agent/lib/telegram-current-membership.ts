@@ -1,4 +1,12 @@
-/** Current Telegram membership through the existing Eve transport, fail closed on any uncertainty. */
+/**
+ * Current Telegram membership through the existing Eve transport, fail closed on any uncertainty.
+ *
+ * `withTelegramMembershipCache` lets one request ask once per chat and person: a read that checks a group
+ * and then reads it through the task repository (which checks again inside its transaction) makes one
+ * `getChatMember` call, and the repository's transaction does not wait on Telegram. Outside it every call asks.
+ */
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import { callTelegramApi } from "eve/channels/telegram";
 import { z } from "zod";
 
@@ -7,7 +15,25 @@ const memberResponse=z.object({ok:z.literal(true),result:z.object({
   is_member:z.boolean().optional(),user:z.object({id:z.number().int().positive(),is_bot:z.literal(false)})
 })});
 
-export async function isCurrentTelegramMember(chatId:string,telegramUserId:string):Promise<boolean> {
+const requestCache = new AsyncLocalStorage<Map<string, Promise<boolean>>>();
+
+export function withTelegramMembershipCache<T>(work: () => Promise<T>): Promise<T> {
+  return requestCache.run(new Map(), work);
+}
+
+export function isCurrentTelegramMember(chatId:string,telegramUserId:string):Promise<boolean> {
+  const cache = requestCache.getStore();
+  if (!cache) return probeTelegramMember(chatId, telegramUserId);
+  const key = `${chatId}:${telegramUserId}`;
+  let answer = cache.get(key);
+  if (!answer) {
+    answer = probeTelegramMember(chatId, telegramUserId);
+    cache.set(key, answer);
+  }
+  return answer;
+}
+
+async function probeTelegramMember(chatId:string,telegramUserId:string):Promise<boolean> {
   if (!/^-[1-9]\d*$/.test(chatId) || !/^[1-9]\d*$/.test(telegramUserId) || !Number.isSafeInteger(Number(telegramUserId))) return false;
   try {
     const response=await callTelegramApi({method:'getChatMember',body:{chat_id:chatId,user_id:Number(telegramUserId)},

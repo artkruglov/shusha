@@ -3,7 +3,7 @@
  *
  * Exports:
  * - `isDeepSeekPeakHour`: whether DeepSeek bills a moment at peak rates.
- * - `modelCallCostUsd`: price of one call from cache hits, misses and output, or null when unknown.
+ * - `modelCallCostUsd`: price of one call from cache hits, misses, output and searches, or null when unknown.
  * - `ModelSpendSummary` / `formatModelSpend`: the digest line for the last day.
  * - `DeepSeekBalance` / `formatDeepSeekBalance`: the balance line and whether it is a warning.
  *
@@ -11,13 +11,17 @@
  * - 14 September 2026 the DeepSeek balance reached −0.04 $ and the bot lost its model before anyone
  *   noticed. Tokens alone misled the analysis: a cache hit costs fifty times less than a miss, so
  *   the digest speaks in dollars and keeps the miss/hit split next to them.
- * - Prices come from api-docs.deepseek.com/quick_start/pricing (checked 14 September 2026); an
- *   unlisted model gets no price rather than a guessed one.
+ * - Prices come from api-docs.deepseek.com/quick_start/pricing (checked 17 October 2026); an
+ *   unlisted model gets no price rather than a guessed one. `deepseek-flash` is the current name of
+ *   V4.1 Flash; the old v4 flash names are routed to it at the same price.
+ * - DeepSeek bills its server-side search from 1 November 2026 00:00 Beijing time, 0.75 $ per thousand
+ *   successful calls (api-docs.deepseek.com/guides/search); earlier calls were free.
  */
 export interface ModelCallUsage {
   readonly cacheHitTokens: number;
   readonly cacheMissTokens: number;
   readonly outputTokens: number;
+  readonly webSearchCalls?: number;
 }
 
 interface PricePerMillionUsd {
@@ -29,6 +33,8 @@ interface PricePerMillionUsd {
 /** Off-peak rates; peak hours double every component. */
 const DEEPSEEK_FLASH_OFF_PEAK: PricePerMillionUsd = { cacheHit: 0.003, cacheMiss: 0.15, output: 0.6 };
 const PEAK_MULTIPLIER = 2;
+const WEB_SEARCH_USD = 0.75 / 1_000;
+const WEB_SEARCH_BILLED_FROM = Date.parse("2026-10-31T16:00:00Z");
 
 export function isDeepSeekPeakHour(at: Date): boolean {
   const day = at.getUTCDay();
@@ -38,19 +44,20 @@ export function isDeepSeekPeakHour(at: Date): boolean {
 }
 
 function priceFor(modelId: string): PricePerMillionUsd | null {
-  // Flash ids: deepseek-v4-flash, the dated v4.1 preview alias and the vision experiment.
-  return /^deepseek-v4(?:\.\d+)?-flash/u.test(modelId) ? DEEPSEEK_FLASH_OFF_PEAK : null;
+  // Flash ids: deepseek-flash, deepseek-v4-flash, the dated v4.1 preview alias and the vision experiment.
+  return /^deepseek-(?:flash$|v4(?:\.\d+)?-flash)/u.test(modelId) ? DEEPSEEK_FLASH_OFF_PEAK : null;
 }
 
 export function modelCallCostUsd(modelId: string, usage: ModelCallUsage, at: Date): number | null {
   const price = priceFor(modelId);
   if (price === null) return null;
   const multiplier = isDeepSeekPeakHour(at) ? PEAK_MULTIPLIER : 1;
+  const searches = at.getTime() >= WEB_SEARCH_BILLED_FROM ? (usage.webSearchCalls ?? 0) * WEB_SEARCH_USD : 0;
   return multiplier * (
     usage.cacheHitTokens * price.cacheHit +
     usage.cacheMissTokens * price.cacheMiss +
     usage.outputTokens * price.output
-  ) / 1_000_000;
+  ) / 1_000_000 + searches;
 }
 
 export interface ModelSpendSummary {

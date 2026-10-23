@@ -100,6 +100,7 @@ describeWithDatabase("group overview data", () => {
     const dispatch = createGroupOverviewDispatcher({
       claim: (group, localDate) => groupOverviewRepository.claim(group, localDate),
       groups: () => groupOverviewRepository.groups(now),
+      keyboard: async () => null,
       overview: async (group, at) => ({ now: at, tasks: await groupOverviewRepository.tasks(group), timezone: group.timezone }),
       record: recordGroupOverviewDelivery,
       send: async (input) => { sent.push(input); return "4242"; },

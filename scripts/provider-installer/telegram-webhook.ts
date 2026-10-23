@@ -74,7 +74,7 @@ export async function configureTelegramWebhook(
 
   const targetUrl = `https://${options.hostname}${TELEGRAM_WEBHOOK_PATH}`;
   const registered = await telegramJson(options, "setWebhook", {
-    allowed_updates: ["message", "callback_query"],
+    allowed_updates: ["message", "callback_query", "guest_message", "chat_join_request"],
     secret_token: options.secretToken,
     url: targetUrl,
   });

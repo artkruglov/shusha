@@ -6,8 +6,9 @@
  * - `partnerAlertRepository`: адресаты, ожидающие пункты, заявка на сутки и отметка повтора.
  *
  * Читается только структура: чьё поручение, чья передача, чья область и чьё решение. Текст
- * переписки, память и содержание дел сюда не попадают. Пункт, о котором уже писали, возвращается
- * ровно один раз через неделю: напоминать третий раз значит давить.
+ * переписки, память и содержание дел сюда не попадают. Пункт, о котором уже писали, возвращается каждые три
+ * дня, пока человек не ответит (владелец, 21 октября 2026: правило «один повтор через неделю» оставило восемь
+ * просьб без ответа на три недели). Тот, кто просил, через неделю видит их в утреннем обзоре и решает сам.
  */
 import { database } from "../database.js";
 import {
@@ -21,8 +22,8 @@ import { PARTNER_ALERT_MAX_ITEMS, type PartnerAlertItem, type PartnerAlertKind }
 
 export type PartnerAlertRecipient = InitiativeRecipient;
 
-/** Через столько ожидание напоминает о себе во второй и последний раз. */
-export const PARTNER_ALERT_REPEAT_DAYS = 7;
+/** Через столько дней после прошлого раза ожидание напоминает о себе снова. */
+export const PARTNER_ALERT_REPEAT_DAYS = 3;
 
 interface PendingRow {
   alert_kind: PartnerAlertKind;
@@ -30,11 +31,12 @@ interface PendingRow {
   repeated: boolean;
   subject_id: string;
   title: string;
+  version: number | null;
 }
 
 /**
  * Четыре источника ожидания одним запросом: иначе их порядок зависел бы от кода, а не от того,
- * что раньше попросили. Уже показанный пункт возвращается только через неделю и только однажды.
+ * что раньше попросили. Уже показанный пункт возвращается через три дня после прошлого показа.
  */
 const PENDING_SQL = `
 WITH claimed AS (
@@ -42,40 +44,39 @@ WITH claimed AS (
     FROM partner_alert_claims WHERE user_id = $1
 ), waiting AS (
   SELECT 'task_proposed' AS alert_kind, task.id AS subject_id, task.title,
-         author.display_name AS from_name, task.created_at AS since
+         author.display_name AS from_name, task.created_at AS since, task.version AS version
     FROM shared_tasks AS task
     JOIN users AS author ON author.telegram_user_id = task.creator_telegram_id
    WHERE task.family_id = $2 AND task.status = 'proposed'
      AND task.assignee_telegram_id = $3 AND task.creator_telegram_id <> $3
   UNION ALL
-  SELECT 'task_transfer', task.id, task.title, holder.display_name, task.transfer_requested_at
+  SELECT 'task_transfer', task.id, task.title, holder.display_name, task.transfer_requested_at, NULL::integer
     FROM shared_tasks AS task
     JOIN users AS holder ON holder.telegram_user_id = task.assignee_telegram_id
    WHERE task.family_id = $2 AND task.pending_assignee_telegram_id = $3
   UNION ALL
   SELECT 'care_area_proposed', area.id, area.title,
-         COALESCE(owner.display_name, creator.display_name), area.proposed_at
+         COALESCE(owner.display_name, creator.display_name), area.proposed_at, NULL::integer
     FROM care_areas AS area
     LEFT JOIN users AS owner ON owner.telegram_user_id = area.owner_telegram_id
     JOIN users AS creator ON creator.telegram_user_id = area.creator_telegram_id
    WHERE area.family_id = $2 AND area.status = 'proposed'
      AND area.pending_owner_telegram_id = $3
   UNION ALL
-  SELECT 'decision_open', decision.id, decision.title, proposer.display_name, decision.created_at
+  SELECT 'decision_open', decision.id, decision.title, proposer.display_name, decision.created_at, NULL::integer
     FROM joint_decisions AS decision
     JOIN users AS proposer ON proposer.id = decision.creator_user_id
    WHERE decision.family_id = $2 AND decision.partner_user_id = $1 AND NOT decision.cancelled
      AND NOT EXISTS (SELECT 1 FROM joint_decision_answers AS answer
                       WHERE answer.decision_id = decision.id AND answer.actor_user_id = $1)
 )
-SELECT waiting.alert_kind, waiting.subject_id::text, waiting.title, waiting.from_name,
+SELECT waiting.alert_kind, waiting.subject_id::text, waiting.title, waiting.from_name, waiting.version,
        (claimed.subject_id IS NOT NULL) AS repeated
   FROM waiting
   LEFT JOIN claimed ON claimed.alert_kind = waiting.alert_kind
                    AND claimed.subject_id = waiting.subject_id
  WHERE claimed.subject_id IS NULL
-    OR (claimed.reminded_at IS NULL
-        AND claimed.claimed_at < $4::timestamptz - make_interval(days => $5))
+    OR COALESCE(claimed.reminded_at, claimed.claimed_at) < $4::timestamptz - make_interval(days => $5)
  ORDER BY waiting.since NULLS LAST`;
 
 export const partnerAlertRepository = {
@@ -103,6 +104,7 @@ export const partnerAlertRepository = {
         repeated: row.repeated,
         subjectId: row.subject_id,
         title: row.title,
+        ...(row.version === null ? {} : { version: row.version }),
       })),
       pending: Math.max(0, rows.length - PARTNER_ALERT_MAX_ITEMS),
     };

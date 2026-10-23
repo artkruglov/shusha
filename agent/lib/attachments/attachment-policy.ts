@@ -94,7 +94,8 @@ export async function validateReadableTextAttachmentContent(input: {
 }
 
 export function sanitizeAttachmentFileName(fileName: string): string {
-  const normalized = posix.basename(fileName.replaceAll("\\", "/")).normalize("NFKC")
+  // NFKC first: it turns fullwidth `／` and `＼` into separators, which the base name must see.
+  const normalized = posix.basename(fileName.normalize("NFKC").replaceAll("\\", "/"))
     .replace(/[\u0000-\u001f\u007f]/gu, "_").trim();
   if (!normalized || normalized === "." || normalized === "..") {
     throw new AppError("AGENT_ATTACHMENT_FILENAME_INVALID", "Telegram передал некорректное имя файла");

@@ -26,6 +26,8 @@ function modelInvocation(name: ExternalGroupToolName | string): string {
 export interface ExternalGroupCapabilityInstructionOptions {
   /** Authored skills the owner granted to this group whose steps its allowlist covers. */
   authoredSkills?: readonly { description: string; name: string }[];
+  /** A group without a family (migration 175): no workspace files and no skills. */
+  familyless?: boolean;
   includeApplicationCore: boolean;
   scheduledHistory: boolean;
   scheduledRun: boolean;
@@ -45,7 +47,7 @@ export function externalGroupCapabilityInstructions(
   const effectiveCapabilities = [
     ...(VIDEO_GENERATION_AVAILABLE&&!options.scheduledRun&&allowed.has('generate_video')
       ?[{name:'sleep',usage:'долговременно подождать перед проверкой уже заказанного видео через generate_video status'}]:[]),
-    ...SANDBOX_FILE_CAPABILITY_CATALOG,
+    ...(options.familyless === true ? [] : SANDBOX_FILE_CAPABILITY_CATALOG),
     ...EXTERNAL_GROUP_CAPABILITY_CATALOG.filter(({ name }) =>
       allowed.has(name) && !(name === "generate_image" && (
         options.scheduledRun || !IMAGE_GENERATION_AVAILABLE
@@ -68,7 +70,7 @@ export function externalGroupCapabilityInstructions(
     .map(({ name, usage: description }) => `- ${modelInvocation(name)}: ${description}.`)
     .join("\n");
   const effectiveAllowlist = completeSurface.map(({ name }) => modelInvocation(name)).join(", ");
-  const effectiveSkills = [
+  const effectiveSkills = options.familyless === true ? [] : [
     ...(IMAGE_GENERATION_AVAILABLE && !options.scheduledRun && allowed.has("generate_image")
       ? ["imagegen"]
       : []),

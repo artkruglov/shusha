@@ -12,7 +12,9 @@ export default defineSandbox({
       ...input,
       async use(options) {
         const attrs = input.ctx.session.auth.current?.attributes;
-        const expected = attrs?.telegramChatType === "private" ? ["personal", "family"] :
+        // A group without a family (migration 175) has no family attribute and no workspace at all.
+        const familyless = attrs !== undefined && !Object.hasOwn(attrs, "familyId");
+        const expected = familyless ? [] : attrs?.telegramChatType === "private" ? ["personal", "family"] :
           attrs?.groupType === "family_private" ? ["family"] : ["group"];
         if (!options || JSON.stringify(options.mounts.map((mount) => mount.mountPoint)) !== JSON.stringify(expected)) {
           throw new Error(`TEST_GROUP_MOUNTS_INVALID: ${JSON.stringify(options?.mounts)} expected ${JSON.stringify(expected)}`);

@@ -87,6 +87,8 @@ describe("createTelegramDurableIngress", () => {
       acceptMedia: vi.fn().mockResolvedValue(true),
       authorizeVoice: vi.fn().mockResolvedValue(true),
       botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
       handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
       leaseMilliseconds: 60_000,
       repository: storage.value,
@@ -129,6 +131,8 @@ describe("createTelegramDurableIngress", () => {
       acceptMedia: vi.fn().mockResolvedValue(true),
       authorizeVoice: vi.fn().mockResolvedValue(true),
       botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
       handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
       leaseMilliseconds: 60_000,
       repository: storage.value,
@@ -209,6 +213,8 @@ describe("createTelegramDurableIngress", () => {
       acceptMedia: vi.fn().mockResolvedValue(true),
       authorizeVoice: vi.fn().mockResolvedValue(true),
       botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
       handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
       leaseMilliseconds: 60_000,
       repository: storage.value,
@@ -254,6 +260,8 @@ describe("createTelegramDurableIngress", () => {
       acceptMedia: vi.fn().mockResolvedValue(true),
       authorizeVoice: vi.fn().mockResolvedValue(false),
       botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
       handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
       leaseMilliseconds: 60_000,
       repository: storage.value,
@@ -320,6 +328,8 @@ describe("createTelegramDurableIngress", () => {
       acceptMedia: vi.fn().mockResolvedValue(true),
       authorizeVoice: vi.fn(),
       botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
       handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
       leaseMilliseconds: 60_000,
       repository: storage.value,
@@ -398,6 +408,8 @@ describe("createTelegramDurableIngress", () => {
       acceptMedia: vi.fn().mockResolvedValue(true),
       authorizeVoice: vi.fn(),
       botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
       handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
       leaseMilliseconds: 60_000,
       repository: storage.value,
@@ -439,6 +451,8 @@ describe("createTelegramDurableIngress", () => {
       acceptMedia: vi.fn().mockResolvedValue(true),
       authorizeVoice: vi.fn(),
       botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
       handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
       leaseMilliseconds: 120,
       repository: storage.value,
@@ -478,6 +492,8 @@ describe("createTelegramDurableIngress", () => {
       acceptMedia: vi.fn().mockResolvedValue(true),
       authorizeVoice: vi.fn(),
       botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
       handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
       leaseMilliseconds: 60_000,
       repository: storage.value,
@@ -534,6 +550,8 @@ describe("createTelegramDurableIngress", () => {
       acceptMedia: vi.fn().mockResolvedValue(true),
       authorizeVoice: vi.fn().mockResolvedValue(false),
       botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
       handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
       leaseMilliseconds: 60_000,
       maxConcurrentDrains: 2,
@@ -617,6 +635,8 @@ describe("createTelegramDurableIngress", () => {
       acceptMedia: vi.fn().mockResolvedValue(true),
       authorizeVoice: vi.fn(),
       botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
       handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
       leaseMilliseconds: 60_000,
       maxConcurrentCallbackDrains: 1,
@@ -677,6 +697,8 @@ describe("createTelegramDurableIngress", () => {
       acceptMedia: vi.fn().mockResolvedValue(true),
       authorizeVoice: vi.fn(),
       botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
       handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
       leaseMilliseconds: 60_000,
       repository: storage.value,
@@ -696,6 +718,56 @@ describe("createTelegramDurableIngress", () => {
     await backgroundTask;
 
     expect(dispatch.mock.calls[0]?.[0].message.text).toBe("Полный ответ\n\nСкрытая часть ответа другого бота.");
+  });
+
+  it("dispatches «Помоги начать» as the presser's own message, never as a button callback", async () => {
+    const storage = repository();
+    const raw = {
+      callback_query: {
+        data: "tb:11111111-1111-4111-8111-111111111111",
+        from: { first_name: "Артём", id: 700101, is_bot: false },
+        id: "q-help",
+        message: { chat: { id: 700101, type: "private" }, date: 1_788_563_816, message_id: 77, text: "«Дело» не менялось" },
+      },
+      update_id: 1005,
+    };
+    storage.claim.payload = raw;
+    storage.claim.updateId = "1005";
+    storage.claim.voice = null as never;
+    const update = parseTelegramUpdate(raw);
+    if (!update) throw new Error("AGENT_TEST_TELEGRAM_UPDATE_INVALID: Не создано тестовое обновление");
+    const turn = parseTelegramUpdate({
+      message: { chat: { id: 700101, type: "private" }, date: 1_788_563_900, from: { id: 700101, is_bot: false }, message_id: 77,
+        text: "Помоги начать дело «Дело»" },
+      update_id: 0,
+    });
+    const dispatch = vi.fn().mockResolvedValue({
+      getEventStream: async () => new ReadableStream({ start(controller) { controller.enqueue({ type: "session.waiting" }); } }),
+      id: "session-help",
+    });
+    const handleTaskButtonCallback = vi.fn().mockResolvedValue(true);
+    const handle = createTelegramDurableIngress({
+      acceptMedia: vi.fn().mockResolvedValue(true),
+      authorizeVoice: vi.fn(),
+      botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
+      handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
+      handleTaskButtonCallback,
+      leaseMilliseconds: 60_000,
+      repository: storage.value,
+      requestSessionRotation: vi.fn(),
+      taskButtonTurn: vi.fn().mockResolvedValue(turn),
+      transcribeVoice: vi.fn(),
+    });
+    let backgroundTask: Promise<unknown> | undefined;
+
+    await handle({ dispatch, raw, update, waitUntil(task) { backgroundTask = task; } } as TelegramVerifiedUpdateContext);
+    await backgroundTask;
+
+    expect(handleTaskButtonCallback).not.toHaveBeenCalled();
+    expect(dispatch.mock.calls[0]?.[0].kind).toBe("message");
+    expect(dispatch.mock.calls[0]?.[0].message.text).toBe("Помоги начать дело «Дело»");
   });
 
   function seriesRaw(
@@ -731,6 +803,8 @@ describe("createTelegramDurableIngress", () => {
       acceptMedia: vi.fn().mockResolvedValue(true),
       authorizeVoice: vi.fn(),
       botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
       handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
       leaseMilliseconds: 60_000,
       repository: storage.value,
@@ -801,6 +875,7 @@ describe("createTelegramDurableIngress", () => {
     expect(dispatch.mock.calls[1]?.[0].message.raw.osinara_series).toEqual({ role: "context" });
     expect(dispatch.mock.calls[2]?.[0].message.raw.osinara_series).toEqual({
       addressed: true,
+      earlierUpdateIds: ["2001", "2002"],
       role: "current",
       telegramMessageIds: ["2001", "2002"],
     });
@@ -892,6 +967,8 @@ describe("createTelegramDurableIngress", () => {
       acceptMedia: vi.fn().mockResolvedValue(true),
       authorizeVoice: vi.fn(),
       botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
       handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
       leaseMilliseconds: 300,
       repository: storage.value,
@@ -917,7 +994,7 @@ describe("createTelegramDurableIngress", () => {
     expect(storage.value.renewLease.mock.calls.map((call) => call[0])).not.toContain("5001");
   });
 
-  it("fails the rest of a series when one dispatch throws and keeps the finished part completed", async () => {
+  it("fails only the message being dispatched when a dispatch throws, returns the untouched rest of the series to the queue and keeps the finished part completed", async () => {
     const storage = repository();
     const head = seriesClaim(storage, 3001, "первое");
     const second = seriesClaim(storage, 3002, "второе");
@@ -943,8 +1020,47 @@ describe("createTelegramDurableIngress", () => {
     await expect(backgroundTask).rejects.toThrowError(/AGENT_TEST_DISPATCH_FAILED/u);
 
     expect(storage.value.complete.mock.calls.map((call) => call[0])).toEqual(["3001"]);
-    expect(storage.value.fail.mock.calls.map((call) => call[0])).toEqual(["3002", "3003"]);
+    expect(storage.value.fail.mock.calls.map((call) => call[0])).toEqual(["3002"]);
+    // The third message never reached Eve: it goes back to the queue instead of failing silently (ilkruglov 5d80240e).
+    expect(storage.value.release.mock.calls.map((call) => call[0])).toEqual(["3003"]);
+    expect(storage.value.release.mock.calls[0]![2]).toMatchObject({ code: "AGENT_TELEGRAM_SERIES_RETURNED" });
     expect(dispatch).toHaveBeenCalledTimes(2);
+  });
+
+  it("tells the person in a private chat that the message failed, and nobody else", async () => {
+    const storage = repository();
+    const groupHead = seriesClaim(storage, 3101, "привет");
+    // A private chat: the person is told. The same failure in a group would stay silent.
+    const privateRaw = { ...groupHead.payload, message: { ...groupHead.payload.message, chat: { first_name: "Пух", id: 505, type: "private" } } };
+    const head = { ...groupHead, payload: privateRaw };
+    storage.value.claimNext = vi.fn().mockResolvedValueOnce(head).mockResolvedValueOnce(null);
+    const notifyFailure = vi.fn().mockResolvedValue(undefined);
+    const handle = createTelegramDurableIngress({
+      acceptMedia: vi.fn().mockResolvedValue(true),
+      authorizeVoice: vi.fn(),
+      botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
+      handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
+      leaseMilliseconds: 60_000,
+      notifyFailure,
+      repository: storage.value,
+      requestSessionRotation: vi.fn(),
+      transcribeVoice: vi.fn(),
+    });
+    const update = parseTelegramUpdate(head.payload);
+    if (!update) throw new Error("AGENT_TEST_TELEGRAM_UPDATE_INVALID");
+    let backgroundTask: Promise<unknown> | undefined;
+    await handle({
+      dispatch: vi.fn().mockRejectedValue(new Error("AGENT_TEST_DISPATCH_FAILED: сбой")),
+      raw: head.payload,
+      update,
+      waitUntil(task) { backgroundTask = task; },
+    } as TelegramVerifiedUpdateContext);
+    await expect(backgroundTask).rejects.toThrowError(/AGENT_TEST_DISPATCH_FAILED/u);
+
+    expect(storage.value.fail.mock.calls.map((call) => call[0])).toEqual(["3101"]);
+    expect(notifyFailure).toHaveBeenCalledTimes(1);
   });
 
   it("leaves a message alone while the chat has an unanswered confirmation", async () => {
@@ -992,6 +1108,8 @@ describe("createTelegramDurableIngress", () => {
       acceptMedia,
       authorizeVoice: vi.fn(),
       botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
       handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
       leaseMilliseconds: 60_000,
       repository: storage.value,
@@ -1002,7 +1120,7 @@ describe("createTelegramDurableIngress", () => {
     const response = await handle({ dispatch, raw, update, waitUntil } as TelegramVerifiedUpdateContext);
 
     expect(response.status).toBe(200);
-    expect(acceptMedia).toHaveBeenCalledWith(update.message, "1001", "unsupported_media");
+    expect(acceptMedia).toHaveBeenCalledWith(update.message, "1001", "unsupported_media", false);
     expect(storage.value.enqueue).not.toHaveBeenCalled();
     expect(transcribeVoice).not.toHaveBeenCalled();
     expect(dispatch).not.toHaveBeenCalled();
@@ -1038,6 +1156,8 @@ describe("createTelegramDurableIngress", () => {
       acceptMedia: vi.fn().mockResolvedValue(true),
       authorizeVoice: vi.fn(),
       botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
       handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
       leaseMilliseconds: 60_000,
       repository: storage.value,

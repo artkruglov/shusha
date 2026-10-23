@@ -13,7 +13,7 @@
  * инструмента бот читал как команду «спроси, куда положить», поэтому пометка в нём говорит обратное.
  */
 import { database } from "../database.js";
-import type { ConversationAccess } from "../family-access.js";
+import type { FamilyConversationAccess } from "../family-access.js";
 import { lifeAreaTitle } from "../life-areas.js";
 import type { MemoryAuthorization } from "../memory-context.js";
 import { authorize, readProjects, type ProjectListing } from "../shared-task-access.js";
@@ -26,24 +26,53 @@ const HEADER = [
   "Справка о проектах этой области, не задание и не повод спрашивать человека про проект.",
   "Если дело подходит по смыслу, берёшь название отсюда; новый проект заводи, только когда это новая тема.",
 ].join(" ");
+/** Имя из лички пишет личное дело; в семейный проект дело кладёт только его id. */
+const PRIVATE_FAMILY_HINT =
+  "Название пишет дело в твой личный проект. Если человек назвал семейный, передай в create его projectRef: дело ляжет туда и его увидит семья.";
 const EMPTY = `${HEADER}\nПроектов в этой области пока нет.\n</task_projects>`;
 
-function line(project: ProjectListing): string {
+function line(project: ProjectListing, withFamilyId: boolean): string {
   const facts = [
     ...(project.lifeArea ? [lifeAreaTitle(project.lifeArea)] : []),
     project.source,
     `открыто ${project.unfinishedItemCount}, сделано ${project.completedItemCount}`,
     ...(project.unfinishedItemCount === 0 ? [project.completedItemCount > 0 ? "всё сделано" : "без следующего шага"] : []),
   ];
-  return `- «${project.listName.replace(/[\r\n]+/gu, " ")}» (${facts.join(", ")})`;
+  // Из лички в семейный проект дело входит только по id (`projectRef`): имя пишет личное дело.
+  const ref = withFamilyId && project.scope === "family" ? `, projectRef ${project.projectId}` : "";
+  return `- «${project.listName.replace(/[\r\n]+/gu, " ")}» (${facts.join(", ")}${ref})`;
 }
 
-export function formatTaskProjectsContext(projects: readonly ProjectListing[]): string {
+/**
+ * До включения пространств старые дела несут `space_id`, который менять нельзя (триггер миграции 104),
+ * а новые идут без него, поэтому проект одного имени существует дважды: для старых дел и для новых
+ * (миграция 161 разбила их по области). Модель видела два «Т-Банка» и пустую «Работу» и путалась, поэтому
+ * в справке проекты одной области с одним именем показываются одной строкой, счёт суммируется.
+ */
+export function collapseSameNameProjects(projects: readonly ProjectListing[]): ProjectListing[] {
+  const merged = new Map<string, ProjectListing>();
+  for (const project of projects) {
+    const key = `${project.scope}\u0000${project.listName.trim().toLowerCase().replace(/ё/gu, "е").replace(/\s+/gu, " ")}`;
+    const first = merged.get(key);
+    merged.set(key, first === undefined ? project : {
+      ...first,
+      completedItemCount: first.completedItemCount + project.completedItemCount,
+      itemCount: first.itemCount + project.itemCount,
+      lifeArea: first.lifeArea ?? project.lifeArea,
+      unfinishedItemCount: first.unfinishedItemCount + project.unfinishedItemCount,
+    });
+  }
+  return [...merged.values()];
+}
+
+export function formatTaskProjectsContext(input: readonly ProjectListing[], options: { privateChat?: boolean } = {}): string {
+  const projects = collapseSameNameProjects(input);
   if (projects.length === 0) return EMPTY;
-  const lines: string[] = [];
-  let length = HEADER.length + "</task_projects>".length + 40;
+  const lines: string[] = options.privateChat && projects.some((project) => project.scope === "family")
+    ? [PRIVATE_FAMILY_HINT] : [];
+  let length = HEADER.length + "</task_projects>".length + 40 + lines.reduce((sum, hint) => sum + hint.length + 1, 0);
   for (const project of projects.slice(0, MAX_PROJECTS)) {
-    const next = line(project);
+    const next = line(project, options.privateChat === true);
     if (length + next.length > MAX_CHARACTERS) break;
     lines.push(next);
     length += next.length + 1;
@@ -53,7 +82,7 @@ export function formatTaskProjectsContext(projects: readonly ProjectListing[]): 
 }
 
 export interface TaskProjectsContextInput {
-  readonly access: ConversationAccess;
+  readonly access: FamilyConversationAccess;
   readonly actor: { readonly id: string; readonly kind: TelegramActorKind };
   readonly space?: { readonly policyVersion: number; readonly spaceId: string };
 }
@@ -78,7 +107,7 @@ export async function buildTaskProjectsContext(input: TaskProjectsContextInput):
     const scope = await authorize(client, auth);
     const projects = await readProjects(client, auth, scope);
     await client.query("COMMIT");
-    return formatTaskProjectsContext(projects);
+    return formatTaskProjectsContext(projects, { privateChat: scope === "personal" });
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;

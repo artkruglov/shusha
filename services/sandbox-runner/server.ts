@@ -80,6 +80,23 @@ function requiredPath(url: URL): string {
   return path;
 }
 
+/**
+ * Failures the agent must see by code and Russian message (the model reads them), with the
+ * status that tells a client the request itself was fine.
+ */
+const PUBLIC_FAILURES: Readonly<Record<string, number>> = {
+  AGENT_SANDBOX_DISK_BUDGET_EXCEEDED: 507,
+  AGENT_SANDBOX_DISK_UNMEASURED: 503,
+  AGENT_SANDBOX_RUNNER_CAPACITY_EXHAUSTED: 503,
+};
+
+function publicFailure(error: unknown): { code: string; message: string; status: number } | null {
+  if (!(error instanceof Error)) return null;
+  const match = /^([A-Z_]+): ([\s\S]*)$/u.exec(error.message);
+  const status = match ? PUBLIC_FAILURES[match[1]!] : undefined;
+  return match && status !== undefined ? { code: match[1]!, message: match[2]!, status } : null;
+}
+
 function requestError(error: unknown): boolean {
   return error instanceof Error && /^AGENT_SANDBOX_RUNNER_(?:CONTENT|GOOGLE|JSON|PATH|PROCESS|REQUEST|SCOPE|SESSION)/u
     .test(error.message);
@@ -201,6 +218,11 @@ export function createSandboxRunnerServer(dependencies: ServerDependencies) {
         path: request.url,
       });
       if (response.destroyed) return;
+      const failure = publicFailure(error);
+      if (failure) {
+        sendJson(response, failure.status, { code: failure.code, message: failure.message });
+        return;
+      }
       sendJson(response, invalidRequest ? 400 : 500, {
         code: invalidRequest
           ? "AGENT_SANDBOX_RUNNER_REQUEST_INVALID"

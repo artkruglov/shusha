@@ -5,19 +5,38 @@
  * - `manage_telegram_group.register`: executes after private-owner HITL resume.
  * - A freshly authenticated group callback remains invalid for private-only administration.
  * - Owner-only dispatch can be assigned only to an external trust zone.
+ * - Telegram must confirm the owner administers the chat before the chat is bound to the family;
+ *   the checked Telegram user is the verified session actor, never a tool input.
  */
 import type { ToolContext } from "eve/tools";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { registerGroup } = vi.hoisted(() => ({ registerGroup: vi.fn() }));
+const { registerGroup, requireAdministrator } = vi.hoisted(() => ({
+  registerGroup: vi.fn(),
+  requireAdministrator: vi.fn(),
+}));
 
 vi.mock("./telegram-group-administration-repository.js", () => ({
   telegramGroupAdministrationRepository: { registerGroup, removeRegistration: vi.fn() },
 }));
+vi.mock("./telegram-group-admin-verification.js", () => ({
+  telegramGroupAdminVerifier: { requireAdministrator },
+}));
 
+import { AppError } from "./app-error.js";
 import manageTelegramGroup from "./tools/manage_telegram_group.js";
 
-function context(chatType: "private" | "supergroup"): ToolContext {
+const OWNER_TELEGRAM_USER_ID = "101";
+const abortController = new AbortController();
+
+function context(
+  chatType: "private" | "supergroup",
+  actor: Record<string, unknown> = {
+    telegramActorId: OWNER_TELEGRAM_USER_ID,
+    telegramActorKind: "telegram_user",
+    telegramUserId: OWNER_TELEGRAM_USER_ID,
+  },
+): ToolContext {
   const caller = {
     attributes: {
       familyId: "family-1",
@@ -25,12 +44,14 @@ function context(chatType: "private" | "supergroup"): ToolContext {
       role: "owner",
       telegramChatId: chatType === "private" ? "101" : "-1001234567890",
       telegramChatType: chatType,
+      ...actor,
     },
     authenticator: "telegram",
     principalId: "owner-1",
     principalType: "user" as const,
   };
   return {
+    abortSignal: abortController.signal,
     session: {
       auth: {
         current: caller,
@@ -53,6 +74,65 @@ describe("manage_telegram_group.register", () => {
   beforeEach(() => {
     registerGroup.mockReset();
     registerGroup.mockResolvedValue({ groupId: "group-1" });
+    requireAdministrator.mockReset();
+    requireAdministrator.mockResolvedValue(undefined);
+  });
+
+  it("asks Telegram whether the verified owner administers the chat before persistence", async () => {
+    const order: string[] = [];
+    requireAdministrator.mockImplementation(async () => { order.push("telegram"); });
+    registerGroup.mockImplementation(async () => {
+      order.push("database");
+      return { groupId: "group-1" };
+    });
+
+    await manageTelegramGroup.execute({ action: "register", registration: input }, context("private"));
+
+    expect(requireAdministrator).toHaveBeenCalledWith({
+      signal: abortController.signal,
+      telegramChatId: "-1001000000001",
+      telegramUserId: OWNER_TELEGRAM_USER_ID,
+    });
+    expect(order).toEqual(["telegram", "database"]);
+  });
+
+  it.each([
+    "AGENT_TELEGRAM_GROUP_OWNER_NOT_ADMIN",
+    "AGENT_TELEGRAM_GROUP_ADMIN_CHECK_REJECTED",
+    "AGENT_TELEGRAM_GROUP_ADMIN_CHECK_UNAVAILABLE",
+  ])("does not register the chat when Telegram verification fails with %s", async (code) => {
+    requireAdministrator.mockRejectedValue(new AppError(code, "Группа не зарегистрирована"));
+
+    await expect(manageTelegramGroup.execute(
+      { action: "register", registration: input },
+      context("private"),
+    )).rejects.toMatchObject({ code });
+    expect(registerGroup).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["no Telegram user", {}],
+    ["a bot actor", { telegramActorId: "777", telegramActorKind: "telegram_bot" }],
+    ["a mismatched actor", {
+      telegramActorId: "202",
+      telegramActorKind: "telegram_user",
+      telegramUserId: OWNER_TELEGRAM_USER_ID,
+    }],
+  ])("refuses registration when the session carries %s", async (_label, actor) => {
+    await expect(manageTelegramGroup.execute(
+      { action: "register", registration: input },
+      context("private", actor),
+    )).rejects.toMatchObject({ code: "AGENT_TELEGRAM_GROUP_OWNER_IDENTITY_MISSING" });
+    expect(requireAdministrator).not.toHaveBeenCalled();
+    expect(registerGroup).not.toHaveBeenCalled();
+  });
+
+  it("does not consult Telegram while deciding whether registration needs approval", () => {
+    const approval = manageTelegramGroup.approval as (context: never) => unknown;
+
+    expect(approval({ toolInput: { action: "register", registration: input } } as never))
+      .toBe("user-approval");
+    expect(requireAdministrator).not.toHaveBeenCalled();
   });
 
   it("persists the group after a private owner approval resumes", async () => {
@@ -100,6 +180,7 @@ describe("manage_telegram_group.register", () => {
     )).rejects.toThrowError(
       /AGENT_PRIVATE_CHAT_REQUIRED/,
     );
+    expect(requireAdministrator).not.toHaveBeenCalled();
     expect(registerGroup).not.toHaveBeenCalled();
   });
 

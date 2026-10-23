@@ -11,6 +11,7 @@
  */
 import { z } from "zod";
 import { readTelegramAgentIdentity } from "./lib/telegram-agent-identity.js";
+import { telegramBotUsernames } from "./lib/telegram-bot-usernames.js";
 
 export const AGENT_COMPACTION_THRESHOLD = 0.75;
 // Eve compacts at threshold × context window. A million-token window would let a session grow to
@@ -22,6 +23,9 @@ export const AGENT_MAX_MODEL_STEPS_PER_TURN = 32;
 export const GROQ_TRANSCRIPTION_TIMEOUT_MS = 60_000;
 export const GOOGLE_WORKSPACE_PROFILE_LOCK_HASH_SEED = 2;
 export const GOOGLE_WORKSPACE_COMMAND_TIMEOUT_MS = 60_000;
+// A query at or above this stays in the log with its shape, never its parameters: finding where a
+// turn spent its time used to require switching production statement logging on and waiting.
+export const DATABASE_SLOW_QUERY_MS = 150;
 export const SANDBOX_RUNNER_BASE_URL = "http://sandbox-runner:8080";
 export const SESSION_INACTIVITY_DAYS = 30;
 // A private chat starts a new session after this many quiet hours: memory, tasks and the recent
@@ -30,7 +34,12 @@ export const SESSION_PRIVATE_INACTIVITY_HOURS = 12;
 // The owner hears about a DeepSeek balance below this before the bot loses its model (402).
 export const DEEPSEEK_BALANCE_ALERT_USD = 2;
 export const MODEL_USAGE_RETENTION_DAYS = 30;
+/** Spend of a group without a family must outlive a whole UTC month for its budget (migration 177). */
+export const FAMILYLESS_USAGE_RETENTION_DAYS = 40;
 export const MODEL_USAGE_PURGE_BATCH_SIZE = 1_000;
+// Completed Telegram updates are only data once Telegram can no longer redeliver them (security review, 5 October 2026).
+export const TELEGRAM_INGRESS_RETENTION_DAYS = 30;
+export const TELEGRAM_INGRESS_PURGE_BATCH_SIZE = 500;
 export const SESSION_GROUP_ROTATION_LOCK_HASH_SEED = 3;
 // The local Workflow world replays cumulative filesystem artifacts. Rotate with enough headroom
 // below the observed Eve 240-second replay failure at 118 completed production turns.
@@ -81,6 +90,11 @@ export const TELEGRAM_ATTACHMENT_REFERENCE_LIST_DEFAULT_LIMIT = 50;
 export const TELEGRAM_ATTACHMENT_REFERENCE_LIST_MAX_LIMIT = 50;
 export const TELEGRAM_GROUP_TRUST_LOCK_HASH_SEED = 1;
 export const TELEGRAM_INGRESS_LEASE_MS = 15 * 60 * 1_000;
+// A person often sends several messages in a row (26 September 2026: five private messages in a
+// minute gave five turns). A private chat's head is claimed only after the chat has been quiet this
+// long, so the series behind it is complete; a steady stream waits at most the cap.
+export const TELEGRAM_PRIVATE_BURST_QUIET_MS = 2_000;
+export const TELEGRAM_PRIVATE_BURST_MAX_WAIT_MS = 20_000;
 export const TELEGRAM_MAX_INBOUND_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const TELEGRAM_MAX_ATTACHMENTS_PER_MESSAGE = 1;
 export const TELEGRAM_MAX_OUTBOUND_DOCUMENT_BYTES = 50 * 1024 * 1024;
@@ -90,8 +104,11 @@ export const WORKSPACE_DELETION_LEASE_MS = 15 * 60 * 1_000;
 export const WORKSPACE_TOOL_MAX_TEXT_BYTES = 1024 * 1024;
 export const VISION_MAX_FILE_BYTES = 10_000_000;
 
+const secretTokenSchema = z.string().min(32).max(256).regex(/^[A-Za-z0-9_-]+$/u);
+
 const runtimeEnvironmentSchema = z
   .object({
+    AGENT_INTERNAL_TOKEN: secretTokenSchema,
     DATABASE_URL: z.string().min(1),
     GROQ_API_KEY: z.preprocess(
       (value) => value === "" ? undefined : value,
@@ -101,7 +118,15 @@ const runtimeEnvironmentSchema = z
     MODEL_API_KEY: z.string().regex(/^\S+$/u),
     TELEGRAM_BOT_TOKEN: z.string().min(1),
     TELEGRAM_BOT_USERNAME: z.string().min(1),
-    TELEGRAM_WEBHOOK_SECRET_TOKEN: z.string().min(1),
+    // As long as the invitation signing secret, within what Telegram accepts for secret_token
+    // (1-256 characters of A-Z, a-z, 0-9, `_` and `-`). Telegram holds it, so it guards only the
+    // webhook; the drain route, the approval sweep and the workflow flow route take
+    // AGENT_INTERNAL_TOKEN (port of ilkruglov b640f72b, 3c339144).
+    TELEGRAM_WEBHOOK_SECRET_TOKEN: secretTokenSchema,
+  })
+  .refine((environment) => environment.AGENT_INTERNAL_TOKEN !== environment.TELEGRAM_WEBHOOK_SECRET_TOKEN, {
+    message: "The internal token must differ from the webhook secret",
+    path: ["AGENT_INTERNAL_TOKEN"],
   });
 
 export function requireRuntimeEnvironment() {
@@ -113,5 +138,7 @@ export function requireRuntimeEnvironment() {
       `AGENT_REQUIRED_CONFIG_MISSING: Отсутствуют обязательные настройки: ${fields}`,
     );
   }
+  // A malformed second @username stops the start instead of silently losing mentions by it.
+  telegramBotUsernames(parsed.data.TELEGRAM_BOT_USERNAME);
   return parsed.data;
 }

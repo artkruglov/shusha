@@ -5,10 +5,15 @@ import { readFamilySpaceMode } from "../spaces/family-space-mode.js";
 import { resolveSpaceAccess, type SpaceContext } from "../spaces/space-access.js";
 
 export interface SessionSpacePolicy { spaceId: string; policyVersion: number; title: string }
-interface SelectionInput { familyId: string; groupId: string | null; userId: string | null; spaceContext?: SpaceContext }
+interface SelectionInput { familyId: string | null; groupId: string | null; userId: string | null; spaceContext?: SpaceContext }
 
 export async function resolveSessionSpacePolicy(client: PoolClient, input: SelectionInput): Promise<SessionSpacePolicy | null> {
   const context = input.spaceContext;
+  // A group without a family has no areas at all (migration 175).
+  if (input.familyId === null) {
+    if (context) throw new AppError("AGENT_SESSION_SPACE_CONTEXT_INVALID", "Область разговора не соответствует проверенному отправителю и чату");
+    return null;
+  }
   if (!context) {
     // Пока режим семьи прежний, отсутствие области и есть прежнее поведение. После включения
     // путь без области означает, что его забыли перевести: он обязан упасть громко, а не

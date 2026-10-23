@@ -4,6 +4,7 @@
  * Constructs:
  * - Explicit primary model from the multi-provider registry.
  * - Fail-closed per-turn model step limit and NeuralDeep routing for upstream KV-cache reuse.
+ * - A group without a family names its chat to the transport, which bills the call to its budget.
  * - Context compaction; Eve exposes its native fresh-context child only to root sessions.
  * - Official PostgreSQL Workflow world retained as an external runtime dependency.
  */
@@ -17,6 +18,8 @@ import {
 import { installSecretRedaction } from "./lib/logging/redact-secrets.js";
 import { primaryModel } from "./lib/model-registry.js";
 import { modelProviderConfig } from "./lib/model-provider-config.js";
+import { isDatabaseFamilyId } from "./lib/database-context.js";
+import { familylessGroupFromAuth } from "./lib/familyless-group-auth.js";
 import { resolveSessionModelSelection } from "./lib/neuraldeep-session-routing.js";
 import { resolveTurnModelStepLimitSelection } from "./lib/turn-model-step-limit.js";
 
@@ -61,6 +64,10 @@ export default defineAgent({
           modelContextWindowTokens: primaryModelContextWindowTokens,
           providerId: modelProviderConfig.provider,
           sessionId: ctx.session.id,
+          usageChatId: familylessGroupFromAuth(ctx.session.auth.current?.attributes)?.telegramChatId ?? null,
+          // A family turn pays from the family's monthly budget (migration 181); only the verified session's family.
+          usageFamilyId: isDatabaseFamilyId(ctx.session.auth.current?.attributes?.familyId)
+            ? ctx.session.auth.current!.attributes!.familyId as string : null,
         });
       },
     },

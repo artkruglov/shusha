@@ -5,6 +5,7 @@ vi.mock('./telegram-current-membership.js',()=>({isCurrentTelegramMember:current
 import { reminderRepository } from "./reminders/reminder-repository.js";
 import { reminderDispatchRepository } from "./reminders/reminder-dispatch-repository.js";
 import { randomUUID } from "node:crypto";
+import { projectRepository as projects } from "./projects/project-repository.js";
 import { database, closeDatabase } from "./database.js";
 import type { MemoryAuthorization } from "./memory-context.js";
 import { sharedTaskRepository as tasks } from "./shared-task-repository.js";
@@ -159,6 +160,7 @@ suite('shared task repository',()=>{
     await expect(make(group,'Wrong space',ref)).rejects.toThrow(/AGENT_TASK_ACCESS_DENIED/);
   });
   it('keeps ideas and rituals free of obligations while retaining separate personal plans',async()=>{
+    await projects.execute(familyGroup,{action:'create',title:'For us'},'for-us');
     const idea=(await tasks.execute(familyGroup,{action:'create',title:'Learn pottery',kind:'idea',listName:'For us'},'idea')).task!;
     expect(idea.commitment).toBe(false);
     await expect(tasks.execute(familyGroup,{action:'complete',id:idea.id},'not-an-obligation')).rejects.toThrow();
@@ -241,6 +243,8 @@ suite('shared task repository',()=>{
   it('names every list of the area and keeps same-named lists of different chats apart',async()=>{
     // Имена списков собирались с текущей страницы выдачи, поэтому при непустом курсоре часть
     // списков исчезала: страница это про дела, а не про списки.
+    for (const title of ['Ремонт','Покупки']) await projects.execute(familyGroup,{action:'create',title},randomUUID());
+    await projects.execute(group,{action:'create',title:'Покупки'},randomUUID());
     for (let index=0; index<101; index+=1) {
       await tasks.execute(familyGroup,{action:'create',title:`Дело ${index}`,listName:'Ремонт'},randomUUID());
     }
@@ -294,6 +298,17 @@ suite('shared task repository',()=>{
     expect([overdue.task!.id,due.task!.id].every(id=>day_.tasks?.some(task=>task.id===id))).toBe(true);
   });
 
+  it('lets the author close or cancel an unowned family task from the private chat where it waits',async()=>{
+    const first=(await tasks.execute(familyGroup,{action:'create',title:'Кто заберёт посылку',unassigned:true},randomUUID())).task!;
+    const second=(await tasks.execute(familyGroup,{action:'create',title:'Кто вызовет мастера',unassigned:true},randomUUID())).task!;
+    expect((await tasks.execute(owner,{action:'list',view:'waiting'},'read')).tasks?.map(t=>t.id)).toEqual(expect.arrayContaining([first.id,second.id]));
+    expect((await tasks.execute(owner,{action:'get',id:first.id},'read')).task).toMatchObject({status:'open'});
+    expect((await tasks.execute(owner,{action:'complete',id:first.id},randomUUID())).task).toMatchObject({status:'completed',assignee:'Owner'});
+    expect((await tasks.execute(owner,{action:'cancel',id:second.id},randomUUID())).task).toMatchObject({status:'cancelled'});
+    // Не автор из своей лички чужое ничьё дело не видит по id.
+    const third=(await tasks.execute(familyGroup,{action:'create',title:'Кто купит лампу',unassigned:true},randomUUID())).task!;
+    await expect(tasks.execute(member,{action:'cancel',id:third.id},randomUUID())).rejects.toThrow(/AGENT_TASK_ACCESS_DENIED/);
+  });
   it('separates what I promised from what I am waiting for',async()=>{
     const recipients=(await tasks.execute(familyGroup,{action:'participants'},'read')).participants!;
     const toMember=await make(familyGroup,'Купить билеты',recipients.find(p=>p.name==='Member')!.participantRef);
@@ -527,7 +542,7 @@ suite('shared task repository',()=>{
     const task=await make(group,'Group only');
     currentMember.mockResolvedValue(false);
     const result=await tasks.execute(owner,{action:'list'},'read');
-    expect(result.tasks).toEqual([]); expect(result.incomplete).toBe(true);
+    expect(result.tasks).toEqual([]); expect(result.hidden).toBe(1);
     await expect(tasks.execute(owner,{action:'update',id:task.id,version:task.version,title:'Changed'},'change')).rejects.toThrow();
   });
   it('paginates large backlogs without duplicates',async()=>{

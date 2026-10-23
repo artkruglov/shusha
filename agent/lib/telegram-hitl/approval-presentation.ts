@@ -29,7 +29,13 @@ import {
   localizeTelegramInputRequest,
   type TelegramInputRequest,
 } from "../telegram-interface.js";
+import { browserApprovalFacts } from "../browser/browser-approval.js";
+import { parseBrowserAction } from "../browser/browser-command.js";
+import { browserEnteredData } from "../browser/browser-gate.js";
+import { sandboxBrowserPageReader } from "../browser/browser-page-reader.js";
+import { sandboxSessionId } from "../sessions/session-context.js";
 import {
+  BROWSER_CLICK_CONSEQUENCE,
   GOOGLE_WORKSPACE_CONSEQUENCE,
   SPACE_ROLE_CONSEQUENCE,
   SCHEDULE_CONSEQUENCES,
@@ -42,6 +48,8 @@ import {
 } from "./approval-message.js";
 
 interface ApprovalPresentationDependencies {
+  /** Facts of a gated browser click, read from the live page of the chat's browser. */
+  findBrowserFacts?(input: Record<string, unknown>, ctx: Pick<SessionContext, "session">): Promise<Array<[string, string]>>;
   findSpaceMembers?(areaRef:string,ctx:Pick<SessionContext,"session">):Promise<SpaceRoleSnapshot>;
   findGmailMessage(
     messageId: string,
@@ -272,6 +280,17 @@ export function createTelegramApprovalPresenter(
         prompt: gmailMessagePrompt(input.action, message),
       };
     }
+    if (request.display === "confirmation" && request.action.toolName === "browser" && dependencies.findBrowserFacts) {
+      const facts = await dependencies.findBrowserFacts(request.action.input, ctx);
+      return {
+        ...localized,
+        prompt: buildApprovalMessage({
+          actionLabel: "нажатие в браузере",
+          consequence: BROWSER_CLICK_CONSEQUENCE,
+          facts: facts.flatMap(([label, value]) => approvalFact(label, value)),
+        }),
+      };
+    }
     if (
       request.display === "confirmation" &&
       request.action.toolName === "execute_google_workspace"
@@ -322,6 +341,14 @@ export function createTelegramApprovalPresenter(
 }
 
 export const presentTelegramApproval = createTelegramApprovalPresenter({
+  findBrowserFacts: async (input, ctx) => {
+    const sessionId = sandboxSessionId(ctx);
+    return await browserApprovalFacts({
+      action: parseBrowserAction(input),
+      entered: browserEnteredData.has(sessionId),
+      page: sandboxBrowserPageReader(sessionId),
+    });
+  },
   findSpaceMembers:(areaRef,ctx)=>spaceRoleRepository.members(requireMemoryAuthorization(ctx),areaRef),
   findGmailMessage: loadGmailMessageApproval,
   findSchedule: (auth, id) => agentScheduleRepository.findById(auth, id),

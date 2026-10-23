@@ -22,6 +22,17 @@ export interface DeepSeekModelDescriptor {
 
 export const DEEPSEEK_MODELS: readonly DeepSeekModelDescriptor[] = [
   {
+    // V4.1 Flash (DeepSeek-V4.1-Flash-1017 since 17 October 2026), natively multimodal. Since
+    // 10 September the v4 flash and vision-exp names below are routed to it for compatibility.
+    concurrency: 2_500,
+    contextWindowTokens: 1_000_000,
+    id: "deepseek-flash",
+    maxOutputTokens: 384_000,
+    supportsImageInput: true,
+    supportsThinking: true,
+    supportsWebSearch: true,
+  },
+  {
     concurrency: 2_500,
     contextWindowTokens: 1_000_000,
     id: "deepseek-v4-flash",

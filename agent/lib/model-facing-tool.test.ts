@@ -11,7 +11,8 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { AppError } from "./app-error.js";
-import { wrapModelFacingTool, wrapModelFacingToolMap } from "./model-facing-tool.js";
+import { currentDatabaseContext } from "./database-context.js";
+import { jsonSafeToolOutput, wrapModelFacingTool, wrapModelFacingToolMap } from "./model-facing-tool.js";
 import {
   PROGRESS_NOTICE_SENT_NOTE,
   progressNoticeKey,
@@ -35,6 +36,21 @@ describe("model-facing tool boundary", () => {
     // Generic call discipline lives in the permanent instructions, not in every descriptor.
     expect(wrapped.description).toBe(source.description);
     expect(wrapped.inputSchema).toBe(source.inputSchema);
+  });
+
+  // Eve rejects anything but plain JSON; pg rows carry Date objects for timestamp columns.
+  it("hands Eve plain JSON: dates and bigints inside results become strings", async () => {
+    const created = new Date("2026-09-29T19:43:27.379Z");
+    const wrapped = wrapModelFacingTool("test_tool", tool(() => ({ id: "c1", created_at: created, runs: [{ finished_at: created, count: 3n }], none: null })));
+    await expect(wrapped.execute({}, {} as never)).resolves.toEqual({
+      created_at: "2026-09-29T19:43:27.379Z", id: "c1", none: null, runs: [{ count: "3", finished_at: "2026-09-29T19:43:27.379Z" }],
+    });
+    const bytes = new Uint8Array([1, 2, 3]);
+    expect((jsonSafeToolOutput({ bytes }) as { bytes: unknown }).bytes).toBe(bytes);
+    expect(jsonSafeToolOutput(new Date(Number.NaN))).toBeNull();
+    const cyclic: Record<string, unknown> = { a: 1 };
+    cyclic.self = cyclic;
+    expect(() => jsonSafeToolOutput(cyclic)).not.toThrow();
   });
 
   it("tells the model when its pre-tool text already reached the person", async () => {
@@ -78,6 +94,38 @@ describe("model-facing tool boundary", () => {
       contract: { code: "AGENT_TOOL_DEPENDENCY_FAILED", retryable: false },
     });
     await expect(surface.raw!.execute({}, {} as never)).rejects.not.toThrow(/secret/u);
+  });
+
+  // A verified session without a family must not fall back to the system scope: under RLS that
+  // scope sees every family.
+  it("refuses a verified session without a family instead of running in the system scope", async () => {
+    let ran = false;
+    const wrapped = wrapModelFacingTool("test_tool", tool(() => {
+      ran = true;
+      return { ok: true };
+    }));
+    const familyless = { session: { auth: { current: { attributes: { groupId: "g1", role: "external" } } } } } as never;
+    await expect(wrapped.execute({}, familyless)).rejects.toMatchObject({
+      contract: { code: "AGENT_DATABASE_SCOPE_MISSING" },
+    });
+    for (const familyId of [null, "", 42]) {
+      const ctx = { session: { auth: { current: { attributes: { familyId } } } } } as never;
+      await expect(wrapped.execute({}, ctx)).rejects.toMatchObject({
+        contract: { code: "AGENT_DATABASE_SCOPE_MISSING" },
+      });
+    }
+    expect(ran).toBe(false);
+  });
+
+  // A group without a family (migration 175) carries no family attribute and runs in its own scope.
+  it("runs a tool of a group without a family in that group's database scope", async () => {
+    const groupId = "6f1c2f9e-3b1a-4c55-9d8e-0a1b2c3d4e5f";
+    const wrapped = wrapModelFacingTool("test_tool", tool(() => currentDatabaseContext()));
+    const ctx = { session: { auth: { current: { attributes: { groupId, groupType: "external", role: "external", telegramChatId: "-100700" } } } } } as never;
+    await expect(wrapped.execute({}, ctx)).resolves.toEqual({ groupId, kind: "group" });
+    // A family group's turn that lost its family is still refused, not moved into a group scope.
+    const lost = { session: { auth: { current: { attributes: { familyId: null, groupId, groupType: "external" } } } } } as never;
+    await expect(wrapped.execute({}, lost)).rejects.toMatchObject({ contract: { code: "AGENT_DATABASE_SCOPE_MISSING" } });
   });
 });
 

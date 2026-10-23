@@ -37,6 +37,9 @@ export function telegramWorkspaceAuthorization(
   if (message.chat.type === "channel") {
     throw new Error("AGENT_WORKSPACE_CONTEXT_INVALID: Telegram channels cannot own workspaces");
   }
+  if (access.access.familyId === null) {
+    throw new Error("AGENT_WORKSPACE_CONTEXT_INVALID: У группы без семьи нет рабочего каталога");
+  }
   return {
     familyId: access.access.familyId,
     groupId: access.access.groupId,
@@ -87,7 +90,7 @@ export function telegramProactiveDeliveryAuthorization(
   message: TelegramMessage,
 ): ProactiveDeliveryAuthorization | null {
   const scope = telegramSessionScope(access);
-  if (scope.scope === "group") return null;
+  if (scope.scope === "group" || access.access.familyId === null) return null;
   return {
     familyId: access.access.familyId,
     groupId: scope.groupId,

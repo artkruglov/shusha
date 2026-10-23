@@ -31,7 +31,7 @@ interface AddressPatterns {
   readonly leadingMention: RegExp;
 }
 
-function addressPatterns(identity: TelegramAgentIdentity): AddressPatterns {
+function addressPatterns(identity: Pick<TelegramAgentIdentity, "aliases" | "name">): AddressPatterns {
   const nominative = escapeForPattern(identity.name);
   // Ник бота в Telegram латиницей и обычно с суффиксом («@shusha_bot»), поэтому упоминание ловится
   // по основам (имя и латинские алиасы без последней буквы), а не по самому имени.
@@ -63,7 +63,7 @@ const MARKDOWN_LINE_PREFIX_PATTERN = /^[ \t]*(?:#{1,6}|>)[ \t]+/gmu;
 
 export function prepareMemoryQuery(
   query: string,
-  identity: TelegramAgentIdentity = readTelegramAgentIdentity(),
+  identity: Pick<TelegramAgentIdentity, "aliases" | "name"> = readTelegramAgentIdentity(),
 ): string {
   const patterns = addressPatterns(identity);
   const prepared = query

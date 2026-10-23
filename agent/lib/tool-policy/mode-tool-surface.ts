@@ -20,6 +20,7 @@ import { AppError } from "../app-error.js";
 import { IMAGE_GENERATION_AVAILABLE } from "../image-generation/image-generation-availability.js";
 import { EXTERNAL_IMAGE_GENERATION_TOOL_PRESENTATION } from "../image-generation/image-generation-tool-presentation.js";
 import { wrapModelFacingToolMap } from "../model-facing-tool.js";
+import { withTurnInterjectionSurface } from "../turn-interjection/turn-interjection-surface.js";
 import { authorizeAgentScheduleDelivery } from "../agent-schedules/agent-schedule-delivery-authorization.js";
 import { scheduledDeliveryMetadata } from "../agent-schedules/scheduled-session.js";
 import { externalGroupLoadSkillTool } from "../group-skills/group-load-skill-tool.js";
@@ -83,6 +84,8 @@ export type ModeToolSurfaceInput =
   | {
       capabilities: ReadonlySet<ExternalGroupToolName>;
       environment: "external";
+      /** A group without a family (migration 175): no workspace, skills or application core. */
+      familyless?: boolean;
       includeApplicationCore?: boolean;
       scheduledHistory?: boolean;
       scheduledRun?: boolean;
@@ -299,18 +302,25 @@ function buildExternalToolSurface(
   includeApplicationCore: boolean,
   scheduledHistory: boolean,
   scheduledRun: boolean,
+  familyless: boolean,
 ): ToolMap {
   const imageGenerationAllowed = IMAGE_GENERATION_AVAILABLE &&
     !scheduledRun && allowed.has("generate_image");
   const videoGenerationAllowed=VIDEO_GENERATION_AVAILABLE&&!scheduledRun&&allowed.has('generate_video');
-  const surface: Record<string, AnyToolDefinition> = {
-    ...EXTERNAL_GROUP_FILE_TOOLS,
-    // The wrapper is fail-closed per skill name (imagegen, analyst skills, granted authored
-    // skills are each re-authorized live), so the descriptor itself grants nothing. Gating it on
-    // generate_image alone left the analyst skills unreachable without an image grant.
-    load_skill: scheduledRun ? deniedTool("load_skill") : externalGroupLoadSkillTool,
-  };
-  if (includeApplicationCore) {
+  // A group without a family has no workspace and no skills; Eve's own file built-ins stay denied.
+  const surface: Record<string, AnyToolDefinition> = familyless
+    ? {
+      ...Object.fromEntries(Object.keys(EXTERNAL_GROUP_FILE_TOOLS).map((name) => [name, deniedTool(name)])),
+      load_skill: deniedTool("load_skill"),
+    }
+    : {
+      ...EXTERNAL_GROUP_FILE_TOOLS,
+      // The wrapper is fail-closed per skill name (imagegen, analyst skills, granted authored
+      // skills are each re-authorized live), so the descriptor itself grants nothing. Gating it on
+      // generate_image alone left the analyst skills unreachable without an image grant.
+      load_skill: scheduledRun ? deniedTool("load_skill") : externalGroupLoadSkillTool,
+    };
+  if (includeApplicationCore && !familyless) {
     surface.read_profile_view = readProfileView as unknown as AnyToolDefinition;
     if (!scheduledRun) {
       surface.manage_behavior_preference = manageBehaviorPreference as unknown as AnyToolDefinition;
@@ -372,7 +382,7 @@ function allowlistKey(allowed: ReadonlySet<ExternalGroupToolName>): string {
   return [...allowed].sort().join("\0");
 }
 
-const TRUSTED_SURFACES: Readonly<Record<"family" | "private", ToolMap>> = {
+const TRUSTED_APPLICATION_SURFACES: Readonly<Record<"family" | "private", ToolMap>> = {
   family: wrapModelFacingToolMap({
     ...TRUSTED_MODE_TOOLS,
     ...FAMILY_ONLY_TOOLS,
@@ -381,6 +391,12 @@ const TRUSTED_SURFACES: Readonly<Record<"family" | "private", ToolMap>> = {
     ...TRUSTED_MODE_TOOLS,
     ...PRIVATE_ONLY_TOOLS,
   }),
+};
+
+// An interactive turn also receives, with each tool result, the messages its author sent meanwhile.
+const TRUSTED_SURFACES: Readonly<Record<"family" | "private", ToolMap>> = {
+  family: withTurnInterjectionSurface(TRUSTED_APPLICATION_SURFACES.family),
+  private: withTurnInterjectionSurface(TRUSTED_APPLICATION_SURFACES.private),
 };
 
 /**
@@ -393,6 +409,8 @@ const TRUSTED_SURFACES: Readonly<Record<"family" | "private", ToolMap>> = {
  * Чтение остаётся: фоновому обзору оно и нужно.
  */
 const BACKGROUND_DENIED_TOOLS = [
+  // The logged-in browser can pay, order and send forms; that waits for a person's «да».
+  "browser",
   "generate_video",
   "sleep",
   "manage_joint_decision",
@@ -429,7 +447,7 @@ function backgroundSurface(surface: ToolMap): ToolMap {
 }
 
 const TRUSTED_SCHEDULED_SURFACES: Readonly<Record<"family" | "private", ToolMap>> = Object.fromEntries(
-  Object.entries(TRUSTED_SURFACES).map(([environment, surface]) => [
+  Object.entries(TRUSTED_APPLICATION_SURFACES).map(([environment, surface]) => [
     environment,
     backgroundSurface(surface),
   ]),
@@ -449,9 +467,11 @@ export function buildModeToolSurface(input: ModeToolSurfaceInput): ToolMap {
     ? new Set<ExternalGroupToolName>()
     : input.capabilities;
   const includeApplicationCore = input.includeApplicationCore !== false;
+  const familyless = input.familyless === true;
   const scheduledHistory = input.scheduledHistory === true;
   const scheduledRun = input.scheduledRun === true || scheduledHistory;
   const key = [
+    familyless ? "familyless" : "family",
     includeApplicationCore ? "core" : "failed",
     scheduledHistory ? "history" : "ordinary",
     scheduledRun ? "scheduled" : "interactive",
@@ -459,7 +479,7 @@ export function buildModeToolSurface(input: ModeToolSurfaceInput): ToolMap {
   ].join("|");
   const cached = EXTERNAL_SURFACES.get(key);
   if (cached) return cached;
-  const surface = buildExternalToolSurface(allowed, includeApplicationCore, scheduledHistory, scheduledRun);
+  const surface = buildExternalToolSurface(allowed, includeApplicationCore, scheduledHistory, scheduledRun, familyless);
   EXTERNAL_SURFACES.set(key, surface);
   return surface;
 }

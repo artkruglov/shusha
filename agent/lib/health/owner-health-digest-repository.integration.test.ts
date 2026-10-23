@@ -66,13 +66,24 @@ describeWithDatabase("ownerHealthDigestRepository", () => {
     expect(resolved.proactiveFailures).toEqual({ reminders: 0, schedules: 0 });
   });
 
+  it("sends the installation-wide digest only to the owner of the earliest family", async () => {
+    const first = await createMemoryFamilyFixture(`operator-${Date.now()}`);
+    const second = await createMemoryFamilyFixture(`friend-${Date.now()}`);
+    await database().query("UPDATE families SET created_at = created_at - interval '10 years' WHERE id = $1", [first.familyId]);
+
+    const recipients = await ownerHealthDigestRepository.recipients();
+
+    expect(recipients.map((recipient) => recipient.familyId)).toEqual([first.familyId]);
+    expect(recipients.map((recipient) => recipient.familyId)).not.toContain(second.familyId);
+  });
+
   it("reports the family's rotations, memory and stuck lanes, and claims the day once", async () => {
     const suffix = `health-${Date.now()}`;
     const family = await createMemoryFamilyFixture(suffix);
     const now = new Date();
     const windowStart = new Date(now.getTime() - 60 * 60 * 1_000);
 
-    const recipients = await ownerHealthDigestRepository.recipients();
+    const recipients = await ownerHealthDigestRepository.recipients({ familyId: family.familyId });
     // Настройки читаются вместе с адресатом: без них диспетчер не знает, спит ли он сейчас.
     expect(recipients).toContainEqual({ familyId: family.familyId, ownerTelegramUserId: `owner-${suffix}`,
       quietEnd: null, quietStart: null, timezone: "UTC" });

@@ -4,7 +4,13 @@ import type { AddressInfo } from "node:net";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createWorkflowExecutionFence, createWorkflowHttpClient, WORKFLOW_HTTP_TIMEOUT_MS } from "./workflow-transport.js";
+import {
+  createWorkflowExecutionFence,
+  createWorkflowHttpClient,
+  WORKFLOW_HTTP_TIMEOUT_MS,
+  WORKFLOW_INTERNAL_TOKEN_HEADER,
+  withWorkflowInternalToken,
+} from "./workflow-transport.js";
 
 const meta = (messageId: string) => ({ messageId, queueName: "__wkf_workflow_test", attempt: 1 }) as never;
 
@@ -143,4 +149,36 @@ describe("workflow HTTP client", () => {
       log.mockRestore();
     }
   }, 15_000);
+});
+
+describe("workflow flow route token", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("refuses a flow request without the internal token before the official handler reads it", async () => {
+    vi.stubEnv("AGENT_INTERNAL_TOKEN", "agent-internal-test-token-0123456789abcdef");
+    const official = vi.fn(async () => new Response("ok"));
+    const handler = withWorkflowInternalToken(official);
+
+    for (const headers of [{}, { [WORKFLOW_INTERNAL_TOKEN_HEADER]: "wrong" }] as Record<string, string>[]) {
+      const response = await handler(new Request("http://agent/.well-known/workflow/v1/flow", { body: "{}", headers, method: "POST" }));
+      expect(response.status).toBe(401);
+    }
+    expect(official).not.toHaveBeenCalled();
+
+    const accepted = await handler(new Request("http://agent/.well-known/workflow/v1/flow", {
+      body: "{}",
+      headers: { [WORKFLOW_INTERNAL_TOKEN_HEADER]: "agent-internal-test-token-0123456789abcdef" },
+      method: "POST",
+    }));
+    expect(await accepted.text()).toBe("ok");
+  });
+
+  it("fails closed when the agent has no internal token", async () => {
+    vi.stubEnv("AGENT_INTERNAL_TOKEN", "");
+    const handler = withWorkflowInternalToken(async () => new Response("ok"));
+    await expect(handler(new Request("http://agent/flow", { body: "{}", method: "POST" })))
+      .rejects.toThrow("AGENT_INTERNAL_TOKEN_MISSING");
+  });
 });

@@ -40,7 +40,8 @@ function placeOf(task: FiledTask): string[] {
   if (task.kind === "ritual") return ["традиция"];
   const where = [...(task.lifeArea ? [lifeAreaTitle(task.lifeArea)] : []),
     ...(task.listName ? [`список «${task.listName}»`] : [])];
-  return where.length === 0 ? ["пока без списка"] : [where.join(", ")];
+  // «Пока без списка» читалось как жаргон (ревью 21 октября 2026): без места запись о месте молчит.
+  return where.length === 0 ? [] : [where.join(", ")];
 }
 
 function whoOf(task: FiledTask): string[] {
@@ -48,8 +49,8 @@ function whoOf(task: FiledTask): string[] {
   // Запись без исполнителя или без согласия ничего не обещает: строка называет это одним словом, а
   // что делать дальше, одной общей строкой под списком (`describeFiling`), иначе пакет из семи ничьих
   // дел повторял бы одну фразу семь раз. Имя не склоняется: ошибка окончания режет глаз.
-  if (task.status === "open") return ["ничьё"];
-  if (task.status === "proposed") return [task.assignee ? `ждёт согласия: ${task.assignee}` : "ждёт согласия"];
+  if (task.status === "open") return ["никто не взял"];
+  if (task.status === "proposed") return [task.assignee ? `ждёт ответа: ${task.assignee}` : "ждёт ответа"];
   return task.assignee ? [`исполнитель ${task.assignee}`] : [];
 }
 
@@ -66,13 +67,8 @@ export function describeFiling(tasks: readonly FiledTask[], timezone: string): {
   // прямо и один раз, понятно обеим сторонам (прод 1 октября 2026: 19 ничьих дел висели молча).
   const commitments = tasks.filter((task) => task.kind === "task" && task.scope !== "personal");
   const unowned = commitments.some((task) => task.status === "open");
-  const waiting = [...new Set(commitments.filter((task) => task.status === "proposed").map((task) => task.assignee ?? ""))]
-    .filter((name) => name !== "");
-  const caveats = [
-    ...(unowned ? ["Ничьи дела никто не взял: скажи «беру» или назови, кому."] : []),
-    ...(commitments.some((task) => task.status === "proposed")
-      ? [`Ждут согласия${waiting.length > 0 ? `: ${waiting.join(", ")}` : ""}. Пока ответа нет, дело не назначено.`] : []),
-  ];
+  // Просьба называется в строке один раз («ждёт ответа: Юля»): вторая строка «Ждут согласия: Юля» повторяла её.
+  const caveats = unowned ? ["Ничьи дела никто не взял: скажи «беру» или назови, кому."] : [];
   return { filed: [...shown, ...(more > 0 ? [`…и ещё ${more}`] : []), ...caveats].join("\n") };
 }
 

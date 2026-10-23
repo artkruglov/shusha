@@ -78,8 +78,10 @@ const nativeLoadSkill = loadSkill as AnyToolDefinition;
 export const externalGroupLoadSkillTool = createExternalGroupLoadSkillTool({
   authorizeAuthoredSkill: async (ctx, skill) => {
     const identity = resolveExternalGroupPolicyIdentity(ctx.session.auth);
-    if (!identity) throw forbidden();
-    const markdown = await authoredSkillGrantRepository.grantedMarkdown({ ...identity, name: skill });
+    if (!identity || identity.familyId === null) throw forbidden();
+    const markdown = await authoredSkillGrantRepository.grantedMarkdown({
+      familyId: identity.familyId, groupId: identity.groupId, name: skill,
+    });
     if (markdown === null) throw forbidden();
     const allowed = await loadCurrentExternalGroupCapabilities(identity);
     if (externalGroupMissingTools(markdown, allowed).length > 0) throw forbidden();

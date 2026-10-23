@@ -9,6 +9,7 @@ import { defineSchedule } from "eve/schedules";
 
 import { dispatchOwnerBalanceAlerts } from "../lib/health/owner-balance-alert.js";
 import { dispatchOwnerHealthDigests } from "../lib/health/owner-health-digest.js";
+import { dispatchIngressStallAlerts } from "../lib/telegram-ingress-stall.js";
 
 export default defineSchedule({
   cron: "*/10 * * * *",
@@ -23,6 +24,13 @@ export default defineSchedule({
     waitUntil(dispatchOwnerBalanceAlerts().catch((error: unknown) => {
       console.error(JSON.stringify({
         code: "AGENT_OWNER_BALANCE_ALERT_SCHEDULE_FAILED",
+        errorMessage: error instanceof Error ? error.message : String(error),
+      }));
+      throw error;
+    }));
+    waitUntil(dispatchIngressStallAlerts().catch((error: unknown) => {
+      console.error(JSON.stringify({
+        code: "AGENT_TELEGRAM_INGRESS_STALL_SCHEDULE_FAILED",
         errorMessage: error instanceof Error ? error.message : String(error),
       }));
       throw error;

@@ -15,6 +15,7 @@
 import { defineDynamic } from "eve/tools";
 
 import { resolveConversationEnvironment } from "../lib/conversation-environment.js";
+import { familylessGroupFromAuth } from "../lib/familyless-group-auth.js";
 import { scheduledGroupHistoryAccess } from "../lib/agent-schedules/scheduled-group-history-context.js";
 import { isScheduledSession } from "../lib/agent-schedules/scheduled-session.js";
 import { loadCurrentExternalGroupCapabilities } from "../lib/tool-policy/external-group-live-policy.js";
@@ -57,6 +58,8 @@ export default defineDynamic({
         }
       }
       const auth = ctx.session.auth;
+      // Every external fallback below keeps a group without a family off workspace files and skills.
+      const familyless = familylessGroupFromAuth(auth.current?.attributes) !== null;
       const buildSurface = ctx.channel.kind === "subagent"
         ? buildSubagentToolSurface
         : buildModeToolSurface;
@@ -73,6 +76,7 @@ export default defineDynamic({
         return buildSurface({
           capabilities: new Set(),
           environment: "external",
+          familyless,
           includeApplicationCore: false,
         });
       }
@@ -86,6 +90,7 @@ export default defineDynamic({
         return buildSurface({
           capabilities: new Set(),
           environment: "external",
+          familyless,
           includeApplicationCore: false,
         });
       }
@@ -96,6 +101,7 @@ export default defineDynamic({
         return buildSurface({
           capabilities: new Set(),
           environment: "external",
+          familyless,
           includeApplicationCore: false,
         });
       }
@@ -120,6 +126,7 @@ export default defineDynamic({
       return buildSurface({
         capabilities: new Set([...policy.allowed].filter((name) => current.has(name))),
         environment: "external",
+        familyless,
         includeApplicationCore,
         scheduledHistory: includeApplicationCore && scheduledGroupHistoryAccess(auth) !== null,
         scheduledRun: isScheduledSession(ctx),

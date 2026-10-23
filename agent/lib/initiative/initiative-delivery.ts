@@ -2,7 +2,8 @@
  * Сообщение, начатое ботом, попадает в журнал доставок личного чата.
  *
  * Экспорт:
- * - `recordInitiativeDelivery`: запись отправленного обзора, недельного обзора или вопроса коуча.
+ * - `recordInitiativeDelivery`: запись отправленного обзора, недельного обзора, вопроса коуча, «что мешает»,
+ *   совета о возможности или итога дня.
  *
  * Без этой записи ответ человека приходит в ход, который не видел вопроса: на «первое сделала»
  * после утреннего обзора бот переспрашивал, что именно. Журнал доставок уже показывает следующему
@@ -11,7 +12,9 @@
 import { proactiveDeliveryRepository } from "../proactive-deliveries/proactive-delivery-repository.js";
 
 export interface InitiativeDelivery {
-  readonly sourceKind: "coach" | "daily_overview" | "partner_alert" | "weekly_review";
+  readonly sourceKind:
+    | "coach" | "daily_overview" | "evening_reflection" | "feature_tip" | "feedback_ask" | "partner_alert" | "stale_task"
+    | "weekly_review";
   readonly familyId: string;
   readonly userId: string;
   readonly telegramUserId: string;
@@ -23,8 +26,9 @@ export interface InitiativeDelivery {
 }
 
 const TITLES = {
-  coach: "Вопрос коуча", daily_overview: "Утренний обзор",
-  partner_alert: "Ждёт твоего ответа", weekly_review: "Обзор недели",
+  coach: "Вопрос коуча", daily_overview: "Утренний обзор", evening_reflection: "Итог дня", feature_tip: "Совет: что я умею",
+  feedback_ask: "Вопрос разработчика",
+  partner_alert: "Ждёт твоего ответа", stale_task: "Давнее дело", weekly_review: "Обзор недели",
 } as const;
 
 export async function recordInitiativeDelivery(delivery: InitiativeDelivery): Promise<void> {

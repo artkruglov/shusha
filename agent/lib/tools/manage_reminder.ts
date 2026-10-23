@@ -58,7 +58,7 @@ const manageReminderSchema = z.object({
   firstRunAt: z.string().optional(),
   id: z.string().optional(),
   recurrence: z.union([recurrenceSchema, z.null()]).optional(),
-  scope: z.string().optional(),
+  scope: z.string().nullable().optional(),
   timezone: z.string().optional(),
 }).strict();
 
@@ -117,7 +117,8 @@ function requireCreateInput(input: Record<string, unknown>) {
     recurrence: requireReminderRecurrence(input.recurrence),
     // Область по умолчанию задаёт чат: в личном чате напоминание личное, в семейной группе
     // семейное. Модель забывала поле, и создание падало на валидации (бэклог 22 сентября 2026).
-    scope: input.scope === undefined
+    // `null` и пустая строка значат то же, что отсутствие: модель шлёт их вместо пропуска поля (бэклог 30 сентября 2026).
+    scope: input.scope === undefined || input.scope === null || input.scope === ""
       ? undefined
       : requiredEnum(input, "scope", SCOPES, INPUT_ERROR_CODE) as ReminderScope,
     timezone: requiredString(input, "timezone", INPUT_ERROR_CODE, "Europe/Moscow", { maxLength: 100 }),

@@ -17,7 +17,7 @@ import type { TimelineRecordResult } from "./telegram-group-journal-repository.j
 export async function bindTelegramConversationTimeline(input: {
   conversations: Pick<typeof conversationRepository, "getByChatId" | "getByGroupId">;
   existingGroupTimeline: TimelineRecordResult | null;
-  familyId: string;
+  familyId: string | null;
   groupId: string | null;
   message: TelegramMessage;
   timeline: Pick<typeof conversationTimelineRepository, "recordInbound">;

@@ -6,6 +6,7 @@
  * - A concurrent invocation exits without claiming a second application session.
  * - Destroying the lock connection releases the session-level lock after the sweep.
  * - Turn runs left by sessions deleted before the fix are swept under the same lock.
+ * - Sessions of an erased person or family are deleted from the queue only after Eve's store let them go.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -32,17 +33,21 @@ const values = vi.hoisted(() => {
     failDeletion: vi.fn(),
     lockQuery,
     lockRelease,
+    query: vi.fn(async (_sql: string, _values?: unknown[]) => ({ rows: [] as Array<{ eve_session_id: string }> })),
     resolveDeletion,
     retireAbandonedTasks: vi.fn(),
   };
 });
 
 vi.mock("../database.js", () => ({
-  database: () => ({ connect: values.connect }),
+  database: () => ({ connect: values.connect, query: values.query }),
 }));
 vi.mock("./workflow-postgres-session-storage.js", () => ({
   deleteConfiguredOrphanedPostgresEveRuns: values.deleteOrphanedRuns,
   deleteConfiguredPostgresEveSession: values.deletePostgresEveSession,
+}));
+vi.mock("./workflow-run-retention.js", () => ({
+  pruneConfiguredTerminalWorkflowRuns: vi.fn().mockResolvedValue(0),
 }));
 vi.mock("./session-repository.js", () => ({
   sessionRepository: {
@@ -82,5 +87,17 @@ describe("deleteExpiredSessions", () => {
       "lease-1",
     );
     expect(values.lockRelease).toHaveBeenLastCalledWith(true);
+  });
+
+  it("deletes the queued sessions of an erased family from Eve's store, then from the queue", async () => {
+    values.claimExpiredForDeletion.mockReset().mockResolvedValue(null);
+    values.deletePostgresEveSession.mockResolvedValue(undefined);
+    values.query
+      .mockResolvedValueOnce({ rows: [{ eve_session_id: "wrun_erased_1" }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+    await expect(deleteExpiredSessions()).resolves.toBe(1);
+    expect(values.deletePostgresEveSession).toHaveBeenCalledWith("wrun_erased_1");
+    expect(values.query.mock.calls[1]).toEqual(["DELETE FROM erased_eve_sessions WHERE eve_session_id = $1", ["wrun_erased_1"]]);
   });
 });

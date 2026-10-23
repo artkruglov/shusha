@@ -57,9 +57,10 @@ export interface CoachFacts {
    * коуч ещё не спрашивал. Текст записи выходит только к самому человеку в его личный чат.
    */
   readonly openSituation: { readonly id: string; readonly text: string } | null;
-  /** Традиция человека без отметок две недели, о которой коуч не спрашивал две недели. */
+  /** Своя или семейная традиция без отметок две недели, о которой коуч не спрашивал две недели. */
   readonly quietRitual: { readonly id: string; readonly title: string } | null;
   readonly personalWindows: number;
+  /** Неотменённые традиции семьи, включая чужие личные (только число): пока они есть, «что делать вместе» молчит. */
   readonly familyRituals: number;
   /** Сколько областей заботы человек ведёт (принятых). Ноль значит, что о них с ним ещё не говорили. */
   readonly ownedCareAreas: number;

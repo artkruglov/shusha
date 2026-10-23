@@ -14,6 +14,16 @@ describe('local voice transcription', () => {
     await expect(transcribeLocalVoice(new Uint8Array([1]),'test',request)).rejects.toThrow(/AGENT_VOICE_/);
     expect(request).toHaveBeenCalledTimes(1);
   });
+  it('waits out a busy service, which had not read the audio, and says so when it stays busy', async () => {
+    const busy = () => Response.json({error:'busy'},{status:503});
+    const request=vi.fn().mockResolvedValueOnce(busy()).mockResolvedValueOnce(Response.json({text:'Купить хлеб'}));
+    await expect(transcribeLocalVoice(new Uint8Array([1]),'test',request,'audio/webm',0)).resolves.toBe('Купить хлеб');
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls[0][1].headers['Content-Type']).toBe('audio/webm');
+    const always=vi.fn().mockImplementation(async()=>busy());
+    await expect(transcribeLocalVoice(new Uint8Array([1]),'test',always,'audio/ogg',0)).rejects.toThrow(/AGENT_VOICE_BUSY/);
+    expect(always).toHaveBeenCalledTimes(7);
+  });
   it('rejects an empty transcript', async () => {
     await expect(transcribeLocalVoice(new Uint8Array([1]),'test',async()=>Response.json({text:' '}))).rejects.toThrow(/AGENT_VOICE_TRANSCRIPT_EMPTY/);
   });

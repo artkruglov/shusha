@@ -9,6 +9,8 @@
  * области. Требование «сначала спросить второго человека» живёт в правиле для агента, а не в базе:
  * оно смысловое. Закрыть проект с открытыми делами нельзя, отмена отвязывает их, а не удаляет.
  */
+import { createHash } from "node:crypto";
+
 import type { PoolClient } from "pg";
 
 import { AppError } from "../app-error.js";
@@ -35,7 +37,7 @@ function duplicate(error: unknown): never {
 function present(row: ProjectListing) {
   return {
     completed: row.completedItemCount, details: row.details, hasNextStep: row.unfinishedItemCount > 0,
-    id: row.projectId, lifeArea: row.lifeArea, open: row.unfinishedItemCount, source: row.source,
+    id: row.projectId, lifeArea: row.lifeArea, open: row.unfinishedItemCount, scope: row.scope, source: row.source,
     status: row.status, title: row.listName, total: row.itemCount, version: row.version,
   };
 }
@@ -65,8 +67,43 @@ async function openTitles(client: PoolClient, projectId: string): Promise<string
   return rows.map((row) => row.title);
 }
 
+function operationHash(auth: MemoryAuthorization, scope: MemoryScope, input: ProjectInput): string {
+  return createHash("sha256").update(JSON.stringify({ actor: auth.telegramUserId, group: auth.groupId, input, scope, tool: "project" }))
+    .digest("hex");
+}
+
+/**
+ * Запись, уже затронутая этим же вызовом (первый шаг у `create`, сам проект у изменений), или `null`; другой
+ * запрос под тем же ключом отказ. Повтор после потерянного ответа получает нынешний проект, а не конфликт версии.
+ */
+async function replayedOperation(
+  client: PoolClient, auth: MemoryAuthorization, scope: MemoryScope, operationKey: string, input: ProjectInput,
+): Promise<string | null> {
+  if (operationKey.length > 500) denied();
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`${auth.familyId}:${operationKey}`]);
+  const { rows } = await client.query<{ request_hash: string; task_id: string }>(
+    "SELECT request_hash, task_id FROM shared_task_operations WHERE family_id=$1 AND operation_key=$2",
+    [auth.familyId, operationKey]);
+  if (!rows[0]) return null;
+  if (rows[0].request_hash !== operationHash(auth, scope, input)) denied();
+  return rows[0].task_id;
+}
+
+async function recordOperation(
+  client: PoolClient, auth: MemoryAuthorization, scope: MemoryScope, operationKey: string, input: ProjectInput, taskId: string,
+): Promise<void> {
+  await client.query(
+    "INSERT INTO shared_task_operations(family_id,operation_key,actor_telegram_id,request_hash,task_id) VALUES($1,$2,$3,$4,$5)",
+    [auth.familyId, operationKey, auth.telegramUserId, operationHash(auth, scope, input), taskId]);
+}
+
 export const projectRepository = {
-  async execute(auth: MemoryAuthorization, raw: ProjectInput) {
+  /**
+   * `operationKey` (сессия и вызов) делает повтор того же `create` с `nextStep` повтором, а не вторым
+   * первым шагом: проект по имени находится и так, а дело заводилось каждый раз (замечание Codex,
+   * 16 октября 2026). Ключ и отпечаток аргументов те же, что у дел (`shared_task_operations`).
+   */
+  async execute(auth: MemoryAuthorization, raw: ProjectInput, operationKey?: string) {
     const parsed = projectInput.safeParse(raw);
     if (!parsed.success) throw new AppError("AGENT_PROJECT_INPUT_INVALID", "Проверьте действие и поля проекта");
     const input = parsed.data;
@@ -94,10 +131,14 @@ export const projectRepository = {
           { details: input.details ?? null, lifeArea: input.lifeArea ?? null }).catch(duplicate);
         let nextStep: { id: string; title: string } | null = null;
         if (input.nextStep) {
-          // Первое действие входит в проект по его названию тем же путём, что и любое дело.
-          const id = await createTask(client, auth, scope, spaceId, {
-            action: "create", dueOn: input.nextStep.dueOn, listName: input.title!, title: input.nextStep.title,
+          const replayed = operationKey ? await replayedOperation(client, auth, scope, operationKey, input) : null;
+          // Первое действие входит в этот самый проект по id и получает его область. По названию оно
+          // искалось в области дела, а та в личке следует выбору «для семьи»: шаг личного проекта
+          // попадал в одноимённый семейный или падал (ревью 23 октября 2026).
+          const id = replayed ?? await createTask(client, auth, scope, spaceId, {
+            action: "create", dueOn: input.nextStep.dueOn, projectRef: project.id, title: input.nextStep.title,
           } as never);
+          if (operationKey && replayed === null) await recordOperation(client, auth, scope, operationKey, input, id);
           nextStep = { id, title: input.nextStep.title };
         }
         const [view] = await readProjects(client, auth, scope, { id: project.id });
@@ -105,6 +146,16 @@ export const projectRepository = {
         return { created: project.created, nextStep, project: view ? present(view) : null };
       }
 
+      if (operationKey && await replayedOperation(client, auth, scope, operationKey, input) !== null) {
+        const [view] = await readProjects(client, auth, scope, { id: input.id!, includeClosed: true });
+        const [target] = input.action === "merge"
+          ? await readProjects(client, auth, scope, { id: input.intoId!, includeClosed: true }) : [];
+        await client.query("COMMIT");
+        return {
+          detachedTasks: [], mergedInto: target?.listName ?? null,
+          project: view ? present(view) : null, replayed: true,
+        };
+      }
       const locked = await lockVisible(client, auth, scope, input.id!, input.version!);
       let detached: string[] = [];
       let mergedInto: string | null = null;
@@ -138,6 +189,7 @@ export const projectRepository = {
         mergedInto = await mergeProjects(client, auth, scope, locked, input.intoId!, actor);
       }
 
+      if (operationKey) await recordOperation(client, auth, scope, operationKey, input, locked.id);
       const [view] = await readProjects(client, auth, scope, { id: input.id!, includeClosed: true });
       await client.query("COMMIT");
       return { detachedTasks: detached, mergedInto, project: view ? present(view) : null };

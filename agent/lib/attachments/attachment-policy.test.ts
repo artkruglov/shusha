@@ -29,6 +29,21 @@ describe("validateAttachmentContent", () => {
     })).resolves.toEqual({ fileName: "Снимок.png", mediaType: "image/png" });
   });
 
+  it.each([
+    ["a fullwidth solidus", "dir\uFF0Fsub\uFF0Fname.png"],
+    ["a fullwidth reverse solidus", "dir\uFF3Cname.png"],
+  ])("keeps a name with %s inside one file name", async (_label, fileName) => {
+    // NFKC turns these into `/` and `\`; normalizing after taking the base name let an external
+    // group place files in nested workspace directories (security review, 5 October 2026).
+    const result = await validateAttachmentContent({
+      bytes: PNG_BYTES,
+      declaredMediaType: "image/png",
+      fileName,
+      kind: "document",
+    });
+    expect(result.fileName).toBe("name.png");
+  });
+
   it("accepts a renamed document while retaining its detected content type", async () => {
     await expect(validateAttachmentContent({
       bytes: PNG_BYTES,

@@ -62,6 +62,16 @@ export function silentGroupTurnRecord(
   return { code: "AGENT_TELEGRAM_SILENT_TURN", trigger };
 }
 
+/**
+ * The final answer was the silence directive and nothing visible: the model chose to say nothing.
+ * A scheduled run that ends so is complete, not a failed delivery.
+ */
+export function isDeliberateSilence(data: { finishReason: string; message?: string | null }): boolean {
+  return data.finishReason === "stop" &&
+    (data.message ?? "").includes(TELEGRAM_SILENT_DIRECTIVE) &&
+    completedTelegramOutput(data) === null;
+}
+
 export function completedTelegramOutput(data: {
   finishReason: string;
   message?: string | null;

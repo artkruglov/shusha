@@ -9,11 +9,19 @@ import { personalTimeRepository } from "../personal-time/personal-time-repositor
 import { recordInitiativeDelivery } from "./initiative-delivery.js";
 import { createPartnerAlertDispatcher } from "./partner-alert-dispatch.js";
 import { partnerAlertRepository } from "./partner-alert-repository.js";
+import { requestKeyboard } from "../task-buttons/request-keyboards.js";
 
 export function dispatchPartnerAlerts(now = new Date()): Promise<number> {
   return createPartnerAlertDispatcher({
     claim: (recipient, localDate, items, at) =>
       partnerAlertRepository.claim(recipient, localDate, items, at),
+    keyboard: (recipient, items, at) => requestKeyboard({
+      familyId: recipient.familyId,
+      now: at,
+      tasks: items.flatMap((item) => item.kind === "task_proposed" && item.version !== undefined
+        ? [{ id: item.subjectId, title: item.title, version: item.version }] : []),
+      telegramUserId: recipient.telegramUserId,
+    }),
     pending: (recipient, at) => partnerAlertRepository.pending(recipient, at),
     personalTime: (recipient, at) =>
       personalTimeRepository.conflictFor(recipient.telegramUserId, recipient.familyId, at),

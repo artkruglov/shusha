@@ -98,6 +98,18 @@ dbDescribe("agent schedule destination area", () => {
   });
   afterAll(async () => closeDatabase());
 
+  it("holds a family's schedule while its monthly model budget is spent, and runs it next month", async () => {
+    const created = await createFamilySchedule(fixture, fixture.pairSpaceId, "family-over-budget");
+    await database().query("UPDATE families SET monthly_model_budget_usd = 1 WHERE id = $1", [fixture.familyId]);
+    await database().query(
+      "INSERT INTO family_model_spend (family_id, created_at, cost_usd) VALUES ($1, $2, 1.5)", [fixture.familyId, NOW]);
+    const held = await agentScheduleDispatchRepository.claimDue({ leaseMilliseconds: 300_000, limit: 25, now: NOW });
+    expect(held.map((job) => job.id)).not.toContain(created.id);
+    await expect(readSchedule(created.id)).resolves.toMatchObject({ attempts: 0, status: "active" });
+    // A new UTC month: the spend is last month's, and the due run goes.
+    await claimSchedule(created.id, new Date("2026-10-01T00:00:05.000Z"));
+  });
+
   it("writes the proved area into a new schedule and refuses a turn without one", async () => {
     const created = await createFamilySchedule(fixture, fixture.pairSpaceId, "family-in-pair-space");
 

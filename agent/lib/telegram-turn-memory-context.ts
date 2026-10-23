@@ -16,7 +16,7 @@
  *   exist before Eve starts the turn; Eve turn identity is not known at this boundary.
  * - Any failure degrades to an explicit unavailability notice: prompt assembly never fails a turn.
  */
-import type { ConversationAccess } from "./family-access.js";
+import type { FamilyConversationAccess } from "./family-access.js";
 import type { MemoryAuthorization } from "./memory-context.js";
 import { memoryContextExposureRepository } from "./memory-context-exposure-repository.js";
 import {
@@ -33,7 +33,7 @@ import type { CreateProfileViewInput, ProfileView } from "./profile-view.js";
 import type { TelegramActorKind } from "./telegram-inbound-actor.js";
 
 export interface TelegramMemoryContextInput {
-  readonly access: ConversationAccess;
+  readonly access: FamilyConversationAccess;
   readonly actor: { readonly id: string; readonly kind: TelegramActorKind };
   readonly applicationSessionId: string;
   /** Область, доказанная подготовкой сессии; отсутствует, пока режим семьи прежний. */

@@ -3,7 +3,9 @@
  *
  * Экспорт:
  * - `DailyOverview`: открытые дела человека и его неотвеченные просьбы, собранные по его личности.
- * - `formatDailyOverview`: текст обзора либо `null`, когда говорить не о чем.
+ * - `formatDailyOverview`: доска целиком либо `null`, когда говорить не о чем; приходит по кнопке «Все дела».
+ *   Утром уходит короткий обзор (`daily-overview-short.ts`).
+ * - `OverviewTask`, `hasCommitment`, `OVERVIEW_FIRST_TIME_EXPLANATION`: общие с коротким обзором.
  *
  * Обзор собирается детерминированно и форматируется здесь же, без модели. Так требует раздел 5
  * архитектуры: агент, одновременно видящий все области человека, для этого не запускается —
@@ -19,10 +21,15 @@
  * напоминаний (история B01), а увидеть её можно в ответ на «покажи дела».
  */
 import { formatTaskBoard, type BoardProject, type BoardTask } from "../task-board.js";
+import type { OverviewRest } from "./overview-rest-repository.js";
+
+/** Строка доски с id и версией, когда они известны: по ним встаёт кнопка «✓» (миграция 179). */
+/** `repeat` is the list row's rule (`shared-task-access.ts`); set for a repeated task, marked 🔁 in the overview. */
+export type OverviewTask = BoardTask & { readonly id?: string; readonly repeat?: unknown; readonly version?: number };
 
 export interface DailyOverview {
   /** Открытые дела, идеи и традиции человека из всех его областей. */
-  readonly tasks: readonly BoardTask[];
+  readonly tasks: readonly OverviewTask[];
   /** Личные просьбы автора, на которые получатель ещё не ответил. */
   readonly waiting: readonly BoardTask[];
   readonly now: Date;
@@ -32,6 +39,8 @@ export interface DailyOverview {
   readonly areas?: readonly string[];
   /** Живые проекты человека со счётом дел: прогресс на доске и проекты без шага. */
   readonly projects?: readonly BoardProject[];
+  /** Дела, которые короткий обзор больше не повторяет (`overview-rest-repository.ts`). */
+  readonly rest?: OverviewRest;
 }
 
 /**
@@ -39,14 +48,14 @@ export interface DailyOverview {
  * обязан догадываться, почему бот заговорил первым, и не должен искать настройку, чтобы это
  * прекратить.
  */
-const FIRST_TIME_EXPLANATION = [
+export const OVERVIEW_FIRST_TIME_EXPLANATION = [
   "Это утренний обзор: я показываю его раз в день, когда есть открытые дела.",
   "Скажите «не пиши мне первым» — перестану. Спросите «что ты умеешь здесь» — расскажу.",
 ].join(" ");
 
 /** Возвращает `null`, когда говорить не о чем: пустой обзор не отправляется. */
 /** Идея ничего не обещает (история B01), поэтому сама по себе утреннего сообщения не вызывает. */
-function hasCommitment(overview: DailyOverview): boolean {
+export function hasCommitment(overview: DailyOverview): boolean {
   const open = (task: { status: string }) => ["open", "proposed", "accepted"].includes(task.status);
   return overview.tasks.some((task) => task.kind === "task" && open(task)) ||
     overview.waiting.some(open);
@@ -67,6 +76,6 @@ export function formatDailyOverview(
   return [
     "Доброе утро. Вот твои дела.", "", board,
     ...(overview.areas && overview.areas.length > 0 ? ["", `Твои области: ${overview.areas.join(", ")}.`] : []),
-    ...(options.first === true ? ["", FIRST_TIME_EXPLANATION] : []),
+    ...(options.first === true ? ["", OVERVIEW_FIRST_TIME_EXPLANATION] : []),
   ].join("\n");
 }

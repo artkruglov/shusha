@@ -1,5 +1,5 @@
 /** Does the model capture and close tasks the way the task contract asks? Paid live probe.
- * MODEL_API_KEY=… npx tsx stress/prompt-evals/task-requests.ts --out .tmp/evals/tasks-1 --max-requests 30 [--samples 2] [--reasoning-none] [--dry]
+ * MODEL_API_KEY=… npx tsx stress/prompt-evals/task-requests.ts --out .tmp/evals/tasks-1 --max-requests 30 [--samples 2] [--reasoning-none] [--no-clock] [--dry]
  * Refuses above --max-requests and sends requests one at a time to share the cached prefix.
  *
  * 19–21 September 2026, production: a list dictated in the family group never became tasks, and
@@ -11,6 +11,10 @@
  * does (the stub builds them with the same `describeFiling`).
  * The cases `vague-record`, `obvious-task`, `just-record` and `group-vague` check the rule "record at
  * once, ask ONE question only when the obligation has no next step or list".
+ *
+ * 20 October 2026: the stub answered every non-create action as completed, titled «дело» and assigned to
+ * the sender, so an `update` looked like a closure and the model "repaired" it with `reopen`. A change now
+ * answers with the task's own row. The model also gets `<current_time>` like production, on a fixed clock.
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { z } from "zod";
@@ -18,6 +22,7 @@ import { z } from "zod";
 import manageSharedTasks from "../../agent/lib/tools/manage_shared_tasks.ts";
 import manageProjects from "../../agent/lib/tools/manage_projects.ts";
 import { projectInput } from "../../agent/lib/projects/project-contract.ts";
+import { formatCurrentTimeContext } from "../../agent/lib/current-time.ts";
 import { formatTaskProjectsContext } from "../../agent/lib/projects/project-context.ts";
 import type { ProjectListing } from "../../agent/lib/shared-task-access.ts";
 import { modeInstructions } from "../../agent/lib/prompt/mode-instructions.ts";
@@ -34,6 +39,8 @@ const out = argument("out") ?? ".tmp/evals/task-requests";
 const samples = Number(argument("samples") ?? "2");
 const maxRequests = Number(argument("max-requests"));
 const MAX_STEPS = 3;
+// Вторник 13 октября 2026, 10:00 по Москве.
+const EVAL_NOW = new Date("2026-10-13T07:00:00Z");
 
 interface Call { input: Record<string, unknown>; tool: string; valid: boolean }
 interface Case {
@@ -52,7 +59,9 @@ const REGISTRY = [
   { id: "6cd4c57b-34bd-4c64-a882-b973bb577c62", title: "Отправить документы в банк: паспорт, СНИЛС и справки" },
   { id: "339b444f-a64d-45fa-b593-b95a8194ada8", title: "Сканировать документы" },
   { id: "3c650029-e0f0-4604-af66-6b1268ea01ce", title: "Назначить встречу с Олегом по стратегии" },
-  { id: "aa70d3d7-03d3-434d-8955-8d2e5082e1a6", title: "Встреча с Олегом — четверг следующей недели" },
+  // На проде название было «— четверг следующей недели» (21 сентября); при часах стенда 13.10 оно читалось как
+  // будущая встреча, и модель не закрывала её. Встреча прошла в прошлый четверг.
+  { id: "aa70d3d7-03d3-434d-8955-8d2e5082e1a6", title: "Встреча с Олегом по стратегии", dueOn: "2026-10-08" },
   { id: "5f0e0f7c-1a1a-4b1b-8c1c-000000000001", title: "Отвезти Опель на ремонт и зарядить его" },
   { id: "5f0e0f7c-1a1a-4b1b-8c1c-000000000002", title: "Найти репетитора по математике для сына" },
 ].map((task, index) => ({ ...task, kind: "task", source: "Личное", status: "accepted", version: 2 + index % 2 }));
@@ -64,6 +73,16 @@ const FAMILY_REGISTRY = [
   { id: "a0000000-0000-4000-8000-000000000003", title: "Выкинуть мусор", status: "open", assignee: null },
   { id: "a0000000-0000-4000-8000-000000000004", title: "Купить щётку для посуды", status: "accepted", assignee: "Юля" },
 ].map((task, index) => ({ ...task, kind: "task", scope: "family", source: "Семья", version: 1 + index % 2 }));
+
+// Дела для статус-отчётов: по образцу прода 8–12 октября 2026 (названия обезличены).
+const STATUS_REGISTRY = [
+  { id: "c0000000-0000-4000-8000-000000000001", title: "Настроить принтер" },
+  { id: "c0000000-0000-4000-8000-000000000002", title: "Подобрать оптимальную страховку для новой квартиры" },
+  { id: "c0000000-0000-4000-8000-000000000003", title: "Записаться к косметологу" },
+  { id: "c0000000-0000-4000-8000-000000000004", title: "Подготовить с Даней видео на конкурс талантов" },
+  { id: "c0000000-0000-4000-8000-000000000005", title: "Подготовить выступление на конкурсе талантов" },
+  { id: "c0000000-0000-4000-8000-000000000006", title: "Найти репетитора по русскому языку" },
+].map((task, index) => ({ ...task, kind: "task", source: "Семья", status: "accepted", version: 2 + index % 2 }));
 
 const reads = (calls: readonly Call[]) => calls.filter((call) => ["list", "lists", "get"].includes(String(call.input.action))).length;
 const batchItems = (calls: readonly Call[], action: string) => calls
@@ -79,6 +98,14 @@ const project = (title: string, extra: Partial<ProjectListing> = {}): ProjectLis
   unfinishedItemCount: 1, version: 1, ...extra,
 });
 
+/** No project made without a «да»: the task is recorded and a project is offered with a question. */
+function proposesProject(calls: readonly Call[], text: string): string | null {
+  const made = calls.filter((call) => call.tool === "manage_projects" && call.input.action === "create").length;
+  const recorded = batchItems(calls, "create").length > 0;
+  const asks = /проект/iu.test(text) && /\?/u.test(text);
+  return made === 0 && recorded && asks ? null : `projectCreates=${made} recorded=${recorded} asks=${asks}`;
+}
+
 const CASES: Case[] = [
   {
     environment: "private", key: "dictated-list",
@@ -87,6 +114,18 @@ const CASES: Case[] = [
       const creates = batchItems(calls, "create").length;
       const batches = calls.filter((call) => call.input.action === "batch").length;
       return batches === 1 && creates >= 4 ? null : `batches=${batches} creates=${creates}`;
+    },
+  },
+  {
+    environment: "private", key: "show-tasks",
+    message: "скинь мне просто список дел",
+    // 21 октября 2026 модель пересказала доску своими строками; теперь она просит доску флагом show,
+    // а сама пишет не больше одной фразы: названий дел в её тексте почти нет.
+    expect: (calls, text) => {
+      const shown = calls.some((call) => call.input.action === "list" && call.input.show === true);
+      const retold = REGISTRY.filter((task) => text.includes(String(task.title).split(/[ :]/u)[0]!)).length;
+      // Упомянуть доску можно («Отправила доску»): 21 октября это было в двух ответах из четырёх и не мешало.
+      return shown && retold <= 1 ? null : `shown=${shown} retold=${retold}`;
     },
   },
   {
@@ -120,22 +159,20 @@ const CASES: Case[] = [
   {
     environment: "private", key: "vague-record",
     message: "Надо разобраться с кружком для Дани",
-    // Записать сразу, переслать место записи и задать ровно один вопрос с вариантами.
+    // Записать сразу и задать ровно один вопрос с вариантами, про первый шаг.
     expect: (calls, text) => {
-      // Место записи бывает «пока без списка», сфера или список: модель вправе выбрать сама. Важно, что
-      // строка filed дошла до человека и вопрос один, про первый шаг.
-      const forwarded = text.includes("• «Разобраться с кружком") || text.includes("пока без списка");
-      const ok = created(calls) === 1 && forwarded && questions(text) === 1 && /когда-нибудь|шаг|начн|начать|перв/iu.test(text);
-      return ok ? null : `creates=${created(calls)} forwarded=${forwarded} questions=${questions(text)}`;
+      // 21 октября 2026: строки «пока без списка» в filed больше нет, а сферу модель ставит сама; проверяется суть.
+      const ok = created(calls) === 1 && questions(text) === 1 && /когда-нибудь|шаг|начн|начать|перв/iu.test(text);
+      return ok ? null : `creates=${created(calls)} questions=${questions(text)}`;
     },
   },
   {
     environment: "private", key: "obvious-task",
     message: "Купить батарейки",
-    // Очевидное действие: записать и переслать место, без вопроса.
+    // Очевидное действие: записать без вопроса.
     expect: (calls, text) => {
-      const ok = created(calls) === 1 && text.includes("пока без списка") && questions(text) === 0;
-      return ok ? null : `creates=${created(calls)} forwarded=${text.includes("пока без списка")} questions=${questions(text)}`;
+      const ok = created(calls) === 1 && questions(text) === 0;
+      return ok ? null : `creates=${created(calls)} questions=${questions(text)}`;
     },
   },
   {
@@ -149,9 +186,9 @@ const CASES: Case[] = [
   {
     environment: "family", key: "group-vague",
     message: "Надо разобраться с кружком для Дани",
-    // Неадресованное сообщение в группе: записать, без допроса.
+    // Неадресованное сообщение в группе для семейных дел: записать и не больше одного вопроса про шаг.
     expect: (calls, text) => {
-      const ok = created(calls) === 1 && questions(text) === 0;
+      const ok = created(calls) === 1 && questions(text) <= 1;
       return ok ? null : `creates=${created(calls)} questions=${questions(text)}`;
     },
   },
@@ -182,12 +219,9 @@ const CASES: Case[] = [
   {
     environment: "family", key: "project-from-outcome",
     message: "Хотим в августе съездить в отпуск недели на две, надо всё организовать",
-    // Результат из нескольких шагов: проект сразу с первым шагом, одним вызовом.
-    expect: (calls) => {
-      const made = calls.filter((call) => call.tool === "manage_projects" && call.input.action === "create");
-      const step = made.some((call) => (call.input.nextStep as { title?: string } | undefined)?.title);
-      return made.length === 1 && step ? null : `projectCreates=${made.length} withStep=${step}`;
-    },
+    // 21 октября 2026 (владелец): результат из нескольких шагов записан сразу, а проект только предложен
+    // вопросом: без «да» человека его не заводят.
+    expect: (calls, text) => proposesProject(calls, text),
   },
   {
     environment: "private", key: "existing-project",
@@ -205,12 +239,21 @@ const CASES: Case[] = [
     environment: "private", key: "new-theme",
     projects: [project("Переезд", { itemCount: 5, unfinishedItemCount: 2 }), project("Работа", { itemCount: 4 })],
     message: "Хочу в этом году выучиться водить мотоцикл: сначала курсы, потом права, потом выбрать сам мотоцикл",
-    // Новая тема из нескольких шагов: свой проект с первым шагом, а не чужой «Переезд» или «Работа».
+    // Новая тема из нескольких шагов: не в чужой «Переезд» или «Работу», свой проект только предложен.
+    expect: (calls, text) => {
+      const filedElsewhere = batchItems(calls, "create").some((item) => /переезд|работа/iu.test(String(item.listName ?? "")));
+      return filedElsewhere ? "filed into an unrelated project" : proposesProject(calls, text);
+    },
+  },
+  {
+    environment: "private", key: "project-on-request",
+    projects: [project("Переезд", { itemCount: 5, unfinishedItemCount: 2 })],
+    message: "Заведи проект «Права на мотоцикл», первый шаг — записаться на курсы",
+    // Прямая просьба это и есть «да»: проект с первым шагом одним вызовом.
     expect: (calls) => {
       const made = calls.filter((call) => call.tool === "manage_projects" && call.input.action === "create");
-      const title = String(made[0]?.input.title ?? "");
-      const step = Boolean((made[0]?.input.nextStep as { title?: string } | undefined)?.title);
-      return made.length === 1 && step && !/переезд|работа/iu.test(title) ? null : `projectCreates=${made.length} title=${title} withStep=${step}`;
+      const step = made.some((call) => (call.input.nextStep as { title?: string } | undefined)?.title);
+      return made.length === 1 && step ? null : `projectCreates=${made.length} withStep=${step}`;
     },
   },
   {
@@ -235,6 +278,45 @@ const CASES: Case[] = [
       const done = calls.filter((call) => call.tool === "manage_projects" && call.input.action === "complete");
       const withIds = done.every((call) => call.input.id && call.input.version !== undefined);
       return done.length === 1 && withIds ? null : `completes=${done.length} withIds=${withIds}`;
+    },
+  },
+  // Прод 8 октября 2026: длинный статус в семейной группе без обращения кончился молчанием, ничего не
+  // закрыто. Отчёт о деле реестра это повод обновить реестр, а не болтовня.
+  {
+    environment: "family", key: "status-unaddressed",
+    message: "привет, принтер я настроил, всё нормально работает. страховку для квартиры подобрал. Юля сходила к косметологу, ей теперь записаться на процедуры",
+    tasks: STATUS_REGISTRY,
+    expect: (calls, text) => {
+      const ids = batchItems(calls, "complete").map((item) => String(item.id));
+      const want = [STATUS_REGISTRY[0]!.id, STATUS_REGISTRY[1]!.id];
+      // «Юля сходила к косметологу» модель вправе считать закрытием записи к косметологу; обязательны принтер и страховка.
+      const ok = want.every((id) => ids.includes(id)) && text.trim() !== "<telegram-silent>";
+      return ok ? null : `closed=${ids.length} silent=${text.trim() === "<telegram-silent>"}`;
+    },
+  },
+  // Прод 12 октября 2026: «видео и выступление тоже считаю сделанными» без единого complete. Сделанное
+  // закрывается вызовом, несделанное остаётся открытым.
+  {
+    environment: "private", key: "status-mixed",
+    message: "по задачам: видео к конкурсу мы с Даней сделали, выступление тоже готово, а репетитора по русскому пока не нашёл",
+    tasks: STATUS_REGISTRY,
+    expect: (calls) => {
+      const ids = batchItems(calls, "complete").map((item) => String(item.id));
+      const want = [STATUS_REGISTRY[3]!.id, STATUS_REGISTRY[4]!.id];
+      const ok = want.every((id) => ids.includes(id)) && !ids.includes(STATUS_REGISTRY[5]!.id);
+      return ok ? null : `closed=${ids.join(",") || "none"}`;
+    },
+  },
+  {
+    environment: "family", key: "status-not-done",
+    message: "мусор со старой квартиры так и не выкинул, завтра попробую",
+    // «Завтра попробую» это намерение: не закрыть, срок не ставить, а предложить его («поставить на завтра?»).
+    expect: (calls, text) => {
+      const closed = batchItems(calls, "complete").length;
+      const dated = calls.flatMap((call) => call.input.action === "batch" ? (call.input.items as Record<string, unknown>[]) : [call.input])
+        .filter((item) => item.dueOn !== undefined).length;
+      const offers = /срок|на завтра/iu.test(text);
+      return closed === 0 && dated === 0 && offers ? null : `closed=${closed} dated=${dated} offers=${offers}`;
     },
   },
   {
@@ -309,18 +391,41 @@ function stubResult(input: Record<string, unknown>, environment: Case["environme
     return { error: { code: input.action === "batch" ? "AGENT_TASK_BATCH_REJECTED" : "AGENT_TASK_ACCESS_DENIED",
       message: `Пакет не применён, ничего не изменено. Не прошли пункты: #${personalDenied + 1} AGENT_TASK_ACCESS_DENIED` } };
   }
+  // Как репозиторий с 21 октября: имя списка только находит проект из блока, незнакомое отклоняется.
+  const knownProjects = new Set(listed.map((row) => row.listName.toLowerCase()));
+  const unknownProject = items.findIndex((item) => ["create", "clarify", "update"].includes(String(item.action))
+    && typeof item.listName === "string" && !knownProjects.has(item.listName.toLowerCase()));
+  if (unknownProject >= 0) {
+    const name = String(items[unknownProject]!.listName);
+    const message = `Проекта «${name}» нет. Запиши дело без listName, затем спроси человека, завести ли такой проект; заводи только после «да» через manage_projects create`;
+    return { error: input.action === "batch"
+      ? { code: "AGENT_TASK_BATCH_REJECTED", message: `Пакет не применён, ничего не изменено. Не прошли пункты: #${unknownProject + 1} AGENT_PROJECT_NOT_FOUND: ${message}` }
+      : { code: "AGENT_PROJECT_NOT_FOUND", message } };
+  }
   if (input.action === "list") {
-    return { incomplete: false, nextCursor: null, tasks: registry ?? (environment === "family" ? FAMILY_REGISTRY : REGISTRY), truncated: false };
+    const tasks = registry ?? (environment === "family" ? FAMILY_REGISTRY : REGISTRY);
+    // Как инструмент с 21 октября: доску модель не видит, её приложит канал.
+    const board = input.show === true ? { board: "Человек получит доску отдельным сообщением после ответа. О доске не говори и дела не перечисляй: одна фраза о главном или ничего." } : {};
+    return { incomplete: false, nextCursor: null, tasks, truncated: false, ...board };
   }
   const scope = environment === "family" ? "family" : "personal";
-  const shaped = (item: Record<string, unknown>, index: number) => ({
-    assignee: item.unassigned ? null : "Анна", dueAt: null, dueOn: item.dueOn ?? null,
-    id: item.id ?? `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`, kind: item.kind ?? "task",
-    lifeArea: item.lifeArea ?? null, listName: item.listName ?? null, scope, source,
-    status: item.action === "create" || item.action === undefined
-      ? (item.unassigned ? "open" : "accepted") : item.action === "clarify" ? "accepted" : "completed",
-    title: item.title ?? "дело", version: 1,
-  });
+  const known: readonly Record<string, unknown>[] = registry ?? (environment === "family" ? FAMILY_REGISTRY : REGISTRY);
+  // Изменение существующего дела отвечает его же строкой: update не закрывает и не переназначает, как репозиторий.
+  const shaped = (item: Record<string, unknown>, index: number) => {
+    const row = item.action === "create" ? undefined : known.find((task) => task.id === item.id);
+    const status = item.action === "create" || item.action === undefined ? (item.unassigned ? "open" : "accepted")
+      : item.action === "complete" ? "completed" : item.action === "cancel" ? "cancelled"
+        : item.action === "reopen" || item.action === "clarify" ? "accepted" : String(row?.status ?? "accepted");
+    // Личные дела без поля assignee принадлежат автору; ничьё семейное дело получает исполнителя только при закрытии.
+    const assignee = row ? row.assignee === undefined ? "Анна" : row.assignee ?? (item.action === "complete" ? "Анна" : null)
+      : item.unassigned ? null : "Анна";
+    return {
+      assignee, dueAt: item.dueAt ?? null, dueOn: item.dueOn ?? null,
+      id: item.id ?? `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`, kind: item.kind ?? row?.kind ?? "task",
+      lifeArea: item.lifeArea ?? null, listName: item.listName ?? null, scope, source, status,
+      title: item.title ?? row?.title ?? "дело", version: Number(row?.version ?? 0) + 1,
+    };
+  };
   // Как настоящий инструмент: место записи собирает код, а не модель. Директива не сворачивать ставит
   // канал, в ответ инструмента её нет.
   const filing = (tasks: ReturnType<typeof shaped>[]) => describeFiling(tasks, "Europe/Moscow");
@@ -347,10 +452,14 @@ const hasError = (value: unknown) => typeof value === "object" && value !== null
 interface Cell { calls: Call[]; error?: string; failure: string | null; text: string }
 async function run(testCase: Case): Promise<Cell> {
   const system = `${core}\n\n${modeInstructions({ environment: testCase.environment })}`;
-  // Как на проде: блок проектов области идёт отдельным сообщением контекста перед текущим.
+  // Как на проде: время хода и блок проектов области идут сообщением контекста перед текущим. Часы
+  // фиксированы, чтобы «завтра» было проверяемым и префикс кэшировался между прогонами.
+  // `--no-clock` убирает время, чтобы сравнить с прогонами до него.
+  const clock = process.argv.includes("--no-clock") ? "" : `${formatCurrentTimeContext(EVAL_NOW, "Europe/Moscow")}\n\n`;
+  const context = `${clock}${formatTaskProjectsContext(testCase.projects ?? [])}`;
   const prompt: unknown[] = [
     { content: system, role: "system" },
-    { content: [{ text: formatTaskProjectsContext(testCase.projects ?? []), type: "text" }], role: "user" },
+    { content: [{ text: context, type: "text" }], role: "user" },
     { content: [{ text: userMessage(testCase), type: "text" }], role: "user" },
   ];
   const calls: Call[] = [];

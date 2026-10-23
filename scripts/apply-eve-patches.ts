@@ -23,8 +23,13 @@
  */
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { patchEventLogCache } from "./eve-patches/event-log-cache.ts";
 import { patchPostgresConnectionRecovery } from "./eve-patches/postgres-connection-recovery.ts";
 import { patchStreamRecovery } from "./eve-patches/stream-recovery.ts";
+import { patchStuckRunRecovery } from "./eve-patches/stuck-run-recovery.ts";
+import { patchTelegramSendPacing } from "./eve-patches/telegram-send-pacing.ts";
+import { patchWebFetchHtml } from "./eve-patches/web-fetch-html.ts";
+import { patchWebhookVerifyFirst } from "./eve-patches/webhook-verify-first.ts";
 import { patchWorkflowTransport } from "./eve-patches/workflow-transport.ts";
 
 const EXPECTED_EVE_VERSION = "0.40.0";
@@ -131,11 +136,20 @@ if (evePackage.version !== EXPECTED_EVE_VERSION) {
 // persists a cumulative snapshot per delta, which grew one production session to 155 MB and ended
 // in an out-of-memory crash. Reads become paged and demand-driven, delta persistence is paced.
 await patchStreamRecovery(replaceExact);
+await patchEventLogCache(replaceExact);
 // Upstream nyxandro 2167e2c: a dropped PostgreSQL connection must not crash the process.
 await patchPostgresConnectionRecovery(replaceExact);
 // Upstream nyxandro 33c935f + 795ae11: a flow request may outlive Node's 300 s header deadline, and
 // a redelivery of that live message must join the running execution instead of starting another.
 await patchWorkflowTransport(replaceExact);
+// Upstream ilkruglov 5d80240e: a run whose retry job was lost is requeued by a five-minute scan, not only at start.
+await patchStuckRunRecovery(replaceExact);
+// Security review (ilkruglov 87b73f55): the webhook secret is compared before the body is read.
+await patchWebhookVerifyFirst(replaceExact);
+// Measured 7 October 2026: one page could block the agent for 91 s through turndown; linear conversion instead.
+await patchWebFetchHtml();
+// ilkruglov 602528c7: every outbound Bot API call waits for its slot under Telegram's limits; a 429 pauses its chat.
+await patchTelegramSendPacing(replaceExact);
 
 // A cold production start may prepare sandbox images before the child server becomes healthy.
 await replaceExact(
@@ -222,11 +236,36 @@ await replaceExact(
   "n=e.content.map(e=>{if(e.type!==`tool-result`)return e;if(e.output?.type===`text`&&typeof e.output.value==`string`&&e.output.value.startsWith(`[Truncated by eve:`))return e;let n=stubContentOutputFileParts(e.output)",
 );
 
-// Compaction may shrink the local recent window, but it may not buy another summary model call.
+// Compaction may shrink the local recent window, but it may not buy another summary model call:
+// the best result of the one summary is kept and logged instead of failing the turn (before
+// 25 сентября 2026 the turn died with EVE_COMPACTION_OUTPUT_TOO_LARGE; the next check tries again).
 await replaceExact(
   runtimePaths.compaction,
   "if(evaluateThreshold(v,i,`estimate`).type===`within-limit`||m===0)return v;--m",
-  "if(evaluateThreshold(v,i,`estimate`).type===`within-limit`)return v;throw Error(`EVE_COMPACTION_OUTPUT_TOO_LARGE: Compaction result exceeds the configured threshold`)",
+  "if(evaluateThreshold(v,i,`estimate`).type===`within-limit`)return v;console.error(JSON.stringify({code:\"AGENT_COMPACTION_OUTPUT_OVER_LIMIT\",estimatedTokens:Math.round(evaluateThreshold(v,i,`estimate`).estimatedTokens),threshold:i.threshold}));return v",
+);
+
+// The tool-result cap heuristic judged itself by the character estimate of the messages alone,
+// without the system prompt and the tool schemas (about 21k tokens) and with /4 for Russian text,
+// so it declared "within limit" while the real prompt stayed at 117–140k tokens and no summary
+// ever ran. It now subtracts what the cap saved from the real usage of the last call: a cap that
+// freed nothing (results already capped) hands over to the summary. The saving is estimated by
+// characters, which undercounts Russian, so the check errs towards the summary, never towards a
+// false "within limit".
+await replaceExact(
+  runtimePaths.compaction,
+  "let{conversation:f,previousCheckpoint:p}=extractPreviousCheckpoint(t),m=selectRecentWindowSize(f,d?{...i,recentWindowSize:1}:i)",
+  "let{conversation:f,previousCheckpoint:p}=extractPreviousCheckpoint(t),R=getInputTokenCount(t,i),m=selectRecentWindowSize(f,d?{...i,recentWindowSize:1}:i)",
+);
+await replaceExact(
+  runtimePaths.compaction,
+  "for(let n of COMPACTION_HEURISTICS){let r=n({config:i,conversation:f,older:e,previousCheckpoint:p,recent:t})",
+  "for(let n of COMPACTION_HEURISTICS){let r=n({config:i,conversation:f,older:e,previousCheckpoint:p,realBefore:R,recent:t})",
+);
+await replaceExact(
+  runtimePaths.compaction,
+  "function toolResultCapHeuristic(e){let t=withResumptionGuard([...e.previousCheckpoint===void 0?[]:[{content:COMPACTION_CHECKPOINT_MARKER,role:`user`},{content:e.previousCheckpoint,role:`assistant`}],...capToolResults(e.older),...e.recent],e.conversation);return evaluateThreshold(t,e.config,`should-compact`).type===`within-limit`?{messages:t,type:`within-limit`}:{type:`insufficient`}}",
+  "function toolResultCapHeuristic(e){let c=capToolResults(e.older),t=withResumptionGuard([...e.previousCheckpoint===void 0?[]:[{content:COMPACTION_CHECKPOINT_MARKER,role:`user`},{content:e.previousCheckpoint,role:`assistant`}],...c,...e.recent],e.conversation),s=Math.max(0,estimateTokens(e.older)-estimateTokens(c)),a=typeof e.realBefore==`number`?e.realBefore-s+COMPACTION_PROMPT_OVERHEAD_TOKENS:evaluateThreshold(t,e.config,`should-compact`).estimatedTokens,w=a<=e.config.threshold;console.info(JSON.stringify({code:\"AGENT_COMPACTION_HEURISTIC\",realBefore:typeof e.realBefore==`number`?Math.round(e.realBefore):null,savedTokens:Math.round(s),realAfter:Math.round(a),threshold:e.config.threshold,within:w}));return w?{messages:t,type:`within-limit`}:{type:`insufficient`}}",
 );
 
 // Failure to persist an approval prompt must fail the turn instead of parking it unbound.
@@ -455,15 +494,19 @@ await replaceExact(
 );
 
 // Verified webhooks can be durably acknowledged before native dispatch; drain reuses that dispatcher.
+// Guest mode (Bot API 10.0): Eve parses only messages and button presses and dropped a `guest_message`
+// in silence; the application answers it itself through `answerGuestQuery`, without an Eve session.
+// A `chat_join_request` (someone asks to enter a group by the bot's invite link) is dropped the same way;
+// the application greets the person in their private chat and decides the request without an Eve session.
 await replaceExact(
   runtimePaths.telegram,
   "let u=parseTelegramUpdate(c);return u===null?new Response(`ok`):u.kind===`message`?(o(dispatchMessage({config:e,message:u.message,onMessage:n,uploadPolicy:t,from:a})),new Response(`ok`)):(o(dispatchCallbackQuery({config:e,query:u.callbackQuery,from:a})),new Response(`ok`))",
-  "let u=parseTelegramUpdate(c);if(u===null)return new Response(`ok`);let d=l=>l.kind===`message`?dispatchMessage({config:e,message:l.message,onMessage:n,uploadPolicy:t,from:a}):dispatchCallbackQuery({config:e,query:l.callbackQuery,from:a});return e.onVerifiedUpdate!==void 0?e.onVerifiedUpdate({dispatch:d,raw:c,update:u,waitUntil:o}):(o(d(u)),new Response(`ok`))",
+  "let u=parseTelegramUpdate(c);let d=l=>l.kind===`message`?dispatchMessage({config:e,message:l.message,onMessage:n,uploadPolicy:t,from:a}):dispatchCallbackQuery({config:e,query:l.callbackQuery,from:a});if(u===null)return e.onGuestUpdate!==void 0&&c!==null&&typeof c===`object`&&c.guest_message!==void 0?e.onGuestUpdate({dispatch:d,raw:c,waitUntil:o}):e.onChatJoinRequest!==void 0&&c!==null&&typeof c===`object`&&c.chat_join_request!==void 0?e.onChatJoinRequest({dispatch:d,raw:c,waitUntil:o}):new Response(`ok`);return e.onVerifiedUpdate!==void 0?e.onVerifiedUpdate({dispatch:d,raw:c,update:u,waitUntil:o}):(o(d(u)),new Response(`ok`))",
 );
 await replaceExact(
   runtimePaths.telegram,
   "})],async receive",
-  "}),...e.onDrain===void 0?[]:[POST(e.drainRoute??`/eve/v1/telegram-drain`,async(r,{from:a,waitUntil:o})=>{if(await verifyInbound(r,e.credentials)===null)return new Response(`unauthorized`,{status:401});let d=l=>l.kind===`message`?dispatchMessage({config:e,message:l.message,onMessage:n,uploadPolicy:t,from:a}):dispatchCallbackQuery({config:e,query:l.callbackQuery,from:a});return e.onDrain({dispatch:d,waitUntil:o})})]],async receive",
+  "}),...e.onDrain===void 0?[]:[POST(e.drainRoute??`/eve/v1/telegram-drain`,async(r,{from:a,waitUntil:o})=>{if(await verifyInbound(r,e.drainCredentials??e.credentials)===null)return new Response(`unauthorized`,{status:401});let d=l=>l.kind===`message`?dispatchMessage({config:e,message:l.message,onMessage:n,uploadPolicy:t,from:a}):dispatchCallbackQuery({config:e,query:l.callbackQuery,from:a});return e.onDrain({dispatch:d,waitUntil:o})})]],async receive",
 );
 
 // Authorized application output controls only the model-visible message and continuation address.
@@ -529,6 +572,12 @@ export interface TelegramVerifiedUpdateContext {
     readonly dispatch: (update: TelegramUpdate) => Promise<Session | null | undefined>;
     readonly waitUntil: (task: Promise<unknown>) => void;
 }
+/** Verified Telegram guest message (Bot API 10.0) that Eve itself does not parse. */
+export interface TelegramGuestUpdateContext {
+    readonly raw: JsonObject;
+    readonly dispatch: (update: TelegramUpdate) => Promise<Session | null | undefined>;
+    readonly waitUntil: (task: Promise<unknown>) => void;
+}
 /** Internal drain hook context using the native verified Telegram dispatcher. */
 export interface TelegramDrainContext {
     readonly dispatch: (update: TelegramUpdate) => Promise<Session | null | undefined>;
@@ -555,6 +604,8 @@ await replaceExact(
 );
 const telegramConfigHooks = `    /** Optional internal endpoint that resumes persisted ingress after process restarts. */
     readonly drainRoute?: string;
+    /** Verifies the drain route; Telegram holds the webhook secret, so the route takes its own token. */
+    readonly drainCredentials?: TelegramChannelCredentials;
     /** Drains persisted updates through the native verified dispatcher. */
     readonly onDrain?: (context: TelegramDrainContext) => Response | Promise<Response>;
     /** Resolves a versioned token when no authenticated HITL callback hook is configured. */
@@ -563,6 +614,10 @@ const telegramConfigHooks = `    /** Optional internal endpoint that resumes per
     readonly onHitlCallbackQuery?: (ctx: TelegramContext, query: TelegramCallbackQuery, continuationToken: string) => TelegramHitlCallbackResult | Promise<TelegramHitlCallbackResult>;
     /** Runs after webhook verification and parsing, before native dispatch. */
     readonly onVerifiedUpdate?: (context: TelegramVerifiedUpdateContext) => Response | Promise<Response>;
+    /** Runs after webhook verification for a \`guest_message\`, which Eve does not parse. */
+    readonly onGuestUpdate?: (context: TelegramGuestUpdateContext) => Response | Promise<Response>;
+    /** Runs after webhook verification for a \`chat_join_request\`, which Eve does not parse. */
+    readonly onChatJoinRequest?: (context: TelegramGuestUpdateContext) => Response | Promise<Response>;
 `;
 await replaceExact(
   runtimePaths.telegramTypes,
@@ -572,5 +627,5 @@ await replaceExact(
 await replaceExact(
   runtimePaths.telegramIndexTypes,
   "type TelegramInboundResultOrPromise, type TelegramReceiveTarget, }",
-  "type TelegramDrainContext, type TelegramHitlCallbackResult, type TelegramInboundResultOrPromise, type TelegramReceiveTarget, type TelegramVerifiedUpdateContext, }",
+  "type TelegramDrainContext, type TelegramGuestUpdateContext, type TelegramHitlCallbackResult, type TelegramInboundResultOrPromise, type TelegramReceiveTarget, type TelegramVerifiedUpdateContext, }",
 );

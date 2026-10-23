@@ -10,6 +10,7 @@ import type { PoolClient } from "pg";
 
 import { AppError } from "../app-error.js";
 import { database } from "../database.js";
+import { withSystemDatabaseContext } from "../database-context.js";
 import { CURRENT_SOFTWARE_VERSION } from "./current-version.js";
 import { compareSemver, parseSemver } from "./semver.js";
 import type {
@@ -106,7 +107,7 @@ export function createSoftwareUpdateRepository(
 
   return {
   async findCurrentOwner() {
-    const result = await database().query<{
+    const result = await withSystemDatabaseContext(() => database().query<{
       family_id: string;
       quiet_end: string | null;
       quiet_start: string | null;
@@ -121,9 +122,12 @@ export function createSoftwareUpdateRepository(
          JOIN users u ON u.id = fm.user_id
          LEFT JOIN user_notification_settings settings ON settings.user_id = u.id
         WHERE fm.role = 'owner'
+          -- Обновляет программу оператор установки: владелец самой ранней семьи. Владелец семьи, созданной по коду
+          -- флаг new-family, обновлений не получает и не делает проверку неоднозначной.
+          AND fm.family_id = (SELECT id FROM families ORDER BY created_at, id LIMIT 1)
         ORDER BY fm.created_at
         LIMIT 2`,
-    );
+    ));
     if (result.rows.length === 0) return null;
     if (result.rows.length !== 1) {
       throw new AppError(

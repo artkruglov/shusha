@@ -68,49 +68,56 @@ export function createCoachDispatcher(dependencies: CoachDispatcherDependencies)
   return async function dispatchCoach(now = new Date()): Promise<number> {
     let sent = 0;
     for (const recipient of await dependencies.recipients()) {
-      const clock = localClock(recipient.settings.timezone, now);
-      const decision = decideInitiative(recipient.settings, recipient.state, now);
-      if (!decision.allowed) {
-        if (decision.reason !== "quiet_hours") reportSkip(recipient, clock.date, decision.reason);
-        continue;
-      }
-      const touch = chooseCoachTouch(recipient.facts, clock, now);
-      if (touch === null) {
-        reportSkip(recipient, clock.date, "no_reason");
-        continue;
-      }
-      if (await dependencies.personalTime(recipient, now) !== null) {
-        reportSkip(recipient, clock.date, "personal_time");
-        continue;
-      }
-      const deliveryRef = await dependencies.claim(recipient, clock.date, touch, now);
-      if (deliveryRef === null) continue;
-      let messageId: string;
+      // До отправки ничего не ушло: сбой чтения или заявки у одного адресата пропускает только его.
       try {
-        messageId = await dependencies.send({ chatId: recipient.telegramUserId, text: touch.text });
+        const clock = localClock(recipient.settings.timezone, now);
+        const decision = decideInitiative(recipient.settings, recipient.state, now);
+        if (!decision.allowed) {
+          if (decision.reason !== "quiet_hours") reportSkip(recipient, clock.date, decision.reason);
+          continue;
+        }
+        const touch = chooseCoachTouch(recipient.facts, clock, now);
+        if (touch === null) {
+          reportSkip(recipient, clock.date, "no_reason");
+          continue;
+        }
+        if (await dependencies.personalTime(recipient, now) !== null) {
+          reportSkip(recipient, clock.date, "personal_time");
+          continue;
+        }
+        const deliveryRef = await dependencies.claim(recipient, clock.date, touch, now);
+        if (deliveryRef === null) continue;
+        let messageId: string;
+        try {
+          messageId = await dependencies.send({ chatId: recipient.telegramUserId, text: touch.text });
+        } catch (error) {
+          const refused = error instanceof MemoryReviewOwnerAlertTransportError;
+          console.error(JSON.stringify({
+            code: refused ? "AGENT_COACH_TOUCH_FAILED" : "AGENT_COACH_TOUCH_AMBIGUOUS",
+            error: error instanceof Error ? error.message : String(error),
+            familyId: recipient.familyId,
+            reason: touch.reason,
+          }));
+          continue;
+        }
+        sent += 1;
+        console.info(JSON.stringify({ code: "AGENT_COACH_TOUCH_SENT", familyId: recipient.familyId, reason: touch.reason }));
+        try {
+          await dependencies.record({
+            at: now, deliveryRef, familyId: recipient.familyId, messageId, sourceKind: "coach",
+            telegramUserId: recipient.telegramUserId, text: touch.text, userId: recipient.userId,
+          });
+        } catch (error) {
+          console.error(JSON.stringify({
+            code: "AGENT_INITIATIVE_DELIVERY_RECORD_FAILED",
+            error: error instanceof Error ? error.message : String(error),
+            familyId: recipient.familyId,
+            sourceKind: "coach",
+          }));
+        }
       } catch (error) {
-        const refused = error instanceof MemoryReviewOwnerAlertTransportError;
         console.error(JSON.stringify({
-          code: refused ? "AGENT_COACH_TOUCH_FAILED" : "AGENT_COACH_TOUCH_AMBIGUOUS",
-          error: error instanceof Error ? error.message : String(error),
-          familyId: recipient.familyId,
-          reason: touch.reason,
-        }));
-        continue;
-      }
-      sent += 1;
-      console.info(JSON.stringify({ code: "AGENT_COACH_TOUCH_SENT", familyId: recipient.familyId, reason: touch.reason }));
-      try {
-        await dependencies.record({
-          at: now, deliveryRef, familyId: recipient.familyId, messageId, sourceKind: "coach",
-          telegramUserId: recipient.telegramUserId, text: touch.text, userId: recipient.userId,
-        });
-      } catch (error) {
-        console.error(JSON.stringify({
-          code: "AGENT_INITIATIVE_DELIVERY_RECORD_FAILED",
-          error: error instanceof Error ? error.message : String(error),
-          familyId: recipient.familyId,
-          sourceKind: "coach",
+          code: "AGENT_COACH_TOUCH_FAILED", error: error instanceof Error ? error.message : String(error), familyId: recipient.familyId,
         }));
       }
     }

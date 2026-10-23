@@ -4,7 +4,6 @@
  * Exports:
  * - `telegramIngressRepository`: production PostgreSQL implementation.
  */
-import { retireMigratedChatIngress, RETIRED_INGRESS_CHAT_SQL } from "./telegram-group-migration/retire-ingress.js";
 import type { PoolClient } from "pg";
 
 import { TELEGRAM_GROUP_TRUST_LOCK_HASH_SEED } from "../config.js";
@@ -12,8 +11,6 @@ import { AppError } from "./app-error.js";
 import { parseExternalGroupToolAllowlist } from "./tool-policy/group-tool-catalog.js";
 import { database } from "./database.js";
 import {
-  type ClaimRow,
-  mapTelegramIngressClaim,
   requireFailure,
   requireLeaseMilliseconds,
   requireNonEmpty,
@@ -22,7 +19,9 @@ import {
   type TelegramIngressRepository,
   validateEnqueueInput,
 } from "./telegram-ingress-contract.js";
+import { telegramIngressClaimRepository } from "./telegram-ingress-claim-repository.js";
 import { telegramIngressProcessingRepository } from "./telegram-ingress-processing-repository.js";
+import { sameTelegramIngressPayload } from "./telegram-rich-ingress.js";
 import { telegramIngressSessionCursorRepository } from "./telegram-ingress-session-cursor-repository.js";
 
 const IGNORED_MEDIA_REASON = "external_media";
@@ -68,6 +67,7 @@ async function requireActiveLease(
 export const telegramIngressRepository: TelegramIngressRepository = {
   ...telegramIngressProcessingRepository,
   ...telegramIngressSessionCursorRepository,
+  ...telegramIngressClaimRepository,
 
   async acceptMedia(input) {
     requireUpdateId(input.updateId);
@@ -140,7 +140,8 @@ export const telegramIngressRepository: TelegramIngressRepository = {
         await client.query("COMMIT");
         return true;
       }
-      await insertIgnoredMedia(client, input.updateId);
+      // A refused file of a post that still has text leaves no tombstone: the text is queued.
+      if (input.textFallback !== true) await insertIgnoredMedia(client, input.updateId);
       await client.query("COMMIT");
       return false;
     } catch (error) {
@@ -209,26 +210,28 @@ export const telegramIngressRepository: TelegramIngressRepository = {
         await client.query("COMMIT");
         return "inserted";
       }
-      const existing = await client.query<{ identical: boolean }>(
+      const existing = await client.query<{ identical: boolean; payload: Record<string, unknown> }>(
         `SELECT queue_id = $2
              AND ingress_continuation_key = $3
-             AND payload = $4::jsonb
-             AND voice_file_id IS NOT DISTINCT FROM $5
-             AND voice_file_size IS NOT DISTINCT FROM $6::bigint
-             AND voice_mime_type IS NOT DISTINCT FROM $7 AS identical
+             AND voice_file_id IS NOT DISTINCT FROM $4
+             AND voice_file_size IS NOT DISTINCT FROM $5::bigint
+             AND voice_mime_type IS NOT DISTINCT FROM $6 AS identical,
+                payload
          FROM telegram_ingress_updates
          WHERE update_id = $1`,
         [
           input.updateId,
           queueId,
           input.continuationKey,
-          JSON.stringify(input.payload),
           input.voice?.fileId ?? null,
           input.voice?.fileSize ?? null,
           input.voice?.mimeType ?? null,
         ],
       );
-      if (existing.rows[0]?.identical !== true) {
+      // The payload is compared in code: a rich post may be stored with its file cut out and
+      // redelivered with it, or the other way round after a grant change (see the comparison).
+      const row = existing.rows[0];
+      if (row?.identical !== true || !sameTelegramIngressPayload(row.payload, input.payload)) {
         throw new AppError(
           "AGENT_TELEGRAM_UPDATE_CONFLICT",
           "Telegram повторно прислал идентификатор обновления с другими данными. Обработка остановлена",
@@ -236,117 +239,6 @@ export const telegramIngressRepository: TelegramIngressRepository = {
       }
       await client.query("COMMIT");
       return "duplicate";
-    } catch (error) {
-      return rollbackAndRethrow(client, error);
-    } finally {
-      client.release();
-    }
-  },
-
-  async claimNext(leaseMilliseconds, options) {
-    requireLeaseMilliseconds(leaseMilliseconds);
-    await retireMigratedChatIngress();
-    // The anti-join makes every non-terminal earlier update a hard FIFO barrier for its queue.
-    const result = await database().query<ClaimRow>(
-      `WITH candidate AS (
-         SELECT item.update_id
-         FROM telegram_ingress_updates item
-         WHERE (item.status = 'pending'
-             OR (item.status = 'processing' AND item.lease_expires_at <= now()))
-           AND NOT (${RETIRED_INGRESS_CHAT_SQL})
-           AND ($2::boolean = false OR item.payload ? 'callback_query')
-           AND NOT EXISTS (
-             SELECT 1
-             FROM telegram_ingress_updates earlier
-             WHERE earlier.queue_id = item.queue_id
-               AND earlier.update_id < item.update_id
-                AND earlier.status IN ('pending', 'processing')
-           )
-         ORDER BY item.update_id
-         FOR UPDATE SKIP LOCKED
-         LIMIT 1
-       )
-       UPDATE telegram_ingress_updates item
-       SET status = 'processing',
-           attempt_count = attempt_count + 1,
-           lease_token = gen_random_uuid(),
-           lease_expires_at = now() + ($1 * interval '1 millisecond'),
-           last_error_code = NULL,
-           last_error_message = NULL,
-           updated_at = now()
-       FROM candidate, telegram_ingress_queues queue
-       WHERE item.update_id = candidate.update_id
-         AND queue.id = item.queue_id
-       RETURNING item.update_id::text, item.queue_id, item.ingress_continuation_key,
-         item.payload, item.attempt_count, item.lease_token::text, item.lease_expires_at,
-         item.voice_file_id, item.voice_file_size::text, item.voice_mime_type,
-         item.voice_transcript, queue.current_continuation_key`,
-      [leaseMilliseconds, options?.callbackOnly === true],
-    );
-    return result.rows[0] ? mapTelegramIngressClaim(result.rows[0]) : null;
-  },
-
-  async claimFollowing(input) {
-    requireLeaseMilliseconds(input.leaseMilliseconds);
-    requireUpdateId(input.afterUpdateId);
-    if (!Number.isSafeInteger(input.limit) || input.limit <= 0) return [];
-    const client = await database().connect();
-    try {
-      await client.query("BEGIN");
-      // The head of this queue is leased by the caller, so every later item is still pending;
-      // the row locks keep a concurrent drain from interleaving a claim into the run.
-      const candidates = await client.query<{
-        payload: Record<string, unknown>;
-        update_id: string;
-        voice_file_id: string | null;
-      }>(
-        `SELECT update_id::text, payload, voice_file_id
-         FROM telegram_ingress_updates
-         WHERE queue_id = $1 AND update_id > $2::bigint AND status = 'pending'
-         ORDER BY update_id
-         LIMIT $3
-         FOR UPDATE`,
-        [input.queueId, input.afterUpdateId, input.limit],
-      );
-      const accepted: string[] = [];
-      for (const candidate of candidates.rows) {
-        if (candidate.voice_file_id !== null || !input.accept(candidate.payload)) break;
-        accepted.push(candidate.update_id);
-      }
-      if (accepted.length === 0) {
-        await client.query("COMMIT");
-        return [];
-      }
-      const claimed = await client.query<ClaimRow>(
-        `WITH claimed AS (
-           UPDATE telegram_ingress_updates item
-           SET status = 'processing',
-               attempt_count = attempt_count + 1,
-               lease_token = gen_random_uuid(),
-               lease_expires_at = now() + ($2 * interval '1 millisecond'),
-               last_error_code = NULL,
-               last_error_message = NULL,
-               updated_at = now()
-           WHERE item.update_id = ANY($1::bigint[]) AND item.status = 'pending'
-           RETURNING item.*
-         )
-         SELECT claimed.update_id::text, claimed.queue_id, claimed.ingress_continuation_key,
-           claimed.payload, claimed.attempt_count, claimed.lease_token::text,
-           claimed.lease_expires_at, claimed.voice_file_id, claimed.voice_file_size::text,
-           claimed.voice_mime_type, claimed.voice_transcript, queue.current_continuation_key
-         FROM claimed
-         JOIN telegram_ingress_queues queue ON queue.id = claimed.queue_id
-         ORDER BY claimed.update_id`,
-        [accepted, input.leaseMilliseconds],
-      );
-      if (claimed.rowCount !== accepted.length) {
-        throw new AppError(
-          "AGENT_TELEGRAM_SERIES_CLAIM_FAILED",
-          "Не удалось захватить серию сообщений Telegram целиком",
-        );
-      }
-      await client.query("COMMIT");
-      return claimed.rows.map(mapTelegramIngressClaim);
     } catch (error) {
       return rollbackAndRethrow(client, error);
     } finally {

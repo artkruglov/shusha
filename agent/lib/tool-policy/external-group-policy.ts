@@ -10,6 +10,8 @@
  */
 import type { SessionAuth } from "eve/context";
 
+import { familylessGroupFromAuth } from "../familyless-group-auth.js";
+
 import {
   parseExternalGroupToolAllowlist,
   type ExternalGroupToolName,
@@ -41,16 +43,23 @@ function externalPolicyCaller(auth: SessionAuth): SessionAuth["current"] {
   return auth.current;
 }
 
-export function resolveExternalGroupPolicyIdentity(auth: SessionAuth): {
-  familyId: string;
-  groupId: string;
-} | null {
+export interface ExternalGroupPolicyIdentity {
+  /** `null` for a group without a family (migration 175), whose turn carries no family attribute. */
+  readonly familyId: string | null;
+  readonly groupId: string;
+}
+
+export function resolveExternalGroupPolicyIdentity(auth: SessionAuth): ExternalGroupPolicyIdentity | null {
   const caller = externalPolicyCaller(auth);
-  const familyId = caller?.attributes.familyId;
-  const groupId = caller?.attributes.groupId;
-  return typeof familyId === "string" && typeof groupId === "string"
-    ? { familyId, groupId }
-    : null;
+  const attributes = caller?.attributes;
+  const groupId = attributes?.groupId;
+  if (typeof groupId !== "string" || groupId === "") return null;
+  // One predicate decides «a group without a family» for the surface, prompt, database scope and billing.
+  if (attributes !== undefined && !Object.hasOwn(attributes, "familyId")) {
+    return familylessGroupFromAuth(attributes)?.groupId === groupId ? { familyId: null, groupId } : null;
+  }
+  const familyId = attributes?.familyId;
+  return typeof familyId === "string" && familyId !== "" ? { familyId, groupId } : null;
 }
 
 export function resolveExternalGroupToolPolicy(auth: SessionAuth): GroupToolPolicy {

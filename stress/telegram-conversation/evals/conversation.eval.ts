@@ -25,6 +25,9 @@ const SPOUSE_TELEGRAM_ID = 903;
 const PEER_BOT_ID = 901;
 const EXTERNAL_CHAT_ID = -900_000_101;
 const FAMILY_CHAT_ID = -900_000_102;
+// A group its administrator turned on without a family (migration 175) and a person of no family.
+const FAMILYLESS_CHAT_ID = -900_000_103;
+const STRANGER_TELEGRAM_ID = 905;
 const FIRST_UPDATE_ID = 900_000_000;
 
 export default defineEval({
@@ -34,6 +37,7 @@ export default defineEval({
     assert.equal(new URL(process.env.DATABASE_URL!).pathname, "/osinara_test");
     const db = database();
     await db.query("TRUNCATE users, families CASCADE");
+    await db.query("DELETE FROM telegram_groups WHERE family_id IS NULL");
     const totalMessages = EXTERNAL_TURN_COUNT + 2;
     const cursors = new Map<string, number>();
     try {
@@ -81,7 +85,7 @@ export default defineEval({
         };
         const response = await t.target.fetch("/eve/v1/telegram", {
           method: "POST",
-          headers: { "x-telegram-bot-api-secret-token": "conversation-test-secret" },
+          headers: { "x-telegram-bot-api-secret-token": "conversation-test-secret-0123456789abcdef" },
           body: JSON.stringify({ update_id: FIRST_UPDATE_ID + ordinal, message }),
         });
         assert.equal(response.status, 200);
@@ -143,7 +147,15 @@ export default defineEval({
         { addressed: false, chatId: FAMILY_CHAT_ID, from: OWNER_TELEGRAM_ID, marker: "conversation-capture-1" },
         // T05/T06: закрыть два из них в личке одним вызовом.
         { chatId: OWNER_TELEGRAM_ID, from: OWNER_TELEGRAM_ID, marker: "conversation-close-1" },
+        // Группа без семьи: ответ по имени чужому человеку, без семейных инструментов и файлов.
+        { chatId: FAMILYLESS_CHAT_ID, from: STRANGER_TELEGRAM_ID, marker: "conversation-free-1" },
       ];
+      await db.query(
+        `INSERT INTO telegram_groups (family_id, telegram_chat_id, title, type, message_mode, tool_allowlist,
+           enabled_by_telegram_user_id, monthly_budget_usd)
+         VALUES (NULL, $1, 'Free group test', 'external', 'addressed_only', ARRAY['web_search','web_fetch'], $2, 1)`,
+        [String(FAMILYLESS_CHAT_ID), String(STRANGER_TELEGRAM_ID)],
+      );
       // Напоминание создаётся репозиторием, а не ходом модели: `manage_reminder` всегда требует
       // подтверждения кнопкой, а возобновление припаркованного хода проверяется отдельными
       // интеграционными тестами HITL. Здесь важно другое — что готовый сигнал доживает до срока и
@@ -163,7 +175,7 @@ export default defineEval({
         const updateId = FIRST_UPDATE_ID + totalMessages + index + 1;
         const response = await t.target.fetch("/eve/v1/telegram", {
           method: "POST",
-          headers: { "x-telegram-bot-api-secret-token": "conversation-test-secret" },
+          headers: { "x-telegram-bot-api-secret-token": "conversation-test-secret-0123456789abcdef" },
           body: JSON.stringify({ update_id: updateId, message: {
             message_id: totalMessages + index + 1,
             chat: { id: step.chatId, type: step.chatId > 0 ? "private" : "supergroup", title: "Acceptance" },
@@ -247,6 +259,19 @@ export default defineEval({
             [FIRST_UPDATE_ID+totalMessages+4])).rows;
           assert.ok(mounts.length>0 && original.length>0,"both recipient sessions initialized their sandbox");
           assert.deepEqual(mounts[0]!.mounts,original[0]!.mounts,"reply branch has exactly the recipient's original mounts");
+        }
+        if (step.marker === "conversation-free-1") {
+          const sandboxes = (await db.query<{ mounts: unknown }>(
+            "SELECT mounts FROM telegram_conversation_test_sandboxes WHERE eve_session_id=$1", [delivered])).rows;
+          // Eve may or may not open the sandbox for this turn; when it does, nothing is mounted.
+          assert.ok(sandboxes.every((row) => JSON.stringify(row.mounts) === "[]"), "a group without a family gets an empty sandbox");
+          const sessionRow = (await db.query<{ family_id: string | null }>(
+            `SELECT s.family_id FROM conversation_sessions s JOIN telegram_groups g ON g.id = s.group_id
+              WHERE g.telegram_chat_id = $1`, [String(FAMILYLESS_CHAT_ID)])).rows;
+          assert.deepEqual(sessionRow, [{ family_id: null }]);
+          const sent = (await db.query("SELECT 1 FROM telegram_conversation_test_deliveries WHERE body->>'chat_id'=$1 AND body->>'text' LIKE '%reply-conversation-free-1%'",
+            [String(FAMILYLESS_CHAT_ID)])).rowCount;
+          assert.equal(sent, 1, "the answer reached the group once");
         }
         if (step.marker === "conversation-status-1") {
           session.messageIncludes("Выбираю парк у реки");
@@ -362,7 +387,9 @@ export default defineEval({
       assert.deepEqual(sessions.map((s) => s.completed_turns), [SESSION_MAX_COMPLETED_TURNS, EXTERNAL_TURN_COUNT - SESSION_MAX_COMPLETED_TURNS - 1]);
       // Reply на доставленную подборку открывает шестую ветку: её mounts выше сверены
       // с исходной личной сессией получателя, а автор журнала — с его verified identity.
-      assert.equal((await db.query("SELECT DISTINCT eve_session_id FROM telegram_conversation_test_sandboxes")).rowCount, 6);
+      // The group without a family opens an empty sandbox (checked above); it is not one of the six.
+      assert.equal((await db.query(
+        "SELECT DISTINCT eve_session_id FROM telegram_conversation_test_sandboxes WHERE mounts <> '[]'::jsonb")).rowCount, 6);
       assert.equal((await db.query("SELECT 1 FROM memory_review_owner_alerts WHERE family_id=$1", [family.id])).rowCount, 0);
       const deliveries = (await db.query<{ body: { chat_id: number | string; text?: string } }>(
         "SELECT body FROM telegram_conversation_test_deliveries",
@@ -386,6 +413,7 @@ export default defineEval({
       })}`);
     } finally {
       await db.query("TRUNCATE users, families CASCADE");
+    await db.query("DELETE FROM telegram_groups WHERE family_id IS NULL");
       await db.query("DELETE FROM telegram_ingress_updates WHERE update_id BETWEEN $1 AND $2", [
         FIRST_UPDATE_ID + 1, FIRST_UPDATE_ID + totalMessages + 100,
       ]);

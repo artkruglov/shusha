@@ -65,6 +65,8 @@ describe("software update callback durable ingress", () => {
       acceptMedia: vi.fn(),
       authorizeVoice: vi.fn(),
       botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
       handleSoftwareUpdateCallback,
       leaseMilliseconds: 60_000,
       repository,

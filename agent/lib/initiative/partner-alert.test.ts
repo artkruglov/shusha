@@ -30,7 +30,7 @@ describe("partner alert", () => {
 
   it("marks the single repeat and never counts a third time", () => {
     expect(formatPartnerAlert([item({ repeated: true })])!)
-      .toContain("уже спрашивала неделю назад");
+      .toContain("напоминаю");
   });
 
   it("keeps one long title from filling the message", () => {

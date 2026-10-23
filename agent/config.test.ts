@@ -19,7 +19,8 @@ function stubRequiredEnvironment(): void {
   vi.stubEnv("INVITATION_SIGNING_SECRET", "12345678901234567890123456789012");
   vi.stubEnv("TELEGRAM_BOT_TOKEN", "telegram-test-token");
   vi.stubEnv("TELEGRAM_BOT_USERNAME", "osinara_test_bot");
-  vi.stubEnv("TELEGRAM_WEBHOOK_SECRET_TOKEN", "telegram-webhook-test-secret");
+  vi.stubEnv("TELEGRAM_WEBHOOK_SECRET_TOKEN", "telegram-webhook-test-secret-0123456789");
+  vi.stubEnv("AGENT_INTERNAL_TOKEN", "agent-internal-test-token-0123456789abcdef");
 }
 
 describe("requireRuntimeEnvironment", () => {
@@ -41,6 +42,26 @@ describe("requireRuntimeEnvironment", () => {
     vi.stubEnv("GROQ_API_KEY", "");
 
     expect(requireRuntimeEnvironment().GROQ_API_KEY).toBeUndefined();
+  });
+
+  it.each([
+    ["shorter than 32 characters", "s".repeat(31)],
+    ["outside the Telegram alphabet", `${"s".repeat(40)}!`],
+    ["longer than Telegram accepts", "s".repeat(257)],
+  ])("rejects a webhook secret %s", (_label, secret) => {
+    // One secret guards the webhook, the drain route and the approval sweep, so it has to be as
+    // strong as the invitation signing secret (security review, 5 October 2026).
+    stubRequiredEnvironment();
+    vi.stubEnv("TELEGRAM_WEBHOOK_SECRET_TOKEN", secret);
+
+    expect(() => requireRuntimeEnvironment()).toThrowError(/TELEGRAM_WEBHOOK_SECRET_TOKEN/);
+  });
+
+  it("rejects an internal token equal to the webhook secret Telegram holds", () => {
+    stubRequiredEnvironment();
+    vi.stubEnv("AGENT_INTERNAL_TOKEN", "telegram-webhook-test-secret-0123456789");
+
+    expect(() => requireRuntimeEnvironment()).toThrowError(/AGENT_INTERNAL_TOKEN/);
   });
 
   it("rejects missing credentials for the active agent model route", () => {

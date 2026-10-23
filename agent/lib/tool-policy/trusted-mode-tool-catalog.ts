@@ -19,6 +19,7 @@ import getCurrentTime from "../tools/get_current_time.js";
 import getMemorySource from "../tools/get_memory_source.js";
 import groceryCart from "../tools/grocery_cart.js";
 import importTelegramAttachment from "../tools/import_telegram_attachment.js";
+import browser from "../tools/browser.js";
 import inspectWorkspaceImage from "../tools/inspect_workspace_image.js";
 import manageSkill from "../tools/manage_skill.js";
 import reviewImprovements from "../tools/review_improvements.js";
@@ -107,6 +108,8 @@ export const TRUSTED_MODE_TOOLS: ToolMap = {
   ...(IMAGE_GENERATION_AVAILABLE
     ? { generate_image: generateImage as unknown as AnyToolDefinition }
     : {}),
+  // The logged-in Chrome lives beside the session's sandbox, out of reach of the model's Bash.
+  browser: browser as unknown as AnyToolDefinition,
   get_current_time: getCurrentTime as unknown as AnyToolDefinition,
   inspect_workspace_image: inspectWorkspaceImage as unknown as AnyToolDefinition,
   manage_skill: manageSkill as unknown as AnyToolDefinition,

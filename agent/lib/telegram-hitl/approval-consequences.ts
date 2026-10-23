@@ -14,6 +14,8 @@ export const DEFAULT_CONSEQUENCE =
 
 export const GOOGLE_WORKSPACE_CONSEQUENCE =
   "Команда будет выполнена один раз в текущем профиле. Автоматического повтора при ошибке не будет.";
+export const BROWSER_CLICK_CONSEQUENCE =
+  "Бот нажмёт это в браузере чата один раз. Это может оплатить, заказать, записать или отправить данные с сайта.";
 export const SPACE_ROLE_CONSEQUENCE = "Ограничения начнут действовать сразу. Расширение прав потребует нового пространства.";
 
 export const SCHEDULE_CONSEQUENCES: Readonly<Record<string, string>> = {

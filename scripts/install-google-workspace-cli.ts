@@ -4,8 +4,15 @@
  * Exports:
  * - `GWS_VERSION`: exact npm package and release version.
  * - `resolveGoogleWorkspaceCliArtifact`: Linux architecture to official artifact/checksum mapping.
+ * - `resolveGoogleWorkspaceCliVendoredPath`: the archive kept in the repository, if any.
  * - `resolveGoogleWorkspaceCliDownloadUrl`: official GitHub release URL for a pinned artifact.
- * - `installGoogleWorkspaceCli`: verified official download and package-local extraction.
+ * - `installGoogleWorkspaceCli`: verified archive (vendored, else downloaded) extracted into the package.
+ *
+ * Key construct:
+ * - The archive for the x86_64 image lives in vendor/google-workspace-cli, so an image build does
+ *   not depend on GitHub: on 4 October 2026 the download failed four builds in a row (a 403 from
+ *   the release-assets API, whose unauthenticated limit is sixty calls an hour per address, and
+ *   timeouts). A download, when needed, goes to the direct release URL and is retried.
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -19,8 +26,10 @@ export const GWS_VERSION = "0.22.5";
 
 const DOWNLOAD_TIMEOUT_MILLISECONDS = 120_000;
 const GWS_PACKAGE_DIRECTORY = resolve("node_modules/@googleworkspace/cli");
-const GWS_RELEASE_ASSET_API_BASE_URL =
-  "https://api.github.com/repos/googleworkspace/cli/releases/assets";
+const GWS_VENDOR_DIRECTORY = resolve("vendor/google-workspace-cli");
+const GWS_RELEASE_DOWNLOAD_BASE_URL = "https://github.com/googleworkspace/cli/releases/download";
+const DOWNLOAD_ATTEMPTS = 3;
+const DOWNLOAD_RETRY_DELAY_MILLISECONDS = 5_000;
 const execFileAsync = promisify(execFile);
 
 interface GoogleWorkspaceCliArtifact {
@@ -58,23 +67,24 @@ export function resolveGoogleWorkspaceCliArtifact(
 export function resolveGoogleWorkspaceCliDownloadUrl(
   artifact: GoogleWorkspaceCliArtifact,
 ): string {
-  return `${GWS_RELEASE_ASSET_API_BASE_URL}/${artifact.releaseAssetId}`;
+  return `${GWS_RELEASE_DOWNLOAD_BASE_URL}/v${GWS_VERSION}/${artifact.archiveName}`;
 }
 
-async function downloadVerifiedArchive(artifact: GoogleWorkspaceCliArtifact): Promise<Buffer> {
-  const response = await fetch(resolveGoogleWorkspaceCliDownloadUrl(artifact), {
-    headers: {
-      Accept: "application/octet-stream",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MILLISECONDS),
-  });
-  if (!response.ok) {
-    throw new Error(
-      `AGENT_GWS_DOWNLOAD_FAILED: Official release returned HTTP ${response.status} for gws ${GWS_VERSION}`,
-    );
+/** The repository's copy of the archive for this artifact, or null when it is not kept. */
+export async function resolveGoogleWorkspaceCliVendoredPath(
+  artifact: GoogleWorkspaceCliArtifact,
+  vendorDirectory = GWS_VENDOR_DIRECTORY,
+): Promise<string | null> {
+  const path = join(vendorDirectory, artifact.archiveName);
+  try {
+    await access(path);
+    return path;
+  } catch {
+    return null;
   }
-  const archive = Buffer.from(await response.arrayBuffer());
+}
+
+function verifiedArchive(archive: Buffer, artifact: GoogleWorkspaceCliArtifact): Buffer {
   const actualHash = createHash("sha256").update(archive).digest("hex");
   if (actualHash !== artifact.sha256) {
     throw new Error(
@@ -82,6 +92,44 @@ async function downloadVerifiedArchive(artifact: GoogleWorkspaceCliArtifact): Pr
     );
   }
   return archive;
+}
+
+async function downloadVerifiedArchive(artifact: GoogleWorkspaceCliArtifact): Promise<Buffer> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= DOWNLOAD_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(resolveGoogleWorkspaceCliDownloadUrl(artifact), {
+        headers: { Accept: "application/octet-stream" },
+        redirect: "follow",
+        signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MILLISECONDS),
+      });
+      if (!response.ok) {
+        throw new Error(
+          `AGENT_GWS_DOWNLOAD_FAILED: Official release returned HTTP ${response.status} for gws ${GWS_VERSION}`,
+        );
+      }
+      return verifiedArchive(Buffer.from(await response.arrayBuffer()), artifact);
+    } catch (error) {
+      lastError = error;
+      // A checksum mismatch is not a network condition; retrying would download the same bytes.
+      if (error instanceof Error && error.message.startsWith("AGENT_GWS_CHECKSUM_MISMATCH")) throw error;
+      console.warn(`gws download attempt ${attempt} of ${DOWNLOAD_ATTEMPTS} failed: ${error instanceof Error ? error.message : String(error)}`);
+      if (attempt < DOWNLOAD_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, DOWNLOAD_RETRY_DELAY_MILLISECONDS * attempt));
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+/** The vendored archive when the repository keeps one for this artifact, else a download. */
+async function obtainVerifiedArchive(artifact: GoogleWorkspaceCliArtifact): Promise<Buffer> {
+  const vendored = await resolveGoogleWorkspaceCliVendoredPath(artifact);
+  if (vendored !== null) {
+    console.log(`gws ${GWS_VERSION}: using vendored ${artifact.archiveName}`);
+    return verifiedArchive(await readFile(vendored), artifact);
+  }
+  return downloadVerifiedArchive(artifact);
 }
 
 export async function installGoogleWorkspaceCli(): Promise<void> {
@@ -110,7 +158,7 @@ export async function installGoogleWorkspaceCli(): Promise<void> {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "osinara-gws-install-"));
   const archivePath = join(temporaryDirectory, artifact.archiveName);
   try {
-    const archive = await downloadVerifiedArchive(artifact);
+    const archive = await obtainVerifiedArchive(artifact);
     await writeFile(archivePath, archive, { mode: 0o600 });
     await rm(installDirectory, { force: true, recursive: true });
     await mkdir(installDirectory, { mode: 0o755, recursive: true });

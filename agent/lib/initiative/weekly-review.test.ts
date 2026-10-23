@@ -51,7 +51,7 @@ describe("weekly review", () => {
     }))!;
 
     const order = ["Просрочено", "Записаться к врачу", "Жду ответа", "Купить билеты",
-      "Без следующего шага", "Разобрать гараж", "Идей на «когда-нибудь»: 1"];
+      "Без срока и плана", "Разобрать гараж", "Идей на «когда-нибудь»: 1"];
     let cursor = -1;
     for (const fragment of order) {
       const next = text.indexOf(fragment);
@@ -115,5 +115,17 @@ describe("weekly review", () => {
 
     for (const question of WEEKLY_REVIEW_QUESTIONS) expect(text).toContain(question);
     expect(text).not.toMatch(/подряд|рекомендую|советую|вклад/u);
+  });
+
+  it("shows the spheres and asks about one empty sphere, only when most tasks carry a sphere (21 October 2026)", () => {
+    const text = formatWeeklyReview(review({ tasks: [
+      task({ lifeArea: "work", title: "Предложение Т-Банку" }), task({ lifeArea: "work", title: "Записка" }),
+      task({ lifeArea: "home", title: "Шины" }), task({ lifeArea: "kids", title: "Репетитор" }),
+    ] }))!;
+    expect(text).toContain("Сферы: Семья и дети 1 · Дом и забота 1 · Работа 2");
+    expect(text).toContain("В «Для себя» на эту неделю ничего нет. Это сознательно или руки не дошли?");
+    // Most tasks without a sphere: «empty» would mean «not marked», so no sphere line at all.
+    const unmarked = formatWeeklyReview(review({ tasks: [task({ lifeArea: "work" }), task(), task()] }))!;
+    expect(unmarked).not.toContain("Сферы:");
   });
 });

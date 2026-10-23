@@ -103,6 +103,22 @@ describeWithDatabase("softwareUpdateRepository", () => {
 
   afterAll(async () => closeDatabase());
 
+  it("finds the operator's owner and ignores the owner of a family started by a new-family code", async () => {
+    const operator = await fixture();
+    const friendFamily = await database().query<{ id: string }>("INSERT INTO families (name) VALUES ('Друзья') RETURNING id");
+    const friend = await database().query<{ id: string }>(
+      "INSERT INTO users (telegram_user_id, display_name) VALUES ('202', 'Друг') RETURNING id",
+    );
+    await database().query(
+      "INSERT INTO family_memberships (family_id, user_id, role) VALUES ($1, $2, 'owner')",
+      [friendFamily.rows[0]!.id, friend.rows[0]!.id],
+    );
+
+    const owner = await softwareUpdateRepository.findCurrentOwner();
+
+    expect(owner?.familyId).toBe(operator.familyId);
+  });
+
   it("deduplicates the target version without replacing its owner binding", async () => {
     const current = await pendingProposal();
 

@@ -3,7 +3,8 @@
  *
  * Проверяется: пишем только тем, кто сам писал боту в личку и не сказал «без коуча»; факты повода
  * читаются из структуры (предложение партнёра, тихая традиция, окна, традиции семьи); касание одно
- * в сутки; отправленный вопрос виден следующему ходу личного чата.
+ * в сутки; отправленный вопрос виден следующему ходу личного чата. Тихая традиция семьи берётся и чужая,
+ * а «что делать вместе» молчит, пока у семьи есть хоть одна живая традиция (чужая личная только фактом).
  */
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -130,6 +131,31 @@ dbDescribe("coach data", () => {
     expect(after.openDecision).toBeNull();
     expect(after.lastByReason.decision_open).toBeInstanceOf(Date);
     expect(after.touchesLastWeek).toBe(1);
+  });
+
+  it("asks about a quiet family tradition someone else wrote, and counts any living tradition of the family", async () => {
+    await privateChat(fixture.owner);
+    await settings(fixture.owner, true);
+    // A personal tradition of the spouse: only its existence counts, its title never reaches the owner.
+    await database().query(
+      `INSERT INTO shared_tasks(family_id, scope, creator_telegram_id, assignee_telegram_id, title, status, kind, created_at)
+       VALUES ($1, 'personal', $2, $2, 'Йога по утрам', 'accepted', 'ritual', now() - interval '30 days')`,
+      [fixture.familyId, fixture.spouse.telegramUserId],
+    );
+    let facts = (await ownerRecipient())!.facts;
+    expect(facts).toMatchObject({ familyRituals: 1, quietRitual: null });
+
+    const shared = await database().query<{ id: string }>(
+      `INSERT INTO shared_tasks(family_id, scope, creator_telegram_id, assignee_telegram_id, title, status, kind, created_at)
+       VALUES ($1, 'family', $2, $2, 'Настолки по средам', 'accepted', 'ritual', now() - interval '30 days') RETURNING id`,
+      [fixture.familyId, fixture.spouse.telegramUserId],
+    );
+    facts = (await ownerRecipient())!.facts;
+    expect(facts.quietRitual).toEqual({ id: shared.rows[0]!.id, title: "Настолки по средам" });
+    expect(facts.familyRituals).toBe(2);
+
+    await database().query("UPDATE shared_tasks SET status = 'cancelled' WHERE family_id = $1", [fixture.familyId]);
+    expect((await ownerRecipient())!.facts).toMatchObject({ familyRituals: 0, quietRitual: null });
   });
 
   it("claims one touch a day and the sent question reaches the next private turn", async () => {

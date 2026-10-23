@@ -45,6 +45,8 @@ const ACCEPTANCE: Readonly<Record<string, {
   readonly reply?: (results: readonly ToolResult[]) => string;
   readonly steps: readonly AcceptanceStep[];
 }>> = {
+  // A group without a family (migration 175): a plain answer, with no family tool on offer.
+  "conversation-free": { steps: [] },
   "conversation-decision": {
     steps:[
       {input:()=>({action:"participants"}),tool:"manage_joint_decision"},
@@ -142,6 +144,10 @@ const ACCEPTANCE: Readonly<Record<string, {
     steps: [{ input: () => ({ action: "list", view: "promised" }), tool: "manage_shared_tasks" }],
     reply: (results) => `titles=${taskTitles(results).join("|")}`,
   },
+  // Замер ёмкости (evals/capacity.eval.ts): каждый ход читает дела человека настоящим инструментом.
+  "conversation-load": {
+    steps: [{ input: () => ({ action: "list", view: "mine" }), tool: "manage_shared_tasks" }],
+  },
   "conversation-personal": {
     steps: [{
       input: () => ({ action: "create", title: "Сходить к стоматологу" }),
@@ -211,6 +217,10 @@ export default defineAgent({
       throw new Error("TEST_CHILD_ROOT_AUTHORITY_LEAK");
     }
     if (marker === `conversation-probe-${FAILING_ORDINAL}`) throw new Error("TEST_MODEL_FAILURE");
+    const familyTools = ["remember", "read_profile_view", "manage_shared_tasks", "manage_behavior_preference"];
+    if (marker.startsWith("conversation-free-") && tools.some((tool) => familyTools.includes(tool.name))) {
+      throw new Error("TEST_FAMILYLESS_FAMILY_TOOL_LEAK");
+    }
     const last = toolResults.at(-1);
     if (last?.isError) throw new Error(`TEST_WORKSPACE_TOOL_FAILED: ${JSON.stringify(last)}`);
     if (scenario) {

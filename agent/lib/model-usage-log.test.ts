@@ -366,6 +366,13 @@ describe("configured model transport usage logging", () => {
 });
 
 describe("formatStepUsageLog", () => {
+  it("names the family of the step when the session knows it", () => {
+    const event = { data: { finishReason: "stop", stepIndex: 0, turnId: "turn_1", usage: { inputTokens: 5, outputTokens: 1 } }, type: "step.completed" as const };
+
+    expect(JSON.parse(formatStepUsageLog(event, { channelKind: "telegram", familyId: "fam-1", sessionId: "s" })).familyId).toBe("fam-1");
+    expect(JSON.parse(formatStepUsageLog(event, { channelKind: "telegram", sessionId: "s" }))).not.toHaveProperty("familyId");
+  });
+
   it("projects session identity and framework usage from a step.completed event", () => {
     expect(JSON.parse(formatStepUsageLog({
       data: {

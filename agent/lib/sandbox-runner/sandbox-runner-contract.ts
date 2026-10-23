@@ -122,6 +122,8 @@ const environmentSchema = z.record(
 const processRequestSchema = z.strictObject({
   command: z.string().min(1).max(SANDBOX_RUNNER_COMMAND_MAX_CHARACTERS),
   environment: environmentSchema.optional(),
+  /** `browser`: the session's browser companion (logged-in Chrome), never the Bash container. */
+  target: z.enum(["browser"]).optional(),
   timeoutMs: z.number().int().positive().max(SANDBOX_RUNNER_TIMEOUT_MAX_MS).optional(),
   workingDirectory: z.string().min(1).max(4_096).optional(),
 });

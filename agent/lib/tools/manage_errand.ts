@@ -11,7 +11,7 @@ import { runErrandResearch } from "../errands/errand-research-runner.js";
 import { errandResearchModel } from "../model-registry.js";
 import { modelProviderConfig } from "../model-provider-config.js";
 
-const researchErrand = createErrandResearchService(brief => runErrandResearch(errandResearchModel, brief));
+const researchErrand = createErrandResearchService((brief, familyId) => runErrandResearch(errandResearchModel, brief, familyId));
 
 export default defineTool({
   description: [

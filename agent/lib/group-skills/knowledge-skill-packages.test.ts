@@ -45,4 +45,16 @@ describe("knowledge skill packages", () => {
     expect(Object.keys(revoked)).not.toContain("auto-analyst");
     expect(Object.keys(await resolve(externalAuth(["web_search"]), { subagent: true }))).not.toContain("auto-analyst");
   });
+
+  // A group without a family (migration 175) has no skills and no workspace to put them in.
+  it("gives a group without a family no skill at all, even with the web_search grant", async () => {
+    const resolve = createExternalTurnSkillResolver({ packagesForGroup: async () => [] });
+    const auth = externalAuth(["web_search"]);
+    const { familyId: _familyId, ...rest } = auth.current!.attributes;
+    const familyless = {
+      ...auth,
+      current: { ...auth.current!, attributes: { ...rest, groupId: "6f1c2f9e-3b1a-4c55-9d8e-0a1b2c3d4e5f", telegramChatId: "-1001" } },
+    };
+    await expect(resolve(familyless)).resolves.toEqual({});
+  });
 });

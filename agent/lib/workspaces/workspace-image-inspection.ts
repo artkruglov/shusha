@@ -29,6 +29,8 @@ interface ImageAnalysisInput {
   bytes: Uint8Array;
   mediaType: string;
   question: string;
+  /** The verified turn's family, whose monthly budget pays for the call (migration 181). */
+  usageFamilyId: string;
 }
 
 interface WorkspaceImageInspectorDependencies {
@@ -133,6 +135,7 @@ export function createWorkspaceImageInspector(
         bytes,
         mediaType,
         question: input.question,
+        usageFamilyId: auth.familyId,
       });
       if (!analysis.trim()) {
         throw new AppError(
@@ -177,6 +180,7 @@ export function createWorkspaceImageInspector(
       bytes: binary.bytes,
       mediaType: binary.file.mediaType,
       question: input.question,
+      usageFamilyId: auth.familyId,
     });
     if (!analysis.trim()) {
       throw new AppError(
@@ -207,6 +211,7 @@ export const inspectWorkspaceImage = createWorkspaceImageInspector({
       }],
       maxRetries: 0,
       model: visionModel,
+      providerOptions: { osinara: { usageFamilyId: input.usageFamilyId } },
     });
     return result.text;
   },

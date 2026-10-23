@@ -6,6 +6,8 @@
  * - `TelegramGroupMessageMode`: persisted group collection modes.
  * - `RegisteredGroup`: persisted Telegram group policy.
  * - `ConversationAccess`: scopes exposed to Eve runtime code.
+ * - `FamilyConversationAccess`, `hasFamilyAccess`: access that belongs to a family (every chat but a
+ *   group without one).
  * - `evaluateConversationAccess`: returns an explicit allow/deny decision.
  * - `resolveConversationAccess`: rejects unknown callers before model execution.
  */
@@ -24,13 +26,13 @@ export interface FamilyIdentity {
 }
 
 interface RegisteredGroupBase {
-  familyId: string;
   groupId: string;
   telegramChatId: string;
   toolAllowlist: string[];
 }
 
-export type RegisteredGroup = RegisteredGroupBase & (
+/** A group a family registered; the only kind before migration 175. */
+export type FamilyGroup = RegisteredGroupBase & { familyId: string } & (
   | {
     messageMode: StandardTelegramGroupMessageMode;
     type: "family_private";
@@ -41,12 +43,28 @@ export type RegisteredGroup = RegisteredGroupBase & (
   }
 );
 
+/** A group its Telegram administrator turned on without any family (migration 175): always external. */
+export type FamilylessGroup = RegisteredGroupBase & {
+  familyId: null;
+  messageMode: TelegramGroupMessageMode;
+  type: "external";
+};
+
+export type RegisteredGroup = FamilyGroup | FamilylessGroup;
+
 export interface ConversationAccess {
-  familyId: string;
+  /** `null` only in a group without a family (migration 175): scope `group`, role `external`. */
+  familyId: string | null;
   groupId: string | null;
   memoryScopes: Array<"family" | "group" | "personal">;
   role: FamilyRole | "external";
   userId: string | null;
+}
+
+export type FamilyConversationAccess = ConversationAccess & { familyId: string };
+
+export function hasFamilyAccess(access: ConversationAccess): access is FamilyConversationAccess {
+  return access.familyId !== null;
 }
 
 export interface ResolveConversationAccessInput {
@@ -120,6 +138,15 @@ export function evaluateConversationAccess(
         role: input.identity.role,
         userId: input.identity.userId,
       },
+      allowed: true,
+    };
+  }
+
+  // A group its Telegram administrator turned on has no family: nobody in it carries a family
+  // identity, whoever writes, so a family member there is as external as anyone else.
+  if (group.familyId === null) {
+    return {
+      access: { familyId: null, groupId: group.groupId, memoryScopes: ["group"], role: "external", userId: null },
       allowed: true,
     };
   }

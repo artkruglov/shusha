@@ -51,7 +51,19 @@ const CORE_CHARACTER_BUDGET = 12_900;
 // Raised by 300 on 1 October 2026 for the same unowned-task rule (the planning section is shared).
 // Raised by 700 on 1 October 2026 for the projects rule (GTD: project vs action, the `<task_projects>`
 // block, tidy-up proposals) and the weekly-review reply line.
-const PRIVATE_CHARACTER_BUDGET = 21_000;
+// Raised by 1 600 on 1 October 2026: the rules for messages that arrive while a turn works (ilkruglov d52311d).
+// Raised by 300 on 7 October 2026: training knowledge is a snapshot, volatile facts are checked
+// before the answer, also inside advice or a comparison (after nyxandro 4dd372e9).
+// Raised by 100 on 19 October 2026: a reply to the weekly «what gets in the way» question reaches the
+// developer only through /feedback.
+// Raised by 300 on 21 October 2026: «Помоги начать» under the message about a task that has not moved
+// asks for one small first step (`STALE_TASK_HELP_RULES`, private block only).
+// Raised by 300 on 21 October 2026 (owner): tasks are clarified as a GTD coach would, a project is named as
+// an outcome, an area or «Встречи» is never one, and a new project comes only after the person's «да».
+// Raised by 100 the same day: «записала» only after a create, and the project question carries the first step.
+// Raised by 300 on 21 October 2026 (owner): a reply to a feature tip is helped to try it at once with nothing promised
+// that does not exist, and the «главное завтра» of the evening reflection becomes a task for tomorrow.
+const PRIVATE_CHARACTER_BUDGET = 24_000;
 // Raised by 400 on 5 September 2026 for the memory selection criterion and slot guidance, then by
 // 300 on 6 September for the addressing section with the explicit silence directive, then by
 // 300 the same day for the pending-messages rule in that section, then by 200 on 7 September for
@@ -71,7 +83,10 @@ const PRIVATE_CHARACTER_BUDGET = 21_000;
 // Raised by 300 on 1 October 2026: record on the author unless asked for "someone take it", say
 // unowned and unaccepted plainly, and name the reason a closure was refused.
 // Raised by 700 on 1 October 2026 for the same projects rule.
-const FAMILY_CHARACTER_BUDGET = 21_000;
+// Raised by 1 600 on 1 October 2026 for the same waiting-messages rules.
+// Raised by 300 on 7 October 2026 for the same volatile-facts sentence.
+// Raised by 400 on 21 October 2026 for the same GTD-coach and projects rules.
+const FAMILY_CHARACTER_BUDGET = 23_300;
 // Raised by 400 on 6 September 2026 for the addressing section with the explicit silence directive,
 // then by 2 200 on 7 September for the participants section ported from upstream v0.21.2: opinions
 // about behaviour on request, comparisons by a stated criterion, no diagnoses, no template refusal,

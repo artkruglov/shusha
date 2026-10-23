@@ -6,6 +6,8 @@
  * - `imageGenerationOperationRepository`: reserves and settles one billable call ID.
  */
 import { AppError } from "../app-error.js";
+import type { Pool, PoolClient } from "pg";
+
 import { database } from "../database.js";
 import type { WorkspaceFileRecord } from "../workspaces/workspace-file-record.js";
 
@@ -55,21 +57,24 @@ function invalidState(operationKey: string, reason: string): AppError {
 
 export const imageGenerationOperationRepository = {
   async begin(input: {
+    /** What was asked, for the gallery's caption (migration 187). */
+    description?: string;
     inputHash: string;
     operationKey: string;
     outputPath: string;
     workspaceId: string;
-  }): Promise<ImageGenerationReservation> {
-    const inserted = await database().query(
+  }, client: Pool | PoolClient = database()): Promise<ImageGenerationReservation> {
+    const inserted = await client.query(
       `INSERT INTO image_generation_operations
-         (operation_key, workspace_id, input_hash, output_path)
-       VALUES ($1, $2, $3, $4)
+         (operation_key, workspace_id, input_hash, output_path, description)
+       VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (operation_key) DO NOTHING`,
-      [input.operationKey, input.workspaceId, input.inputHash, input.outputPath],
+      [input.operationKey, input.workspaceId, input.inputHash, input.outputPath,
+        input.description === undefined ? null : Array.from(input.description.trim()).slice(0, 300).join("") || null],
     );
     if (inserted.rowCount === 1) return { state: "execute", workspaceId: input.workspaceId };
 
-    const existing = await database().query<OperationRow>(
+    const existing = await client.query<OperationRow>(
       `SELECT workspace_id, input_hash, output_path, status, result, error_code
          FROM image_generation_operations
         WHERE operation_key = $1`,

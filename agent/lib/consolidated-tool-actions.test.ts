@@ -80,6 +80,12 @@ describe("consolidated tool action schemas", () => {
       recurrence: null,
       timezone: "Europe/Moscow",
     }).success).toBe(true);
+    // Модель шлёт `null` или пустую строку вместо пропуска поля (бэклог 30 сентября 2026): это то же, что нет области.
+    for (const scope of [null, ""]) {
+      expect(schema.safeParse({
+        action: "create", content: "Позвонить", firstRunAt: "2026-08-01T10:00:00+03:00", recurrence: null, scope, timezone: "Europe/Moscow",
+      }).success).toBe(true);
+    }
     expect(schema.safeParse({ action: "pause", id: ID }).success).toBe(true);
     expect(schema.safeParse({ action: "resume", id: ID }).success).toBe(true);
     expect(schema.safeParse({ action: "delete", id: ID }).success).toBe(true);

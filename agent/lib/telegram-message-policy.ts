@@ -5,6 +5,7 @@
  * - `TelegramInboundMediaKind`: strict none/photo/readable-text/unsupported-media decision.
  * - `classifyTelegramInboundMedia`: fail-closed classifier over raw and Eve-parsed media.
  * - `hasTelegramInboundMedia`: identifies file-bearing updates without downloading their bytes.
+ * - `hasTelegramRawMediaBesidesLifted`: a rich post's media beyond the one lifted file.
  * - `isAgentNameMentioned`: recognizes configured names at Unicode word boundaries.
  * - `isMessageAddressedToBot`: preserves private, mention, and reply behavior.
  * - `isTelegramSlashCommand`: identifies command-shaped text reserved for application handlers.
@@ -16,6 +17,14 @@ import type { TelegramMessage } from "eve/channels/telegram";
 import { isTelegramImageDocumentCandidate } from "./attachments/telegram-vision-attachment.js";
 import { isReadableTextDocumentCandidate } from "./attachments/attachment-policy.js";
 import { matchesTelegramAgentName } from "./telegram-agent-identity.js";
+import { isOwnBotUsername } from "./telegram-bot-usernames.js";
+import {
+  containsTelegramFileReference,
+  richMediaIsLifted,
+  richMessageBesidesLifted,
+  richMessageMedia,
+  richMessagePlainText,
+} from "./telegram-rich-message.js";
 
 interface TelegramDispatchMessage {
   chat: {
@@ -72,23 +81,32 @@ export type TelegramInboundMediaKind =
   | "text_document_candidate"
   | "unsupported_media";
 
-function containsTelegramFileReference(value: unknown): boolean {
-  // Conditional structures can be text-only, so search only their own subtree for actual files.
-  const pending = [value];
-  const visited = new Set<object>();
-  while (pending.length > 0) {
-    const current = pending.pop();
-    if (!current || typeof current !== "object" || visited.has(current)) continue;
-    visited.add(current);
-    if (Array.isArray(current)) {
-      pending.push(...current);
-      continue;
-    }
-    const record = current as Record<string, unknown>;
-    if (typeof record.file_id === "string" && record.file_id.length > 0) return true;
-    pending.push(...Object.values(record));
+/**
+ * A conditional structure counts as media only when it carries a file the chat would receive. A
+ * rich message with paragraphs is a text message: its files are cut out of the stored update
+ * before anything reads it. When its one photo or document was lifted into `photo`/`document`,
+ * any other file left in the post is still media, so a post never smuggles a second file.
+ */
+function conditionalFieldIsMedia(raw: Record<string, unknown>, field: string): boolean {
+  if (!Object.hasOwn(raw, field)) return false;
+  if (field === "rich_message") {
+    if (richMediaIsLifted(raw)) return containsTelegramFileReference(richMessageBesidesLifted(raw));
+    if (richMessagePlainText(raw) !== null) return false;
   }
-  return false;
+  return containsTelegramFileReference(raw[field]);
+}
+
+/**
+ * True when the raw message carries any file besides the one lifted out of its rich blocks: a
+ * voice field, a second file, a file in any other block of the post, whatever its type. The
+ * ingress keeps the text of a refused rich post only when the lifted file was the whole of its media.
+ */
+export function hasTelegramRawMediaBesidesLifted(raw: Record<string, unknown>): boolean {
+  if (!richMediaIsLifted(raw)) return true;
+  const liftedField = richMessageMedia(raw)?.kind === "photo" ? "photo" : "document";
+  return TELEGRAM_INBOUND_MEDIA_FIELDS.some((field) => field !== liftedField && Object.hasOwn(raw, field)) ||
+    TELEGRAM_CONDITIONAL_MEDIA_FIELDS.some((field) => field !== "rich_message" && conditionalFieldIsMedia(raw, field)) ||
+    containsTelegramFileReference(richMessageBesidesLifted(raw));
 }
 
 export function classifyTelegramInboundMedia(
@@ -96,9 +114,7 @@ export function classifyTelegramInboundMedia(
 ): TelegramInboundMediaKind {
   const hasRawMedia = TELEGRAM_INBOUND_MEDIA_FIELDS.some(
     (field) => Object.hasOwn(message.raw, field),
-  ) || TELEGRAM_CONDITIONAL_MEDIA_FIELDS.some(
-    (field) => Object.hasOwn(message.raw, field) && containsTelegramFileReference(message.raw[field]),
-  );
+  ) || TELEGRAM_CONDITIONAL_MEDIA_FIELDS.some((field) => conditionalFieldIsMedia(message.raw, field));
   if (message.attachments.length === 0 && !hasRawMedia) return "none";
 
   // The normalized attachment and raw Telegram shape must agree exactly. Documents remain only
@@ -106,9 +122,7 @@ export function classifyTelegramInboundMedia(
   const rawPhoto = message.raw.photo;
   const hasOtherRawMedia = TELEGRAM_INBOUND_MEDIA_FIELDS.some(
     (field) => field !== "photo" && field !== "document" && Object.hasOwn(message.raw, field),
-  ) || TELEGRAM_CONDITIONAL_MEDIA_FIELDS.some(
-    (field) => Object.hasOwn(message.raw, field) && containsTelegramFileReference(message.raw[field]),
-  );
+  ) || TELEGRAM_CONDITIONAL_MEDIA_FIELDS.some((field) => conditionalFieldIsMedia(message.raw, field));
   if (!hasOtherRawMedia && !Object.hasOwn(message.raw, "document") &&
     Array.isArray(rawPhoto) && rawPhoto.length > 0 &&
     message.attachments.length === 1 && message.attachments[0]?.kind === "photo") {
@@ -157,14 +171,14 @@ export function isReplyToBot(
   // Telegram's verified update identifies this bot exactly; another bot must never inherit its route.
   return Boolean(
     message.replyToMessage?.from?.isBot &&
-      message.replyToMessage.from.username?.toLowerCase() === botUsername.toLowerCase(),
+      isOwnBotUsername(message.replyToMessage.from.username, botUsername),
   );
 }
 
 export function mentionsAnotherUsername(text: string, botUsername: string): boolean {
   // A message that names someone else by @username is addressed to them, not to this bot.
   return Array.from(text.matchAll(TELEGRAM_MENTION_PATTERN)).some(
-    (match) => match.groups?.target?.toLowerCase() !== botUsername.toLowerCase(),
+    (match) => !isOwnBotUsername(match.groups?.target, botUsername),
   );
 }
 
@@ -193,7 +207,7 @@ export function telegramGroupTurnTrigger(
 
   // Mentions and replies must target the complete username of this bot, not another bot.
   const addressedByMention = Array.from(message.text.matchAll(TELEGRAM_MENTION_PATTERN)).some(
-    (match) => match.groups?.target?.toLowerCase() === botUsername.toLowerCase(),
+    (match) => isOwnBotUsername(match.groups?.target, botUsername),
   );
   if (addressedByMention) return "mention";
   if (isReplyToBot(message, botUsername)) return "reply_to_agent";

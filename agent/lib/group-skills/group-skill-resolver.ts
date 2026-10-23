@@ -78,6 +78,8 @@ export function createExternalTurnSkillResolver(dependencies: ExternalTurnSkillD
     if (resolveConversationEnvironment(auth) !== "external") return {};
     const tools = resolveExternalGroupToolPolicy(auth);
     if (!tools.restricted) return {};
+    // A group without a family has no skills at all: nothing to load, no workspace to load them into.
+    if (resolveExternalGroupPolicyIdentity(auth)?.familyId === null) return {};
     const skills: Record<string, SkillDefinition> = tools.allowed.has("generate_image")
       ? imageGenerationSkill(options)
       : {};
@@ -87,10 +89,10 @@ export function createExternalTurnSkillResolver(dependencies: ExternalTurnSkillD
     // public load_skill executor knows only dynamic packages, so they must reach the sandbox here.
     if (tools.allowed.has(KNOWLEDGE_SKILL_CAPABILITY)) Object.assign(skills, knowledgeSkills());
     const identity = resolveExternalGroupPolicyIdentity(auth);
-    if (!identity) return skills;
+    if (!identity || identity.familyId === null) return skills;
     let packages: readonly AuthoredSkillPackage[];
     try {
-      packages = await dependencies.packagesForGroup(identity);
+      packages = await dependencies.packagesForGroup({ familyId: identity.familyId, groupId: identity.groupId });
     } catch (error) {
       // A lookup failure leaves the group without authored skills for this turn; nothing widens.
       console.error(JSON.stringify({

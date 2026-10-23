@@ -20,6 +20,7 @@ import { MemoryReviewOwnerAlertTransportError } from "../memory-review/memory-re
 
 const quiet: OwnerHealthReport = {
   alertDeliveryFailures: 0,
+  backups: { latest: null, latestSuccessAt: null },
   ingressFailures: { codes: [], count: 0 },
   lanes: {
     blocked: { codes: [], count: 0, waiting: 0 },
@@ -55,6 +56,32 @@ describe("formatOwnerHealthDigest", () => {
     });
     expect(text).toContain("Две копии дампа уже не помещаются");
     expect(text).not.toContain("сбоев нет");
+  });
+
+  // 9 октября 2026: копии уходили только в бакет Яндекса, и об отказе знал лишь лог cron на хосте.
+  it("names a backup that did not reach a store or did not run, and keeps a good one as information", () => {
+    const run = (hoursBeforeDigest: number, stored: string[], failed: string[]) => ({
+      bytes: 150 * 1024 ** 2,
+      createdAt: new Date(Date.parse("2026-09-09T06:00:00.000Z") - hoursBeforeDigest * 3_600_000),
+      failed, stored,
+    });
+    const good = run(4, ["yandex", "tigris"], []);
+    expect(formatOwnerHealthDigest({ ...quiet, backups: { latest: good, latestSuccessAt: good.createdAt } })).toBe([
+      "Сводка за сутки: сбоев нет.",
+      "Копия: 9 сентября в 05:00, 150 МБ, yandex и tigris.",
+      "Память: +4 (group episode 3, personal profile 1).",
+    ].join("\n"));
+    const partial = run(4, ["tigris"], ["yandex"]);
+    const partialText = formatOwnerHealthDigest({ ...quiet, backups: { latest: partial, latestSuccessAt: partial.createdAt } });
+    expect(partialText).toContain("хранилище yandex не приняло, ушла только в tigris.");
+    expect(partialText).not.toContain("сбоев нет");
+    const stale = run(40, ["yandex"], []);
+    const staleText = formatOwnerHealthDigest({ ...quiet, backups: { latest: stale, latestSuccessAt: stale.createdAt } });
+    expect(staleText).toContain("Ночная копия не ушла");
+    expect(staleText).not.toContain("сбоев нет");
+    const nowhere = run(4, [], ["yandex", "tigris"]);
+    expect(formatOwnerHealthDigest({ ...quiet, backups: { latest: nowhere, latestSuccessAt: null } }))
+      .toContain("успешных копий нет");
   });
 
   it("reports a quiet day with the memory counts", () => {

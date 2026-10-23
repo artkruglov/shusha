@@ -1,6 +1,7 @@
 /** Configured agent names must agree across Telegram dispatch paths. */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { readTelegramAgentIdentity } from "./telegram-agent-identity.js";
 import { isAgentNameMentioned, isMessageAddressedToBot } from "./telegram-message-policy.js";
 
 const group = { chat: { type: "group" as const }, text: "" };
@@ -40,6 +41,26 @@ describe("Telegram installation identity", () => {
     }
     // Новое имя по умолчанию такой установке не принадлежит.
     expect(isAgentNameMentioned("Шуша, привет")).toBe(false);
+  });
+
+  it("knows the forms of Юна, the name the bot moves to, and nothing of Шуша's", () => {
+    vi.stubEnv("TELEGRAM_AGENT_NAME", "Юна");
+    for (const text of ["Юна, помоги", "Спроси у Юны", "Передай Юне", "Попроси Юну", "Сделано Юной", "Yuna, help"]) {
+      expect(isAgentNameMentioned(text), text).toBe(true);
+    }
+    // «в июне» is a month, not the bot.
+    for (const text of ["Шуша, привет", "в июне", "юнат"]) expect(isAgentNameMentioned(text), text).toBe(false);
+  });
+
+  it("gives every case of a known name and the nominative for an unknown one", () => {
+    vi.stubEnv("TELEGRAM_AGENT_NAME", "Юна");
+    expect(readTelegramAgentIdentity().cases).toEqual({
+      nominative: "Юна", genitive: "Юны", dative: "Юне", accusative: "Юну", instrumental: "Юной", prepositional: "Юне",
+    });
+    vi.stubEnv("TELEGRAM_AGENT_NAME", "");
+    expect(readTelegramAgentIdentity().cases.instrumental).toBe("Шушей");
+    vi.stubEnv("TELEGRAM_AGENT_NAME", "Жюли");
+    expect(Object.values(readTelegramAgentIdentity().cases)).toEqual(Array(6).fill("Жюли"));
   });
 
   it("replaces the default names for another installation without changing username/reply routing", () => {

@@ -19,9 +19,9 @@ class ServiceTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join()
 
-    def request(self, body=b'OggSOpusHeadtest', auth='Bearer test-secret'):
+    def request(self, body=b'OggSOpusHeadtest', auth='Bearer test-secret', kind='audio/ogg'):
         client=http.client.HTTPConnection(*self.server.server_address)
-        client.request('POST','/transcribe',body,{'Authorization':auth,'Content-Type':'audio/ogg'})
+        client.request('POST','/transcribe',body,{'Authorization':auth,'Content-Type':kind})
         result=client.getresponse()
         value=(result.status,result.read())
         client.close()
@@ -34,6 +34,13 @@ class ServiceTests(unittest.TestCase):
     def test_invalid_audio_before_inference(self):
         self.assertEqual(self.request(body=b'not audio')[0],422)
         self.engine.transcribe.assert_not_called()
+
+    def test_mini_app_recordings_by_their_own_signature(self):
+        self.assertEqual(self.request(body=b'\x1a\x45\xdf\xa3webm',kind='audio/webm')[0],200)
+        self.engine.transcribe.assert_called_with(b'\x1a\x45\xdf\xa3webm','webm')
+        self.assertEqual(self.request(body=b'\x00\x00\x00\x18ftypM4A ',kind='audio/mp4')[0],200)
+        self.assertEqual(self.request(body=b'OggSOpusHead',kind='audio/webm')[0],422)
+        self.assertEqual(self.request(kind='audio/wav')[0],415)
 
     def test_transcribes_once(self):
         self.assertEqual(self.request()[0],200)

@@ -4,8 +4,11 @@
  * Constructs covered:
  * - CONNECT client sockets may close with `EPIPE` without terminating the proxy process.
  * - TCP establishment has a bounded deadline that is removed from an established idle tunnel.
+ * - A sandbox past its daily budget gets 429 for a CONNECT and for a plain HTTP request.
  */
 import { PassThrough } from "node:stream";
+import { request as httpRequest } from "node:http";
+import type { AddressInfo } from "node:net";
 import { EventEmitter } from "node:events";
 import type { Socket } from "node:net";
 
@@ -90,5 +93,31 @@ describe("sandbox egress proxy server", () => {
 
     expect(client.end).toHaveBeenCalledOnce();
     expect(client.destroy).not.toHaveBeenCalled();
+  });
+
+  it("refuses a CONNECT and an HTTP request from a sandbox past its daily budget", async () => {
+    const spentBudget = { admit: () => false, spend: () => false };
+    const server = createSandboxEgressProxy({ budget: spentBudget });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    const status = (options: { method: string; path: string }) => new Promise<number>((resolve, reject) => {
+      const request = httpRequest({ host: "127.0.0.1", port, ...options });
+      request.once("connect", (response, socket) => {
+        socket.destroy();
+        resolve(response.statusCode ?? 0);
+      });
+      request.once("response", (response) => {
+        response.resume();
+        resolve(response.statusCode ?? 0);
+      });
+      request.once("error", reject);
+      request.end();
+    });
+    try {
+      expect(await status({ method: "CONNECT", path: "example.com:443" })).toBe(429);
+      expect(await status({ method: "GET", path: "http://example.com/" })).toBe(429);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 });

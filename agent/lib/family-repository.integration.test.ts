@@ -56,7 +56,7 @@ describeWithDatabase("familyRepository invitations", () => {
     // Integration tests own the disposable database and reset every domain table between cases.
     await database().query(
       `TRUNCATE invitations, memory_items_all, shared_task_participants,
-         telegram_groups, family_memberships, users, families CASCADE`,
+         telegram_groups, family_memberships, family_member_bans, shared_tasks, users, families CASCADE`,
     );
   });
 
@@ -147,6 +147,128 @@ describeWithDatabase("familyRepository invitations", () => {
       familyId: owner.familyId, ownerUserId: member.rows[0]!.id,
       participantRef: participant.rows[0]!.id, relation: "parent",
     })).rejects.toThrow(/AGENT_FAMILY_RELATION_INVALID/u);
+  });
+
+  it("lets a one-time auto-approve link in at once, then the owner can remove the member", async () => {
+    const owner = await createOwner("auto");
+    const invitation = await familyRepository.createInvitation(
+      owner.familyId, owner.ownerId, "create-call-auto", undefined, { autoApprove: true },
+    );
+    const claim = await familyRepository.claimInvitation(invitation.code, {
+      displayName: "Юля", telegramUserId: "auto-guest-1", username: "yulia",
+    });
+    expect(claim).toMatchObject({ joined: { familyId: owner.familyId } });
+    await expect(telegramRepository.findIdentity("auto-guest-1")).resolves.toMatchObject({
+      familyId: owner.familyId, role: "member",
+    });
+    // Ссылка одноразовая: второй человек по ней не входит.
+    await expect(familyRepository.claimInvitation(invitation.code, {
+      displayName: "Чужой", telegramUserId: "auto-guest-2",
+    })).resolves.toBe("invalid");
+
+    const members = await familyRepository.listMembers({ familyId: owner.familyId, ownerUserId: owner.ownerId });
+    const guest = members.find((member) => member.name === "Юля")!;
+    // Участник убрать никого не может, владельца убрать нельзя.
+    const guestUser = await database().query("SELECT id FROM users WHERE telegram_user_id = 'auto-guest-1'");
+    await expect(familyRepository.removeMember({
+      familyId: owner.familyId, ownerUserId: guestUser.rows[0]!.id, participantRef: guest.participantRef,
+    })).rejects.toThrow(/AGENT_FAMILY_MEMBER_NOT_REMOVABLE/u);
+
+    await expect(familyRepository.removeMember({
+      familyId: owner.familyId, ownerUserId: owner.ownerId, participantRef: guest.participantRef,
+    })).resolves.toEqual({ name: "Юля" });
+    await expect(telegramRepository.findIdentity("auto-guest-1")).resolves.toBeNull();
+  });
+
+  it("a removed member cannot rejoin by an old link, a pending claim or a new link until the owner restores them", async () => {
+    const owner = await createOwner("ban");
+    const guest = { displayName: "Юля", telegramUserId: "ban-guest-1" };
+    const link = (key: string, autoApprove: boolean) =>
+      familyRepository.createInvitation(owner.familyId, owner.ownerId, key, undefined, { autoApprove });
+    const early = await link("ban-link-early", true);
+    const plain = await link("ban-link-plain", false);
+    // Заявка без автоподтверждения ждёт владельца, пока владелец убирает человека.
+    await expect(familyRepository.claimInvitation(plain.code, guest)).resolves.toBe("pending");
+    const joined = await link("ban-link-join", true);
+    await expect(familyRepository.claimInvitation(joined.code, { ...guest, telegramUserId: "ban-guest-2", displayName: "Маша" }))
+      .resolves.toMatchObject({ joined: { familyId: owner.familyId } });
+    const [masha] = await familyRepository.listMembers({ familyId: owner.familyId, ownerUserId: owner.ownerId });
+    await expect(familyRepository.removeMember({ familyId: owner.familyId, ownerUserId: owner.ownerId, participantRef: masha!.participantRef }))
+      .resolves.toEqual({ name: "Маша" });
+
+    const mashaProfile = { displayName: "Маша", telegramUserId: "ban-guest-2" };
+    // Ссылка, выданная ДО удаления, и новая ссылка не возвращают убранную.
+    await expect(familyRepository.claimInvitation(early.code, mashaProfile)).resolves.toBe("invalid");
+    const fresh = await link("ban-link-fresh", true);
+    await expect(familyRepository.claimInvitation(fresh.code, mashaProfile)).resolves.toBe("invalid");
+    await expect(telegramRepository.findIdentity("ban-guest-2")).resolves.toBeNull();
+
+    // Другой человек по той же ссылке входит: запрет личный, а не на ссылку.
+    await expect(familyRepository.claimInvitation(fresh.code, { displayName: "Оля", telegramUserId: "ban-guest-3" }))
+      .resolves.toMatchObject({ joined: { familyId: owner.familyId } });
+
+    // Явное решение владельца снимает запрет, членство само не возвращается.
+    const removed = await familyRepository.listRemovedMembers({ familyId: owner.familyId, ownerUserId: owner.ownerId });
+    expect(removed).toHaveLength(1);
+    await expect(familyRepository.restoreMember({ banRef: removed[0]!.participantRef, familyId: owner.familyId, ownerUserId: owner.ownerId }))
+      .resolves.toEqual({ name: "Маша" });
+    await expect(telegramRepository.findIdentity("ban-guest-2")).resolves.toBeNull();
+    const again = await link("ban-link-again", true);
+    await expect(familyRepository.claimInvitation(again.code, mashaProfile)).resolves.toMatchObject({ joined: { familyId: owner.familyId } });
+  });
+
+  it("refuses the approval of a removed person and rejects the claim that waited for it", async () => {
+    const owner = await createOwner("ban-approve");
+    const plain = await familyRepository.createInvitation(owner.familyId, owner.ownerId, "ban-approve-link");
+    const guest = { displayName: "Катя", telegramUserId: "ban-approve-1" };
+    await expect(familyRepository.claimInvitation(plain.code, guest)).resolves.toBe("pending");
+    const [pending] = await familyRepository.listPendingInvitations(owner.familyId, owner.ownerId);
+    // Владелец сперва принимает её в семью другим путём, затем убирает: ожидавшая заявка не должна ожить.
+    await database().query(
+      `INSERT INTO family_memberships (family_id, user_id, role)
+       SELECT $1, id, 'member' FROM users WHERE telegram_user_id = $2`, [owner.familyId, guest.telegramUserId]);
+    await database().query(
+      `INSERT INTO shared_task_participants (family_id, group_id, telegram_user_id, display_name) VALUES ($1, NULL, $2, $3)`,
+      [owner.familyId, guest.telegramUserId, guest.displayName]);
+    const ref = (await database().query<{ id: string }>(
+      "SELECT id FROM shared_task_participants WHERE telegram_user_id = $1", [guest.telegramUserId])).rows[0]!.id;
+    await familyRepository.removeMember({ familyId: owner.familyId, ownerUserId: owner.ownerId, participantRef: ref });
+    await expect(familyRepository.approveInvitation({
+      approvedBy: owner.ownerId, candidateDisplayName: pending!.displayName, candidateTelegramUserId: pending!.telegramUserId,
+      familyId: owner.familyId, invitationId: pending!.invitationId, operationKey: "ban-approve-op",
+    })).rejects.toThrow(/AGENT_INVITATION_NOT_APPROVABLE/u);
+    expect((await database().query("SELECT status FROM invitations WHERE id = $1", [pending!.invitationId])).rows[0]!.status).toBe("rejected");
+  });
+
+  it("frees the shared tasks of a removed member, cancels transfers to them and keeps their personal tasks", async () => {
+    const owner = await createOwner("ban-tasks");
+    const invitation = await familyRepository.createInvitation(owner.familyId, owner.ownerId, "ban-tasks-link", undefined, { autoApprove: true });
+    await familyRepository.claimInvitation(invitation.code, { displayName: "Юля", telegramUserId: "ban-tasks-1" });
+    const task = (title: string, scope: string, status: string, assignee: string | null, extra = "") =>
+      database().query(
+        `INSERT INTO shared_tasks (family_id, scope, creator_telegram_id, assignee_telegram_id, title, status ${extra ? ", " + extra.split("=")[0] : ""})
+         VALUES ($1, $2::memory_scope, 'ban-tasks-1', $3, $4, $5 ${extra ? ", " + extra.split("=")[1] : ""})`,
+        [owner.familyId, scope, assignee, title, status],
+      );
+    await task("общее принятое", "family", "accepted", "ban-tasks-1");
+    await task("личное", "personal", "accepted", "ban-tasks-1");
+    await task("передача ей", "family", "accepted", "owner-ban-tasks", "pending_assignee_telegram_id,transfer_requested_at='ban-tasks-1',now()");
+    const [member] = await familyRepository.listMembers({ familyId: owner.familyId, ownerUserId: owner.ownerId });
+    await familyRepository.removeMember({ familyId: owner.familyId, ownerUserId: owner.ownerId, participantRef: member!.participantRef });
+    const rows = (await database().query(
+      "SELECT title, status, version, assignee_telegram_id AS assignee, pending_assignee_telegram_id AS pending FROM shared_tasks ORDER BY title")).rows;
+    // A new version: a «✓» drawn for them before the removal no longer closes the task (its version is stale).
+    expect(rows.find((row) => row.title === "общее принятое")).toMatchObject({ status: "open", assignee: null, version: 2 });
+    expect(rows.find((row) => row.title === "личное")).toMatchObject({ status: "accepted", assignee: "ban-tasks-1", version: 1 });
+    expect(rows.find((row) => row.title === "передача ей")).toMatchObject({ status: "accepted", assignee: "owner-ban-tasks", pending: null, version: 2 });
+  });
+
+  it("keeps a plain invitation pending without auto-approve", async () => {
+    const owner = await createOwner("plain");
+    const invitation = await familyRepository.createInvitation(owner.familyId, owner.ownerId, "create-call-plain");
+    await expect(familyRepository.claimInvitation(invitation.code, {
+      displayName: "Анна", telegramUserId: "plain-guest-1",
+    })).resolves.toBe("pending");
   });
 
   it("keeps a claimant pending until the same-family owner approves", async () => {

@@ -6,6 +6,7 @@
  * - A repository failure is logged and never thrown into the delivery path.
  * - An answer without the directive while records were shown is logged, so the share of turns
  *   that ignore the directive can be measured in production.
+ * - A group without a family has no memory: nothing is read and nothing is logged as a failure.
  */
 import type { SessionContext } from "eve/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -106,5 +107,24 @@ describe("reinforceUsedMemories", () => {
       reinforcement: { reinforceByRefs: vi.fn().mockRejectedValue(new Error("db down")) },
     })).resolves.toBeUndefined();
     expect(error).toHaveBeenCalledWith(JSON.stringify({ code: "AGENT_MEMORY_REINFORCE_FAILED", error: "db down" }));
+  });
+
+  it("does nothing in a group without a family", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const sessionTurn = vi.fn();
+    const familyless = {
+      session: {
+        ...ctx.session,
+        auth: { current: { ...ctx.session.auth.current!, attributes: {
+          groupId: "6f1c2f9e-3b1a-4c55-9d8e-0a1b2c3d4e5f", groupType: "external", telegramChatId: "-1001",
+        } }, initiator: null },
+      },
+    } as unknown as Pick<SessionContext, "session">;
+    await reinforceUsedMemories({ applicationSessionId: "app-1", ctx: familyless, declared: true, memoryRefs: [] }, {
+      exposures: { sessionTurn, shownMemoryRefsForTurn: vi.fn() },
+      reinforcement: { reinforceByRefs: vi.fn() },
+    });
+    expect(sessionTurn).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
   });
 });

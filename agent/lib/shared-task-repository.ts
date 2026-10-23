@@ -5,7 +5,7 @@ import { currentTimeRepository } from "./current-time-repository.js";
 import { database } from "./database.js";
 import type { MemoryAuthorization } from "./memory-context.js";
 import { sharedTaskInput, type SharedTaskInput } from "./shared-tasks.js";
-import { authorize, denied, listNames, participants, present, presentSummary, readTasks } from "./shared-task-access.js";
+import { authorize, denied, listNames, participants, present, presentSummary, readTasks, type TaskRow } from "./shared-task-access.js";
 import { applyTaskHandover, recordTaskVersion } from "./shared-task-handover.js";
 import { executeTaskBatch } from "./shared-task-batch.js";
 import { createTask } from "./shared-task-create.js";
@@ -14,16 +14,24 @@ import { mutateTaskPlan } from "./shared-task-planning.js";
 import { requireSpaceAction } from "./spaces/space-write.js";
 import { taskSpaceAction,requireTaskRecipientSpace,lockTaskSpaceBoundary } from "./spaces/task-space-action.js";
 import { personalTimeRepository } from "./personal-time/personal-time-repository.js";
+import type { TaskVisibility } from "./shared-task-visibility.js";
 import { isCurrentTelegramMember } from "./telegram-current-membership.js";
 
 export const sharedTaskRepository = {
-  async execute(auth: MemoryAuthorization, raw: SharedTaskInput, operationKey: string) {
+  /**
+   * `options.visibility`: who sees a task the Mini App creates, chosen on its form (`createTask`). The model's input has
+   * no such field, so a chat turn never sets it.
+   */
+  async execute(auth: MemoryAuthorization, raw: SharedTaskInput, operationKey: string, options: { visibility?: TaskVisibility } = {}) {
     const parsed = sharedTaskInput.safeParse(raw);
     if (!parsed.success) throw new AppError("AGENT_TASK_INPUT_INVALID", "Проверьте действие и поля задачи");
     const input = parsed.data;
+    const visibility = options.visibility;
+    if (visibility !== undefined && (input.action !== "create" || !["family", "personal"].includes(visibility))) denied();
     if (input.action === "batch") {
       const batch = await executeTaskBatch(auth, input, operationKey);
-      return { tasks: batch.tasks, replayed: batch.replayed, adopted: batch.adopted };
+      // `applied` и `note` говорят модели, что пакет уже применён целиком: без них она повторяла пункты по одному.
+      return { adopted: batch.adopted, applied: batch.applied, note: batch.note, replayed: batch.replayed, tasks: batch.tasks };
     }
     const client = await database().connect();
     try {
@@ -56,10 +64,10 @@ export const sharedTaskRepository = {
         const result = await readTasks(client, auth, scope, null, input, timezone);
         await client.query("COMMIT");
         return { tasks: result.rows.map(row=>presentSummary(row,!auth.groupId)),
-          nextCursor:result.nextCursor, truncated:Boolean(result.nextCursor), incomplete:result.incomplete };
+          nextCursor:result.nextCursor, truncated:Boolean(result.nextCursor), hidden:result.hidden };
       }
       if (input.action === "get") {
-        const {rows}=await readTasks(client,auth,scope,input.id!);
+        const {rows}=await readTasks(client,auth,scope,input.id!,undefined,undefined,true);
         if (!rows[0]) denied();
         await client.query("COMMIT");
         return { task: present(rows[0],!auth.groupId), replayed: false };
@@ -72,8 +80,9 @@ export const sharedTaskRepository = {
         return {occurrences:history.rows};
       }
       if (!operationKey || operationKey.length > 500) denied();
+      // The same nonce with another choice of who sees it is another request, not a replay.
       const hash = createHash("sha256").update(JSON.stringify({ input, actor: auth.telegramUserId,
-        group: auth.groupId, scope })).digest("hex");
+        group: auth.groupId, scope, ...(visibility === undefined ? {} : { visibility }) })).digest("hex");
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`${auth.familyId}:${operationKey}`]);
       const previous = await client.query<{ request_hash: string; task_id: string }>(
         "SELECT request_hash,task_id FROM shared_task_operations WHERE family_id=$1 AND operation_key=$2",
@@ -88,8 +97,9 @@ export const sharedTaskRepository = {
       }
       let id: string;
       let adoptedUnowned = false;
+      let changed: TaskRow | null = null;
       if (input.action === "create") {
-        id = await createTask(client, auth, scope, spaceId, input);
+        id = await createTask(client, auth, scope, spaceId, input, visibility);
       } else {
         const task = await lockTaskForChange(client, auth, scope, input);
         if (["update","clarify","plan","unplan","activate","record"].includes(input.action)) {
@@ -134,6 +144,7 @@ export const sharedTaskRepository = {
           adoptedUnowned = (await applyTaskStatus(client, auth, task, input.action as StatusAction)).adoptedUnowned;
         }
         id = task.id;
+        changed = task;
       }
       await client.query(
         "INSERT INTO shared_task_operations(family_id,operation_key,actor_telegram_id,request_hash,task_id) VALUES($1,$2,$3,$4,$5)",
@@ -145,6 +156,13 @@ export const sharedTaskRepository = {
         [auth.familyId, auth.userId, input.action, id, auth.telegramUserId, scope],
       );
       const {rows} = await readTasks(client, auth, scope, id);
+      // The recipient who said no no longer sees the task: the answer is the row they changed, not a refusal.
+      if (!rows[0] && input.action === "decline_transfer" && changed) {
+        await client.query("COMMIT");
+        // Only id, status, title and version: what a caller of an answered handover reads back.
+        const answered = { id, status: changed.status, title: changed.title, version: changed.version + 1 };
+        return { task: answered as unknown as ReturnType<typeof present>, replayed: false };
+      }
       if (!rows[0]) denied();
       await client.query("COMMIT");
       return { task: present(rows[0],!auth.groupId), replayed: false, adopted: adoptedUnowned ? [{ title: rows[0].title, assignee: present(rows[0],!auth.groupId).assignee }] : undefined };

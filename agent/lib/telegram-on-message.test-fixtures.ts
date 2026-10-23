@@ -39,6 +39,8 @@ export function telegramContext() {
     context: {
       telegram: {
         botUsername: BOT_USERNAME,
+        chatId: "101",
+        request: vi.fn().mockResolvedValue({ body: {}, ok: true, status: 200 }),
         sendMessage,
       },
     } as unknown as TelegramContext,
@@ -151,6 +153,10 @@ export function repositories() {
     proactiveDeliveries: {
       listPendingContext: vi.fn().mockResolvedValue(null),
     },
+    turnInterjections: {
+      findDeliveredContentKind: vi.fn().mockResolvedValue(null),
+      findDeliveredContentKinds: vi.fn(async () => new Map()),
+    },
     session: {
       hasRoute: vi.fn().mockResolvedValue(false),
       prepareTurn: vi.fn().mockResolvedValue({
@@ -165,8 +171,39 @@ export function repositories() {
       resolveTelegramChatMode: vi.fn().mockResolvedValue("legacy"),
       resolveTurnSpace: vi.fn().mockResolvedValue(null),
     },
+    familyGroup: {
+      autoJoin: vi.fn().mockResolvedValue(null),
+      command: vi.fn().mockResolvedValue("registered"),
+    },
+    familyBudget: { budgetGate: vi.fn().mockResolvedValue("within") },
+    groupConnect: {
+      command: vi.fn().mockResolvedValue("registered"), enabled: false,
+      prepare: undefined as ((input: { ownerTelegramUserId: string; telegramChatId: string; title: string }) => Promise<boolean>) | undefined,
+    },
+    feedback: {
+      markAnswered: vi.fn().mockResolvedValue(undefined),
+      markDelivered: vi.fn().mockResolvedValue(undefined),
+      operatorChatId: vi.fn().mockResolvedValue("telegram-1"),
+      record: vi.fn().mockResolvedValue({ familyOrdinal: 2, id: "00000000-0000-4000-8000-000000000077" }),
+      send: vi.fn().mockResolvedValue(undefined),
+    },
+    familylessGroup: {
+      budgetGate: vi.fn().mockResolvedValue("within"),
+      command: vi.fn().mockResolvedValue("Включилась."),
+    },
+    signup: {
+      claimSelfServeFamily: vi.fn(),
+      isOperatorFamily: vi.fn().mockResolvedValue(false),
+      joinWaitlist: vi.fn().mockResolvedValue(true),
+      operatorTelegramUserId: vi.fn().mockResolvedValue("9001"),
+      status: vi.fn(),
+      releaseWaitlistNotice: vi.fn().mockResolvedValue(undefined),
+      takeWaitlistBatch: vi.fn().mockResolvedValue({ ids: [], word: null }),
+      update: vi.fn(),
+    },
     telegram: {
       claimFirstOwner: vi.fn(),
+      claimNewFamily: vi.fn(),
       findGroup: vi.fn().mockResolvedValue(null),
       findIdentity: vi.fn().mockResolvedValue(null),
       hasOwner: vi.fn(),

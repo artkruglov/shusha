@@ -4,7 +4,8 @@
  * Экспорт:
  * - `PartnerAlertKind`: вид ожидающего пункта.
  * - `PartnerAlertItem`: строка для сообщения, собранная из структуры, а не из переписки.
- * - `formatPartnerAlert`: текст уведомления или `null`, когда писать не о чем.
+ * - `formatPartnerAlert`: текст уведомления или `null`, когда писать не о чем; с кнопками под просьбами
+ *   говорит, что ответить можно и ими.
  *
  * До 22 сентября 2026 вторая половина каждой совместной функции не работала: поручение, передача
  * дела, предложенная область заботы и совместное решение никому не сообщались. Человек, от
@@ -27,8 +28,10 @@ export interface PartnerAlertItem {
   readonly title: string;
   /** Имя того, кто адресовал: человек должен видеть, с кем говорить, а не только что решать. */
   readonly from: string;
-  /** Пункт ждёт ответа неделю и попадает в уведомление второй и последний раз. */
+  /** О пункте уже писали: уведомление напоминает о нём снова, пока нет ответа. */
   readonly repeated: boolean;
+  /** Версия предложенного дела: по ней встают кнопки «Беру / Не могу» (миграция 179). */
+  readonly version?: number;
 }
 
 /** Больше пяти пунктов в одном сообщении читаются как свалка, а не как просьба ответить. */
@@ -47,22 +50,28 @@ function title(text: string): string {
   return flat.length > MAX_TITLE ? `${flat.slice(0, MAX_TITLE - 1)}…` : flat;
 }
 
-export function formatPartnerAlert(items: readonly PartnerAlertItem[], pending = 0): string | null {
+export function formatPartnerAlert(
+  items: readonly PartnerAlertItem[],
+  pending = 0,
+  options: { buttons?: boolean } = {},
+): string | null {
   if (items.length === 0) return null;
   const lines = items.map((item) => {
     const { action, label } = LINE[item.kind];
-    const again = item.repeated ? ", уже спрашивала неделю назад" : "";
+    const again = item.repeated ? ", напоминаю" : "";
     // Имя стоит в скобках: склонять чужие имена по падежам надёжно нельзя, а ошибка в имени
     // читается как небрежность.
     return `${label} (${item.from}): «${title(item.title)}» — ${action}${again}.`;
   });
   return [
-    "Тебе адресовано, и я об этом ещё не писала.",
+    items.some((item) => item.repeated) ? "Тебя ждут с ответом, напоминаю." : "Тебе адресовано, и я об этом ещё не писала.",
     "",
     ...lines,
     ...(pending > 0 ? [`…и ещё ${pending}, покажу по просьбе.`] : []),
     "",
-    "Ответь здесь своими словами. Молчание я согласием не считаю.",
+    options.buttons === true
+      ? "Ответь кнопкой под сообщением или своими словами. Молчание я согласием не считаю."
+      : "Ответь здесь своими словами. Молчание я согласием не считаю.",
     "«Не пиши мне первым» — перестану.",
   ].join("\n");
 }

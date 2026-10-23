@@ -23,6 +23,15 @@ import { conversationTimelineRepository } from "./conversation-timeline-reposito
 import { currentTimeRepository } from "./current-time-repository.js";
 import { initiativeRepository } from "./initiative/initiative-repository.js";
 import { familyRepository, type FamilyRepository } from "./family-repository.js";
+import { signupRepository } from "./signup-repository.js";
+import { autoJoinFamilyGroupMember, registerFamilyGroupByCommand } from "./telegram-family-group-command.js";
+import { familyBudgetRepository } from "./family-budget-repository.js";
+import { WEB_APP_GROUPS_ENABLED } from "./groups-availability.js";
+import { groupSetup } from "./group-join/group-setup.js";
+import { registerGroupByCommand } from "./telegram-group-connect-command.js";
+import { feedbackRepository, type FeedbackRepository } from "./telegram-feedback-command.js";
+import { familylessGroupRepository } from "./familyless-group-repository.js";
+import { runFamilylessGroupCommand } from "./telegram-familyless-group-command.js";
 import { profileProjectionPolicyRepository } from "./profile-projection-policy-repository.js";
 import { proactiveDeliveryRepository } from "./proactive-deliveries/proactive-delivery-repository.js";
 import { sessionRepository } from "./sessions/session-repository.js";
@@ -51,6 +60,7 @@ import type {
 } from "./workspaces/workspace-repository.js";
 import { memoryReviewRepository } from "./memory-review/memory-review-repository.js";
 import { buildTelegramMemoryContext } from "./telegram-turn-memory-context.js";
+import { turnInterjectionRepository } from "./turn-interjection/turn-interjection-repository.js";
 
 export interface TelegramMessageRepositories {
   attachmentReferences: Pick<TelegramGroupAttachmentRepository, "captureReplyTarget" | "record">;
@@ -77,6 +87,21 @@ export interface TelegramMessageRepositories {
     "claimPendingGroupNotice" | "markGroupNoticePresented"
   >;
   family: Pick<FamilyRepository, "claimInvitation">;
+  /** Саморегистрация семьи по общей ссылке и команда оператора /signup. */
+  signup: Pick<typeof signupRepository, "claimSelfServeFamily" | "isOperatorFamily" | "joinWaitlist" | "operatorTelegramUserId" | "releaseWaitlistNotice" | "status" | "takeWaitlistBatch" | "update">;
+  /** `/family` в группе и автоподключение людей без семьи в группе, подключённой этой командой. */
+  familyGroup: { autoJoin: typeof autoJoinFamilyGroupMember; command: typeof registerFamilyGroupByCommand };
+  /** `/start@бот group` владельца («Группы», MVP-1); без флага `enabled` команда идёт прежним путём. */
+  groupConnect: { command: typeof registerGroupByCommand; enabled: boolean; prepare?: typeof groupSetup.prepare };
+  /** `/start` и `/stop` администратора в группе без семьи (миграции 175–176). */
+  familylessGroup: {
+    budgetGate: typeof familylessGroupRepository.budgetGate;
+    command: typeof runFamilylessGroupCommand;
+  };
+  /** `/feedback` участника оператору, без модели (миграция 182). */
+  feedback: FeedbackRepository;
+  /** Месячный лимит расходов семьи на модель (миграция 181). */
+  familyBudget: { budgetGate: typeof familyBudgetRepository.budgetGate };
   groupContext: { prepare: TelegramGroupTurnContextPreparer };
   hitl: Pick<TelegramHitlApprovalRepository, "authorizeReply">;
   /** Слово человека снимает паузу: пока он молчит, бот не начинает следующий разговор. */
@@ -96,6 +121,7 @@ export interface TelegramMessageRepositories {
   };
   telegram: TelegramRepository;
   timeline: Pick<typeof conversationTimelineRepository, "recordInbound">;
+  turnInterjections: Pick<typeof turnInterjectionRepository, "findDeliveredContentKind" | "findDeliveredContentKinds">;
 }
 
 // Production wiring stays separate from authorization flow so tests can replace every side effect.
@@ -110,6 +136,12 @@ export const productionTelegramMessageRepositories = {
   memoryContext: buildTelegramMemoryContext,
   profilePolicies: profileProjectionPolicyRepository,
   family: familyRepository,
+  signup: signupRepository,
+  familyGroup: { autoJoin: autoJoinFamilyGroupMember, command: registerFamilyGroupByCommand },
+  groupConnect: { command: registerGroupByCommand, enabled: WEB_APP_GROUPS_ENABLED, prepare: (input) => groupSetup.prepare(input) },
+  familylessGroup: { budgetGate: familylessGroupRepository.budgetGate, command: runFamilylessGroupCommand },
+  familyBudget: { budgetGate: familyBudgetRepository.budgetGate },
+  feedback: feedbackRepository,
   groupContext: { prepare: telegramGroupTurnContextPreparer },
   hitl: telegramHitlApprovalRepository,
   initiative: initiativeRepository,
@@ -119,6 +151,7 @@ export const productionTelegramMessageRepositories = {
   taskProjects: { contextBlock: buildTaskProjectsContext },
   session: sessionRepository,
   spaces: { resolveTelegramChatMode, resolveTurnSpace },
+  turnInterjections: turnInterjectionRepository,
   telegram: telegramRepository,
   timeline: conversationTimelineRepository,
   threadNotices: productionMemoryThreadNotices,

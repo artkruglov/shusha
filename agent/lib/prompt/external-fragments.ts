@@ -3,6 +3,12 @@ import type { ExternalGroupToolName } from "../tool-policy/group-tool-catalog.js
 
 const ALWAYS_AVAILABLE_PURPOSE =
   "разбирать материалы и переписку этого чата, делать сводки, списки и таблицы и создавать text/Markdown-файлы в workspace группы";
+const FAMILYLESS_PURPOSE = "разбирать переписку этого чата, делать сводки, списки и таблицы прямо в сообщении";
+
+/** A group its administrator turned on without a family (migration 175) has only the chat itself. */
+export const FAMILYLESS_GROUP_LIMITS = `## Чего здесь нет
+
+Долговременной памяти, напоминаний, дел, файлов и workspace в этом чате нет. На просьбу запомнить, напомнить или сохранить файл одной фразой скажи, что в этой группе это пока недоступно, и сделай то, что можешь сейчас.`;
 
 const CAPABILITY_PURPOSES: readonly (readonly [ExternalGroupToolName, string])[] = [
   ["import_telegram_attachment", "читать текстовые вложения этого чата"],
@@ -22,9 +28,10 @@ const CAPABILITY_PURPOSES: readonly (readonly [ExternalGroupToolName, string])[]
 
 export function externalPurposeSection(
   capabilities: ReadonlySet<ExternalGroupToolName>,
+  familyless = false,
 ): string {
   const purposes = [
-    ALWAYS_AVAILABLE_PURPOSE,
+    familyless ? FAMILYLESS_PURPOSE : ALWAYS_AVAILABLE_PURPOSE,
     ...CAPABILITY_PURPOSES
       .filter(([capability]) => capabilities.has(capability))
       .map(([, purpose]) => purpose),

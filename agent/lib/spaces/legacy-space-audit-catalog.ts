@@ -128,7 +128,7 @@ inherit("reminder_operations", "reminders", "reminder_id", true);
 inherit("shopping_item_operations", "shopping_items", "item_id", true);
 inherit("shared_ritual_occurrences shared_task_versions", "shared_tasks", "task_id");
 inherit("shared_task_operations", "shared_tasks", "task_id", true);
-inherit("telegram_final_deliveries telegram_progress_notices telegram_hitl_approvals", "conversation_sessions", "application_session_id");
+inherit("telegram_final_deliveries telegram_progress_notices telegram_hitl_approvals telegram_turn_interjections", "conversation_sessions", "application_session_id");
 inherit("telegram_final_delivery_chunks", "telegram_final_deliveries", "delivery_id");
 // Session retention deliberately leaves delivered deduplication receipts behind. They must not
 // acquire guessed readers or be deleted (which could permit duplicate delivery).
@@ -182,6 +182,9 @@ add("families family_memberships invitations bootstrap_codes users shared_task_p
   action: "control", reason: "Identity/registration data retains dedicated current membership checks; it is not chat memory",
 });
 add("spaces space_memberships space_bindings", { action: "control", reason: "Target audience metadata, not legacy content" });
+add("signup_settings", { action: "control", reason: "Installation-wide entrance switch of the operator (open, word, cap); no person, chat or content" });
+add("signup_waitlist", { action: "control", reason: "Installation-wide queue of people who asked to join while the entrance was full; Telegram id and display name only, no family data" });
+add("family_member_bans", { action: "control", reason: "Owner decision that a removed person must not rejoin on their own: family id, Telegram id and display name only, no content" });
 add("family_space_runtime", { action: "control", reason: "Runtime switch for the family, not chat content" });
 add("video_budget_accounts video_budget_reservations", {action:"control",reason:"Person-owned video billing reservations, never chat memory; leaving a space does not reset the budget"});
 add("telegram_chat_audience_proofs", { action: "control", reason: "Proof of the current chat audience; it names its own space and version" });
@@ -191,11 +194,56 @@ add("user_notification_settings", { action: "control", reason: "User-owned setti
 add("personal_time_windows", {
   action: "control", reason: "Окна личного времени принадлежат человеку, а не области: их читает только он сам",
 });
+add("telegram_turn_steps", { action: "control", reason: "Last model step of a running turn, only to time delivery of waiting messages; no person, chat or content" });
 add("model_usage_events", { action: "control", reason: "Installation-wide token and dollar counters per model call; no person, chat, area or content" });
+add("backup_runs", { action: "control", reason: "Installation-wide receipt of each host backup: archive name, size and which stores took it; no person, chat, area or content" });
+add("familyless_group_budget_notices", { action: "control", reason: "Which Telegram chat already heard this UTC month that its budget is used up; chat id and month only" });
+add("family_model_spend family_budget_notices", {
+  action: "control",
+  reason: "A family's dollar cost per model call and the month it heard its budget is used up; no person, chat, area or content",
+});
+add("erased_eve_sessions", {
+  action: "control",
+  reason: "Opaque ids of Eve sessions of an erased person or family, until retention deletes them; no person, chat, area or content",
+});
+add("feedback_messages", {
+  action: "control",
+  reason: "What a person sent the operator with /feedback; addressed to the operator, not the content of any area, removed with the person",
+});
+add("familyless_group_settings", { action: "control", reason: "Installation-wide ceiling and default budget for groups without a family; no person, chat or content" });
+add("telegram_guest_usage", { action: "control", reason: "Daily count of guest-mode answers per Telegram caller, for the cost ceiling; no chat, area, family or content" });
+add("telegram_guest_chats telegram_guest_chat_notes telegram_guest_reminder_offers", {
+  action: "control",
+  reason: "Notes of a chat the bot was a guest in, keyed by that chat alone and shown to whoever summons it there; never a family, area or member record, deleted 90 days after the last summon",
+});
+add("task_button_actions", {
+  action: "control",
+  reason: "What a button under a bot message was made for (task id, version, action, chat); no title or content, and every press re-reads the presser's rights and the task's own area; expires in seven days",
+});
+add("group_join_invitations", {
+  action: "control",
+  reason: "That the bot greeted a Telegram user who asked to join an ordinary family group and whether the owner was asked; ids only, removed by the decision or after 30 days",
+});
+add("task_overview_shows task_overview_rests", {
+  action: "control",
+  reason: "Which morning a person's overview showed a task at which version, and which task they chose to leave alone; per-person receipts with ids only, removed with the task",
+});
 add("initiative_messages", { action: "control", reason: "How often the bot wrote to one person first; a personal limit, not the content of any area" });
 add("partner_alert_claims", {
   action: "control",
   reason: "Which addressed item a person was already told about; a per-person receipt that prevents a repeat, not the content of any area",
+});
+add("stale_task_claims", {
+  action: "control",
+  reason: "Which version of a task a person was already written to about as not moving; a per-person receipt that prevents a repeat, ids only, removed with the task",
+});
+add("feature_uses feature_tip_shows", {
+  action: "control",
+  reason: "Which abilities a person already tried and which feature tip they saw and answered; per-person counters and tip keys only, no content, removed with the person",
+});
+add("onboarding_quest_marks", {
+  action: "control",
+  reason: "Which first-steps quest notices a person already got and which steps were counted; step keys and times only, no content, removed with the person",
 });
 add("group_overview_claims", {
   action: "control",

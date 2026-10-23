@@ -118,11 +118,12 @@ curl -s https://shusha.example.com/eve/v1/health
 source .env
 curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
   -H 'content-type: application/json' \
-  -d "{\"url\":\"https://shusha.example.com/eve/v1/telegram\",\"secret_token\":\"${TELEGRAM_WEBHOOK_SECRET_TOKEN}\",\"allowed_updates\":[\"message\",\"callback_query\"]}"
+  -d "{\"url\":\"https://shusha.example.com/eve/v1/telegram\",\"secret_token\":\"${TELEGRAM_WEBHOOK_SECRET_TOKEN}\",\"allowed_updates\":[\"message\",\"callback_query\",\"guest_message\"]}"
 curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo"
 ```
 
-`callback_query` нужен для кнопок подтверждения. В `getWebhookInfo` не должно быть
+`callback_query` нужен для кнопок подтверждения, `guest_message` для гостевого режима: ответа на упоминание бота
+в любой переписке (включается переключателем Guest Mode в настройках бота в @BotFather). В `getWebhookInfo` не должно быть
 `last_error_message`.
 
 ## 7. Станьте владельцем

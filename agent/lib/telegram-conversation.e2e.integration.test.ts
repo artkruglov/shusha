@@ -29,7 +29,8 @@ describeWithDatabase("Telegram conversation end-to-end", () => {
       TELEGRAM_BOT_USERNAME: "osinara_test_bot",
       TELEGRAM_AGENT_NAME: "Осинара",
       TELEGRAM_AGENT_ALIASES: "[]",
-      TELEGRAM_WEBHOOK_SECRET_TOKEN: "conversation-test-secret",
+      TELEGRAM_WEBHOOK_SECRET_TOKEN: "conversation-test-secret-0123456789abcdef",
+      AGENT_INTERNAL_TOKEN: "conversation-internal-token-0123456789abcdef",
       MODEL_API_KEY: "unused-test-key",
       MEMORY_EMBEDDING_BASE_URL: "http://memory-test",
       WORKFLOW_STRESS_RESET_ALLOWED: "true",
@@ -57,14 +58,14 @@ describeWithDatabase("Telegram conversation end-to-end", () => {
       const summary = result.stdout.match(/CONVERSATION_SUMMARY (\{.*\})/u)?.[1];
       expect(summary, result.stdout.slice(-2000)).toBeDefined();
       expect(JSON.parse(summary!)).toEqual({
-        acceptanceTurns: 17,
+        acceptanceTurns: 18,
         openTasks: 7,
         reminderChatId: "902",
         remindersDelivered: 1,
         sandboxSessions: 6,
         sessions: 2,
         shoppingItems: 2,
-        turns: 73,
+        turns: 74,
       });
       expect(result.stderr).not.toContain("AGENT_MEMORY_UNAVAILABLE");
     } catch (error) {

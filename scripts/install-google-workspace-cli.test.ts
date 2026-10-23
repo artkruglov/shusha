@@ -6,11 +6,16 @@
  * - Release downloads use the official GitHub origin without a third-party proxy.
  * - Unsupported platforms fail before any download occurs.
  */
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+
 import { describe, expect, it } from "vitest";
 
 import {
+  GWS_VERSION,
   resolveGoogleWorkspaceCliArtifact,
   resolveGoogleWorkspaceCliDownloadUrl,
+  resolveGoogleWorkspaceCliVendoredPath,
 } from "./install-google-workspace-cli.js";
 
 describe("Google Workspace CLI installer", () => {
@@ -27,12 +32,23 @@ describe("Google Workspace CLI installer", () => {
     });
   });
 
-  it("downloads a pinned artifact directly from the official GitHub release", () => {
+  it("downloads a pinned artifact from the release's direct URL, not the rate-limited API", () => {
     const artifact = resolveGoogleWorkspaceCliArtifact("linux", "x64");
 
     expect(resolveGoogleWorkspaceCliDownloadUrl(artifact)).toBe(
-      "https://api.github.com/repos/googleworkspace/cli/releases/assets/385726987",
+      `https://github.com/googleworkspace/cli/releases/download/v${GWS_VERSION}/google-workspace-cli-x86_64-unknown-linux-musl.tar.gz`,
     );
+  });
+
+  // Four image builds failed on this download on 4 October 2026; the x86_64 archive now ships in
+  // the repository and must match the pinned digest.
+  it("keeps the x64 archive in vendor with the pinned digest and nothing for arm64", async () => {
+    const x64 = resolveGoogleWorkspaceCliArtifact("linux", "x64");
+    const vendored = await resolveGoogleWorkspaceCliVendoredPath(x64);
+    expect(vendored).toMatch(/vendor\/google-workspace-cli\/google-workspace-cli-x86_64-unknown-linux-musl\.tar\.gz$/u);
+    const digest = createHash("sha256").update(await readFile(vendored!)).digest("hex");
+    expect(digest).toBe(x64.sha256);
+    expect(await resolveGoogleWorkspaceCliVendoredPath(resolveGoogleWorkspaceCliArtifact("linux", "arm64"))).toBeNull();
   });
 
   it("rejects non-Linux and unsupported CPU targets", () => {

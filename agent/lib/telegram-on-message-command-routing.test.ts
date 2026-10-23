@@ -5,6 +5,8 @@
  * - Unsupported commands remain passive timeline entries and never start an agent turn.
  * - Enrollment command suffixes must target the current bot.
  * - Voice transcripts cannot masquerade as Telegram commands.
+ * - `/start` and `/stop` reach the administrator command only in an unregistered group or a group
+ *   without a family, and only bare or addressed to this bot.
  */
 import type { TelegramMessage } from "eve/channels/telegram";
 import { describe, expect, it } from "vitest";
@@ -121,5 +123,42 @@ describe("createTelegramMessageHandler command routing", () => {
 
     expect(result?.auth).toBeDefined();
     expect(repository.session.prepareTurn).toHaveBeenCalledTimes(1);
+  });
+
+  describe("group without a family", () => {
+    it.each([["/start", "start"], [`/start@${BOT_USERNAME}`, "start"], [`/start@${BOT_USERNAME} neighbours`, "start"], [`/stop@${BOT_USERNAME}`, "stop"]])(
+      "routes %s in an unregistered group to the administrator command",
+      async (text, command) => {
+        const repository = repositories();
+        const { context, sendMessage } = telegramContext();
+        await expect(createTelegramMessageHandler(repository)(context, groupMessage(text))).resolves.toBeNull();
+        expect(repository.familylessGroup.command).toHaveBeenCalledWith(expect.objectContaining({
+          command, telegramChatId: "group-101", telegramChatType: "group", telegramUserId: "telegram-101",
+        }));
+        expect(sendMessage).toHaveBeenCalledWith("Включилась.");
+        expect(repository.journal.record).not.toHaveBeenCalled();
+      },
+    );
+
+    it("routes /stop in a group without a family and leaves a family's group alone", async () => {
+      const familyless = repositories();
+      familyless.telegram.findGroup.mockResolvedValue({
+        familyId: null, groupId: "group-1", messageMode: "addressed_only",
+        telegramChatId: "group-101", toolAllowlist: ["web_search"], type: "external",
+      });
+      await createTelegramMessageHandler(familyless)(telegramContext().context, groupMessage("/stop"));
+      expect(familyless.familylessGroup.command).toHaveBeenCalledWith(expect.objectContaining({ command: "stop" }));
+
+      const family = familyGroupRepositories();
+      await createTelegramMessageHandler(family)(telegramContext().context, groupMessage("/stop"));
+      expect(family.familylessGroup.command).not.toHaveBeenCalled();
+    });
+
+    it("ignores a /start addressed to another bot and a /stop with words", async () => {
+      const repository = repositories();
+      await createTelegramMessageHandler(repository)(telegramContext().context, groupMessage("/start@other_bot"));
+      await createTelegramMessageHandler(repository)(telegramContext().context, groupMessage("/stop now"));
+      expect(repository.familylessGroup.command).not.toHaveBeenCalled();
+    });
   });
 });

@@ -27,9 +27,12 @@ const waiting = {
   pending: 0,
 };
 
+const KEYBOARD = { inline_keyboard: [[{ callback_data: "tb:1", text: "Беру · Забрать посылку" }, { callback_data: "tb:2", text: "Не могу" }]] };
+
 function dependencies(overrides: Partial<PartnerAlertDispatcherDependencies> = {}) {
   return {
     claim: vi.fn().mockResolvedValue("ref-1"),
+    keyboard: vi.fn().mockResolvedValue(KEYBOARD),
     pending: vi.fn().mockResolvedValue(waiting),
     personalTime: vi.fn().mockResolvedValue(null),
     recipients: vi.fn().mockResolvedValue([person]),
@@ -55,6 +58,19 @@ describe("partner alert dispatcher", () => {
     expect(deps.record).toHaveBeenCalledWith(expect.objectContaining({
       deliveryRef: "ref-1", messageId: "777", sourceKind: "partner_alert",
     }));
+  });
+
+  it("puts «Беру / Не могу» under a proposed task it knows the version of", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const items = [{ ...waiting.items[0]!, version: 3 }];
+    const deps = dependencies({ pending: vi.fn().mockResolvedValue({ items, pending: 0 }) });
+
+    await createPartnerAlertDispatcher(deps)(NOW);
+
+    expect(deps.keyboard).toHaveBeenCalledWith(person, items, NOW);
+    expect(deps.send).toHaveBeenCalledWith({
+      chatId: "101", replyMarkup: KEYBOARD, text: expect.stringContaining("Ответь кнопкой под сообщением"),
+    });
   });
 
   it("works for a person who never turned the coach on: this is their own business", async () => {

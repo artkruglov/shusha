@@ -16,17 +16,22 @@ import { MemoryReviewOwnerAlertTransportError } from "../memory-review/memory-re
 const person: DailyOverviewRecipient = {
   familyId: "family-1",
   firstEver: false,
+  overviewEnabled: true,
+  overviewHour: null,
   settings: { dailyLimit: 3, enabled: true, quietEnd: "08:00", quietStart: "23:00", timezone: "Europe/Moscow" },
   state: { sentToday: 0, unanswered: 0 },
   telegramUserId: "101",
   userId: "user-1",
 };
 const morning = new Date("2026-09-12T06:10:00.000Z");
+const KEYBOARD = { inline_keyboard: [[{ callback_data: "tb:1", text: "✓ Оплатить счёт" }]] };
 
 function dependencies(overrides: Partial<Parameters<typeof createDailyOverviewDispatcher>[0]> = {}) {
   return {
     claim: vi.fn().mockResolvedValue("ref-1"),
+    keyboard: vi.fn().mockResolvedValue(KEYBOARD),
     record: vi.fn().mockResolvedValue(undefined),
+    recordShows: vi.fn().mockResolvedValue(undefined),
     send: vi.fn().mockResolvedValue("555"),
     personalTime: vi.fn().mockResolvedValue(null),
     overview: vi.fn().mockResolvedValue({
@@ -45,8 +50,19 @@ describe("createDailyOverviewDispatcher", () => {
     const deps = dependencies();
     await expect(createDailyOverviewDispatcher(deps)(morning)).resolves.toBe(1);
     expect(deps.send).toHaveBeenCalledWith({
-      chatId: "101", text: expect.stringContaining("Оплатить счёт"),
+      chatId: "101", entities: expect.arrayContaining([{ length: 12, offset: 0, type: "bold" }]), replyMarkup: KEYBOARD,
+      text: expect.stringContaining("Оплатить счёт"),
     });
+    expect(deps.keyboard).toHaveBeenCalledWith(person, expect.objectContaining({ openCount: 1 }), morning);
+    // Показ этого утра записан: после трёх таких обзор перестанет повторять дело.
+    expect(deps.recordShows).toHaveBeenCalledWith(person, [expect.objectContaining({ title: "Оплатить счёт" })], "2026-09-12");
+  });
+
+  it("still counts the overview as sent when recording its shows fails", async () => {
+    const deps = dependencies({ recordShows: vi.fn().mockRejectedValue(new Error("down")) });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(createDailyOverviewDispatcher(deps)(morning)).resolves.toBe(1);
+    expect(deps.record).toHaveBeenCalled();
   });
 
   it("explains itself and names the switch the first time it ever speaks", async () => {
@@ -55,14 +71,24 @@ describe("createDailyOverviewDispatcher", () => {
     });
     await createDailyOverviewDispatcher(deps)(morning);
     expect(deps.send).toHaveBeenCalledWith({
-      chatId: "101", text: expect.stringContaining("не пиши мне первым"),
+      chatId: "101", entities: expect.any(Array), replyMarkup: KEYBOARD, text: expect.stringContaining("не пиши мне первым"),
     });
     // Второй раз объяснение не повторяется: человек его уже прочитал.
     const later = dependencies({ send: vi.fn().mockResolvedValue("556") });
     await createDailyOverviewDispatcher(later)(morning);
     expect(later.send).toHaveBeenCalledWith({
-      chatId: "101", text: expect.not.stringContaining("не пиши мне первым"),
+      chatId: "101", entities: expect.any(Array), replyMarkup: KEYBOARD, text: expect.not.stringContaining("не пиши мне первым"),
     });
+  });
+
+  it("keeps the person's own overview switch and hour", async () => {
+    const off = dependencies({ recipients: vi.fn().mockResolvedValue([{ ...person, overviewEnabled: false }]) });
+    await expect(createDailyOverviewDispatcher(off)(morning)).resolves.toBe(0);
+    // 09:10 по Москве: в 10 ещё рано, в 9 уже пора.
+    const ten = dependencies({ recipients: vi.fn().mockResolvedValue([{ ...person, overviewHour: 10 }]) });
+    await expect(createDailyOverviewDispatcher(ten)(morning)).resolves.toBe(0);
+    const nine = dependencies({ recipients: vi.fn().mockResolvedValue([{ ...person, overviewHour: 9 }]) });
+    await expect(createDailyOverviewDispatcher(nine)(morning)).resolves.toBe(1);
   });
 
   it("keeps quiet while the person is in their own time", async () => {

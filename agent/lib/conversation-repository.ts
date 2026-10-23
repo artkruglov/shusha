@@ -12,7 +12,8 @@ import { CONVERSATION_TIMELINE_SELECTION_MAX_ENTRIES } from "./memory-config.js"
 import type { MemoryScope } from "./memory-context.js";
 
 export interface ApplicationConversation {
-  familyId: string;
+  /** `null` only for the conversation of a group without a family (migration 175). */
+  familyId: string | null;
   id: string;
   label: string;
   ownerUserId: string | null;
@@ -34,7 +35,7 @@ export interface ConversationParticipant {
 }
 
 interface ConversationRow {
-  family_id: string;
+  family_id: string | null;
   id: string;
   label: string;
   owner_user_id: string | null;

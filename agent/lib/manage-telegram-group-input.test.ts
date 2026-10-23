@@ -23,6 +23,9 @@ const repositories = vi.hoisted(() => ({
 vi.mock("./telegram-group-administration-repository.js", () => ({
   telegramGroupAdministrationRepository: repositories,
 }));
+vi.mock("./telegram-group-admin-verification.js", () => ({
+  telegramGroupAdminVerifier: { requireAdministrator: vi.fn().mockResolvedValue(undefined) },
+}));
 
 import manageTelegramGroup from "./tools/manage_telegram_group.js";
 
@@ -31,8 +34,11 @@ const caller = {
     familyId: "family-1",
     memoryScopes: ["personal", "family"],
     role: "owner",
+    telegramActorId: "101",
+    telegramActorKind: "telegram_user",
     telegramChatId: "101",
     telegramChatType: "private",
+    telegramUserId: "101",
   },
   authenticator: "telegram",
   principalId: "owner-1",

@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  formatTaskBoard, TASK_BOARD_MAX_CHARACTERS, taskBoardReply, type BoardTask,
+  closedTaskBoardReply, formatTaskBoard, TASK_BOARD_MAX_CHARACTERS, type BoardTask,
 } from "./task-board.js";
-import { formatTelegramFinalPresentation } from "./telegram-final-presentation.js";
 
 const NOW = new Date("2026-09-22T06:00:00Z");
 const task = (title: string, extra: Partial<BoardTask> = {}): BoardTask => ({
@@ -84,6 +83,23 @@ describe("task board", () => {
     expect(board).toContain("Переезд (Дом и забота) · 2 · сделано 3 из 5\n• Заказать матрас\n• Сдать ключи");
     // Без проекта заголовком остаётся сфера, как раньше.
     expect(board).toContain("Для себя · 1\n• Записаться на йогу");
+  });
+
+  // Прод 15 октября 2026: «ГПУ» и «ГПУ (Работа)», «Даня · Учёба» трижды, потому что раздел делился по
+  // сфере каждого дела и по копиям проекта.
+  it("shows one section per project whatever its tasks' spheres, finding twins by their alias", () => {
+    const board = formatTaskBoard({
+      now: NOW, style: "plain", timezone: "UTC",
+      projects: [{ aliases: ["p2"], completed: 5, hasNextStep: true, id: "p1", lifeArea: "kids", open: 4, source: "Личное", status: "accepted", title: "Даня · Учёба", total: 9 }],
+      tasks: [
+        task("Забрать очки", { lifeArea: "kids", listName: "Даня · Учёба", projectId: "p1" }),
+        task("Написать в школу", { listName: "Даня · Учёба", projectId: "p2" }),
+        task("Съездить в бассейн", { lifeArea: "self", listName: "Даня · Учёба", projectId: "p1" }),
+      ],
+    })!;
+
+    expect(board.match(/Даня · Учёба/gu)).toHaveLength(1);
+    expect(board).toContain("Даня · Учёба (Семья и дети) · 3 · сделано 5 из 9");
   });
 
   it("keeps progress off a small or untouched project", () => {
@@ -181,7 +197,7 @@ describe("task board", () => {
     const board = formatTaskBoard({ now: NOW, style: "plain", tasks, timezone: "UTC" })!;
 
     expect(board.length).toBeLessThanOrEqual(TASK_BOARD_MAX_CHARACTERS);
-    expect(board).toMatch(/…и ещё \d+ раздела, спроси о них отдельно/u);
+    expect(board).toMatch(/Не поместились: [^\n]+ · \d+[^\n]*\. Спроси о любом отдельно\./u);
     expect(board).toContain("Открытых дел: 60");
     // Длинное название обрезается, а не переносит доску за предел.
     expect(board).toContain("…");
@@ -189,17 +205,6 @@ describe("task board", () => {
 
   it("stays silent when nothing is open", () => {
     expect(formatTaskBoard({ now: NOW, style: "plain", timezone: "UTC", tasks: [task("Готово", { status: "completed" })] })).toBeNull();
-  });
-
-  it("gives the model a board that reaches the chat whole and bold", () => {
-    const tasks = Array.from({ length: 30 }, (_, index) => task(`Дело с довольно длинным названием ${index + 1}`, { listName: index % 2 ? "Работа" : "Дом" }));
-    const reply = taskBoardReply(tasks, NOW, "UTC")!;
-    const delivered = formatTelegramFinalPresentation(reply).map((chunk) => chunk.text).join("\n");
-
-    expect(delivered).not.toContain("Полный ответ");
-    expect(delivered).not.toContain("telegram-keep-open");
-    expect(delivered).toContain("Дело с довольно длинным названием 2");
-    expect(taskBoardReply([], NOW, "UTC")).toBeNull();
   });
 
   it("keeps the list name in the heading and puts the life area next to it", () => {
@@ -255,5 +260,22 @@ describe("task board", () => {
     })!;
 
     expect(board).not.toContain("Разобрать");
+  });
+
+  it("shows the closed view as its own board instead of an empty open one", () => {
+    const board = closedTaskBoardReply([
+      task("Подготовить видео", { status: "completed" }),
+      task("Отменить поход", { status: "cancelled" }),
+      task("Подобрать **страховку**", { status: "completed" }),
+      task("Чужая просьба", { status: "declined" }),
+    ])!;
+    expect(board.split("\n").slice(1).join("\n")).toBe([
+      "**Сделано · 2**", "", "- Подготовить видео", "- Подобрать \\*\\*страховку\\*\\*", "",
+      "**Отменено · 2**", "", "- Отменить поход", "- Чужая просьба",
+    ].join("\n"));
+    expect(closedTaskBoardReply([])).toBeNull();
+    const many = closedTaskBoardReply(Array.from({ length: 17 }, (_, n) => task(`Дело ${n}`, { status: "completed" })))!;
+    expect(many).toContain("**Сделано · 17**");
+    expect(many.endsWith("- …и ещё 2")).toBe(true);
   });
 });

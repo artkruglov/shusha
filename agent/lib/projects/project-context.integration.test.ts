@@ -7,22 +7,26 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 const currentMember = vi.hoisted(() => vi.fn(async () => true));
 vi.mock("../telegram-current-membership.js", () => ({ isCurrentTelegramMember: currentMember }));
 import { closeDatabase, database } from "../database.js";
-import type { ConversationAccess } from "../family-access.js";
+import type { FamilyConversationAccess } from "../family-access.js";
 import type { MemoryAuthorization } from "../memory-context.js";
 import { sharedTaskRepository as tasks } from "../shared-task-repository.js";
 import { createTaskFamilyFixture } from "../shared-task.integration-fixtures.js";
 import { buildTaskProjectsContext } from "./project-context.js";
+import { projectRepository as projects } from "./project-repository.js";
 
 const enabled = process.env.RUN_DATABASE_INTEGRATION_TESTS === "true";
 if (enabled && !new URL(process.env.DATABASE_URL!).pathname.endsWith("_test")) throw Error("Unsafe test database");
 const suite = enabled ? describe : describe.skip;
 let owner: MemoryAuthorization, member: MemoryAuthorization, familyGroup: MemoryAuthorization;
 
-const create = (auth: MemoryAuthorization, title: string, listName: string) =>
-  tasks.execute(auth, { action: "create", listName, title }, randomUUID());
+/** The project is made first, as after the person's «да»: a list name alone makes none. */
+const create = async (auth: MemoryAuthorization, title: string, listName: string) => {
+  await projects.execute(auth, { action: "create", title: listName }, randomUUID());
+  return tasks.execute(auth, { action: "create", listName, title }, randomUUID());
+};
 
-function access(auth: MemoryAuthorization): ConversationAccess {
-  return { familyId: auth.familyId, groupId: auth.groupId, memoryScopes: auth.scopes, role: auth.role, userId: auth.userId } as unknown as ConversationAccess;
+function access(auth: MemoryAuthorization): FamilyConversationAccess {
+  return { familyId: auth.familyId, groupId: auth.groupId, memoryScopes: auth.scopes, role: auth.role, userId: auth.userId } as unknown as FamilyConversationAccess;
 }
 const block = (auth: MemoryAuthorization) =>
   buildTaskProjectsContext({ access: access(auth), actor: { id: auth.telegramUserId!, kind: "telegram_user" } });
