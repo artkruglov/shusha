@@ -22,6 +22,49 @@ const TOOL_CALLS_FINISH_REASON = "tool-calls";
 const TELEGRAM_REACTION_DIRECTIVE_PATTERN =
   /^<telegram-reaction>(?<emoji>[^<]*)<\/telegram-reaction>$/u;
 const TELEGRAM_REACTION_DIRECTIVE_FRAGMENT = "telegram-reaction";
+// A whole answer that is one tag pair around something short. With tag names that resemble the
+// reaction directive it is the gesture the model meant: on 16 October 2026 a group chat read
+// `<telegereaction>😁</telegereaction>` as text because the misspelling carried neither the
+// directive nor its fragment. With other names and nothing inside it is a directive nobody
+// defined, never a message.
+const LONE_TAG_PAIR_PATTERN = /^<(?<open>[a-z][a-z-]*)>(?<inner>[^<>]*)<\/(?<close>[a-z][a-z-]*)>$/u;
+
+function resemblesReactionTag(name: string): boolean {
+  return name.includes("react") || name.includes("teleg");
+}
+
+function loneTagPair(message: string): { close: string; inner: string; open: string } | null {
+  const groups = LONE_TAG_PAIR_PATTERN.exec(message)?.groups;
+  return groups === undefined ? null : { close: groups.close!, inner: groups.inner!, open: groups.open! };
+}
+
+function misspelledReactionDirective(message: string): { close: string; emoji: string; open: string } | null {
+  const pair = loneTagPair(message);
+  if (pair === null || !resemblesReactionTag(pair.open) || !resemblesReactionTag(pair.close)) return null;
+  // The exact directive is not a misspelling; its own path decides. Words inside a tag that merely
+  // resembles the directive stay text: only an emoji is the gesture the model meant.
+  if (pair.open === TELEGRAM_REACTION_DIRECTIVE_FRAGMENT && pair.close === TELEGRAM_REACTION_DIRECTIVE_FRAGMENT) return null;
+  if (!isTelegramMessageReactionEmoji(pair.inner)) return null;
+  return { close: pair.close, emoji: pair.inner, open: pair.open };
+}
+
+/** A lone pair of tags around nothing is a directive nobody defined, never something to send. */
+function emptyTagPair(message: string): boolean {
+  const pair = loneTagPair(message);
+  if (pair === null || pair.inner.trim() !== "") return false;
+  console.warn(JSON.stringify({ code: "AGENT_TELEGRAM_OUTPUT_TAG_ONLY", close: pair.close, open: pair.open }));
+  return true;
+}
+
+function reactionOutput(requested: string): CompletedTelegramOutput {
+  // Telegram refuses reactions outside its set with 400, and a refused reaction left the person
+  // with nothing (9 сентября 2026). The gesture arrives as the closest reaction Telegram takes.
+  const emoji = nearestTelegramReactionEmoji(requested);
+  if (emoji !== requested.replace(/\uFE0F/gu, "")) {
+    console.warn(JSON.stringify({ code: "AGENT_TELEGRAM_REACTION_SUBSTITUTED", applied: emoji, requested }));
+  }
+  return { emoji, kind: "reaction" };
+}
 /**
  * The model's explicit way to say nothing. A genuinely empty answer is not available to it: Eve
  * retries an empty model step once, and the retry came back as a placeholder such as "(пусто)"
@@ -94,20 +137,18 @@ export function completedTelegramOutput(data: {
   if (data.finishReason === TOOL_CALLS_FINISH_REASON) {
     const progress = stripTelegramAsideDirectives(message).trim();
     // Transport directives belong to the final answer; interim noise is dropped, never delivered.
-    if (!progress || progress.includes(TELEGRAM_REACTION_DIRECTIVE_FRAGMENT)) return null;
+    if (!progress || progress.includes(TELEGRAM_REACTION_DIRECTIVE_FRAGMENT) || misspelledReactionDirective(progress) !== null) return null;
+    if (emptyTagPair(progress)) return null;
     return { kind: "progress", message: progress };
   }
 
   // Reaction is a terminal transport directive and can never be mixed with user-visible text.
   const reaction = TELEGRAM_REACTION_DIRECTIVE_PATTERN.exec(message)?.groups?.emoji;
-  if (reaction !== undefined && isTelegramMessageReactionEmoji(reaction)) {
-    // Telegram refuses reactions outside its set with 400, and a refused reaction left the person
-    // with nothing (9 сентября 2026). The gesture arrives as the closest reaction Telegram takes.
-    const emoji = nearestTelegramReactionEmoji(reaction);
-    if (emoji !== reaction.replace(/\uFE0F/gu, "")) {
-      console.warn(JSON.stringify({ code: "AGENT_TELEGRAM_REACTION_SUBSTITUTED", applied: emoji, requested: reaction }));
-    }
-    return { emoji, kind: "reaction" };
+  if (reaction !== undefined && isTelegramMessageReactionEmoji(reaction)) return reactionOutput(reaction);
+  const misspelled = misspelledReactionDirective(message);
+  if (misspelled !== null) {
+    console.warn(JSON.stringify({ code: "AGENT_TELEGRAM_REACTION_DIRECTIVE_REPAIRED", close: misspelled.close, open: misspelled.open }));
+    return reactionOutput(misspelled.emoji);
   }
   if (message.includes(TELEGRAM_REACTION_DIRECTIVE_FRAGMENT)) {
     throw new AppError(
@@ -116,6 +157,6 @@ export function completedTelegramOutput(data: {
     );
   }
   // An answer made of transport directives alone has no visible content to deliver.
-  if (!stripTelegramAsideDirectives(message)) return null;
+  if (!stripTelegramAsideDirectives(message) || emptyTagPair(message)) return null;
   return { kind: "message", memoryUsedDeclared, memoryUsedRefs, message };
 }
