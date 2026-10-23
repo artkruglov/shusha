@@ -31,11 +31,15 @@ describe("pruneTerminalWorkflowRuns", () => {
     const texts = c.query.mock.calls.map((call) => call[0]);
     expect(texts.filter((t) => t === "BEGIN")).toHaveLength(2);
     expect(texts.filter((t) => t === "COMMIT")).toHaveLength(2);
-    const firstRun = texts.slice(1, 11);
+    // BEGIN, the lock, seven per-run deletions, the run itself, COMMIT.
+    const firstRun = texts.slice(1, 12);
     expect(firstRun[0]).toBe("BEGIN");
     expect(firstRun[1]).toContain("FOR UPDATE");
+    expect(firstRun).toContain("DELETE FROM workflow.workflow_payload_blob_refs WHERE run_id = $1");
     expect(firstRun[firstRun.length - 2]).toBe("DELETE FROM workflow.workflow_runs WHERE id = $1");
     expect(firstRun[firstRun.length - 1]).toBe("COMMIT");
+    // Blobs nobody refers to any more go after the runs, once per sweep.
+    expect(texts.at(-1)).toContain("DELETE FROM workflow.workflow_payload_blobs");
   });
 
   it("skips a run that is no longer finished under the lock", async () => {

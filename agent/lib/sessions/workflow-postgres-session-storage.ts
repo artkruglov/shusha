@@ -33,6 +33,7 @@ const PER_RUN_PROJECTIONS = [
   "DELETE FROM workflow.workflow_steps WHERE run_id = ANY($1)",
   "DELETE FROM workflow.workflow_events WHERE run_id = ANY($1)",
   "DELETE FROM workflow.workflow_event_slots WHERE run_id = ANY($1)",
+  "DELETE FROM workflow.workflow_payload_blob_refs WHERE run_id = ANY($1)",
 ] as const;
 
 interface WorkflowQueryClient {
