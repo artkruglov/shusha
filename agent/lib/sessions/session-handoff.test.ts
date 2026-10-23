@@ -88,6 +88,19 @@ describe("prepareSessionHandoff", () => {
     expect(JSON.stringify(line)).not.toContain("дача");
   });
 
+  it("leaves attachment references out of the summary's source", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const deps = dependencies();
+    const withFile = { ...entry("5", "вот договор", "2026-10-10T10:20:00.000Z"), attachment: { attachmentId: "att-secret-1", fileName: "договор.pdf", kind: "document" as const, mediaType: "application/pdf", size: 1024 } };
+    deps.listPrivate.mockResolvedValue([...entries, withFile]);
+    await prepareSessionHandoff(input, deps);
+
+    const prompt = deps.generate.mock.calls[0]![0] as { prompt: string };
+    expect(prompt.prompt).toContain("вот договор");
+    expect(prompt.prompt).not.toContain("att-secret-1");
+    expect(prompt.prompt).not.toContain("договор.pdf");
+  });
+
   it("reads a group topic through the journal within its limit", async () => {
     const thirty = Array.from({ length: 30 }, (_, index) => entry(String(10 + index), `реплика ${index}`, "2026-10-10T11:00:00.000Z"));
     const deps = dependencies({ listGroup: vi.fn().mockResolvedValue(thirty) });

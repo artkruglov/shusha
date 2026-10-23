@@ -130,6 +130,12 @@ export function selectHandoffSource(
  * The rendering the model reads, with the oldest entries dropped until it fits the bound; empty
  * when even the newest entry alone does not (a joined agent reply can exceed one Telegram message).
  */
+function withoutAttachment(entry: TelegramGroupJournalEntry): TelegramGroupJournalEntry {
+  if (entry.attachment === undefined) return entry;
+  const { attachment: _attachment, ...rest } = entry;
+  return rest;
+}
+
 export function renderHandoffSource(
   source: readonly TelegramGroupJournalEntry[],
   timezone: string | null,
@@ -205,7 +211,9 @@ export async function prepareSessionHandoff(
             limit: SESSION_HANDOFF_SOURCE_MAX_ENTRIES, messageThreadId: input.messageThreadId,
           })
         : [];
-    const selected = selectHandoffSource(entries, input.retiredSessionStartedAt);
+    // The summary is about what was said; attachment references stay out of it, so the next session
+    // meets a file only through the turn's own visibility filter, never through the summary.
+    const selected = selectHandoffSource(entries, input.retiredSessionStartedAt).map(withoutAttachment);
     if (selected.length === 0) {
       console.info(line("AGENT_SESSION_HANDOFF_SKIPPED", { reason: "no_entries" }));
       return;
