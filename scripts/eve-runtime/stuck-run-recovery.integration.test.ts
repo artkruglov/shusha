@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 
-import { findStuckRuns, releaseDeadWorkerLocks } from "./stuck-run-recovery.ts";
+import { findInFlightRuns, findStuckRuns, releaseDeadWorkerLocks, requeueInFlightRuns } from "./stuck-run-recovery.ts";
 
 const LIMITS = { retryAfterMs: 10 * 60 * 1000, stepStartedAfterMs: 40 * 60 * 1000 };
 
@@ -41,6 +41,68 @@ describe.skipIf(process.env.RUN_DATABASE_INTEGRATION_TESTS !== "true" || !proces
       expect(found.map((run) => run.runId.slice(prefix.length + 1)).sort()).toEqual(["lostRetry", "lostStart"]);
       expect(found.every((run) => run.workflowName === "workflow//eve//turnWorkflow")).toBe(true);
     } finally {
+      await pool.query("DELETE FROM workflow.workflow_events WHERE run_id LIKE $1", [`${prefix}-%`]);
+      await pool.query("DELETE FROM workflow.workflow_runs WHERE id LIKE $1", [`${prefix}-%`]);
+      await pool.end();
+    }
+  }, 15_000);
+
+  // Startup used to re-enqueue every active run, so each parked session replayed its whole log on
+  // every deploy (ilkruglov 7afdc12: 79 runs on one installation); only interrupted runs need that.
+  it("names the runs interrupted mid-flight and leaves parked sessions and sleeps alone", async () => {
+    if (!process.env.WORKFLOW_POSTGRES_URL) throw new Error("TEST_WORKFLOW_DATABASE_MISSING");
+    const pool = new Pool({ connectionString: process.env.WORKFLOW_POSTGRES_URL, max: 2 });
+    const prefix = `inflight-${randomUUID().slice(0, 8)}`;
+    const runs = {
+      justStarted: { last: "step_started", minutesAgo: 0, status: "running" },
+      betweenSteps: { last: "step_completed", minutesAgo: 1, status: "running" },
+      retrying: { last: "step_retrying", minutesAgo: 1, status: "pending" },
+      hookArrived: { last: "hook_received", minutesAgo: 1, status: "running" },
+      created: { last: "run_created", minutesAgo: 1, status: "pending" },
+      parked: { last: "hook_created", minutesAgo: 1, status: "running" },
+      sleeping: { last: "wait_created", minutesAgo: 1, status: "running" },
+      // An active session waits on a hook created turns ago, so its last event is the completed
+      // turn step (ilkruglov 583c5ef: nine such runs replayed on every start).
+      restingOnHook: { last: "step_completed", minutesAgo: 30, status: "running", hook: true },
+      // The same without a hook has nothing to wake it: interrupted, however old.
+      abandoned: { last: "step_completed", minutesAgo: 30, status: "running" },
+      finished: { last: "step_completed", minutesAgo: 1, status: "completed" },
+    } as const;
+    const interrupted = ["abandoned", "betweenSteps", "created", "hookArrived", "justStarted", "retrying"];
+    try {
+      for (const [name, run] of Object.entries(runs)) {
+        const runId = `${prefix}-${name}`;
+        await pool.query(
+          "INSERT INTO workflow.workflow_runs (id, deployment_id, status, name) VALUES ($1, 'postgres', $2, 'workflow//eve//turnWorkflow')",
+          [runId, run.status],
+        );
+        await pool.query(
+          `INSERT INTO workflow.workflow_events (id, type, run_id, created_at)
+           VALUES ($1, 'run_created', $2, LOCALTIMESTAMP - make_interval(mins => $3::int + 1)),
+                  ($4, $5, $2, LOCALTIMESTAMP - make_interval(mins => $3::int))`,
+          [`${runId}-a`, runId, run.minutesAgo, `${runId}-b`, run.last],
+        );
+        if ("hook" in run && run.hook) {
+          await pool.query(
+            "INSERT INTO workflow.workflow_hooks (run_id, hook_id, token, owner_id, project_id, environment) VALUES ($1, $2, $3, 'o', 'p', 'e')",
+            [runId, `${runId}-hook`, `${runId}-token`],
+          );
+        }
+      }
+
+      // A page of three forces the id-keyed paging through several rounds.
+      const found = (await findInFlightRuns(pool, 3)).filter((run) => run.runId.startsWith(prefix));
+      expect(found.map((run) => run.runId.slice(prefix.length + 1)).sort()).toEqual(interrupted);
+      const enqueued: string[] = [];
+      await requeueInFlightRuns({
+        enqueue: async (queueName, message) => { enqueued.push(`${queueName}|${message.runId}`); },
+        pool,
+        queuePrefix: "test//",
+      });
+      expect(enqueued.filter((entry) => entry.includes(prefix)).sort())
+        .toEqual(interrupted.map((name) => `test//workflow//eve//turnWorkflow|${prefix}-${name}`));
+    } finally {
+      await pool.query("DELETE FROM workflow.workflow_hooks WHERE run_id LIKE $1", [`${prefix}-%`]);
       await pool.query("DELETE FROM workflow.workflow_events WHERE run_id LIKE $1", [`${prefix}-%`]);
       await pool.query("DELETE FROM workflow.workflow_runs WHERE id LIKE $1", [`${prefix}-%`]);
       await pool.end();

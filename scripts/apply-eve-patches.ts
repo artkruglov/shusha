@@ -143,6 +143,7 @@ await patchPostgresConnectionRecovery(replaceExact);
 // a redelivery of that live message must join the running execution instead of starting another.
 await patchWorkflowTransport(replaceExact);
 // Upstream ilkruglov 5d80240e: a run whose retry job was lost is requeued by a five-minute scan, not only at start.
+// Upstream ilkruglov 7afdc12 + 583c5ef: the start re-enqueues only the runs interrupted mid-flight, not every active one.
 await patchStuckRunRecovery(replaceExact);
 // Security review (ilkruglov 87b73f55): the webhook secret is compared before the body is read.
 await patchWebhookVerifyFirst(replaceExact);
