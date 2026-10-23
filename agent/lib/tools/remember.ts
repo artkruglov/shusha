@@ -9,6 +9,7 @@ import { AppError, isAppError } from "../app-error.js";
 import { requireAllowedMemoryContent } from "../memory-content-policy.js";
 import { requireMemoryAuthorization, requireWritableScope } from "../memory-context.js";
 import { memoryRepository } from "../memory-repository.js";
+import { NearDuplicateRefusal, nearDuplicateRefusalResult } from "../memory-near-duplicate.js";
 import { logMemoryWriteEvent } from "../memory-observability.js";
 import { resolveMemoryTurnSource } from "../memory-turn-source.js";
 import { toModelMemory } from "../model-memory.js";
@@ -28,7 +29,7 @@ export default defineTool({
     "Обычный payload: {\"basis\":\"user_requested\",\"content\":\"...\",\"kind\":\"fact\",\"scope\":\"personal\",\"sensitivity\":\"normal\",\"subject\":{\"kind\":\"current_author\"}}.",
     "В группе sourceSequence выбирает ровно одно сообщение видимой дельты. Для существующей нити используй thread.action=attach и threadRef только из list/search/read_memory_thread; thread.action=create создаёт нить атомарно.",
     "Результат содержит item.memoryRef и optional thread; для немедленной отмены доступен manage_memory с action undo. Не пересказывай пользователю служебные поля результата.",
-    "При ошибке AGENT_MEMORY_NEAR_DUPLICATE один раз повтори вызов с reinforces (то же самое), attribute (факт изменился) или distinct=true (другой факт).",
+    "Ответ с code AGENT_MEMORY_NEAR_DUPLICATE и saved:false значит, что похожие записи уже есть: прочитай similar и один раз повтори вызов с reinforces (то же самое), attribute (факт изменился) или distinct=true (другой факт).",
   ].join(" "),
   inputSchema: rememberInputSchema,
   async execute(input, ctx) {
@@ -87,6 +88,16 @@ export default defineTool({
         ...(input.thread === undefined ? {} : { thread: input.thread }),
       });
     } catch (error) {
+      if (error instanceof NearDuplicateRefusal) {
+        logMemoryWriteEvent({
+          code: "AGENT_MEMORY_WRITE_DEFERRED",
+          errorCode: error.code,
+          scope,
+          sourceKind: source?.isCurrent === true ? "current" : requestedSourceKind,
+          threadAction: input.thread?.action ?? "none",
+        });
+        return nearDuplicateRefusalResult(error);
+      }
       const errorCode = isAppError(error)
         ? error.code
         : typeof error === "object" && error !== null &&

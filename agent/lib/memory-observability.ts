@@ -5,7 +5,8 @@
  * - `logMemoryWriteEvent`: emits aggregatable success/failure and thread-action events.
  */
 export interface MemoryWriteEvent {
-  code: "AGENT_MEMORY_WRITE_FAILED" | "AGENT_MEMORY_WRITE_SUCCEEDED";
+  /** `DEFERRED` is a write stopped on purpose for the model to look at similar records. */
+  code: "AGENT_MEMORY_WRITE_DEFERRED" | "AGENT_MEMORY_WRITE_FAILED" | "AGENT_MEMORY_WRITE_SUCCEEDED";
   errorCode?: string;
   scope: "family" | "group" | "personal";
   sourceKind: "current" | "delta";

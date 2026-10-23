@@ -74,7 +74,12 @@ describeWithDatabase("near-duplicate gate", () => {
     await indexWithVector(first.id, 1);
 
     await expect(memoryRepository.create(fixture.auth, claim(fixture, "Семейный попугай Гоша, кубинский амазон, живёт дома", "near-2")))
-      .rejects.toMatchObject({ code: "AGENT_MEMORY_NEAR_DUPLICATE", message: expect.stringContaining(first.memoryRef) });
+      .rejects.toMatchObject({
+        candidates: [expect.objectContaining({ memoryRef: first.memoryRef })],
+        code: "AGENT_MEMORY_NEAR_DUPLICATE",
+        // Thrown errors reach the log whole; the memory text stays out of the message.
+        message: "AGENT_MEMORY_NEAR_DUPLICATE",
+      });
     await expect(database().query(
       "SELECT count(*)::int AS total FROM memory_items WHERE family_id = $1",
       [fixture.familyId],

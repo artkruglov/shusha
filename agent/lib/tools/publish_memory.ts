@@ -9,6 +9,7 @@ import { z } from "zod";
 
 import { AppError } from "../app-error.js";
 import { requireMemoryAuthorization } from "../memory-context.js";
+import { NearDuplicateRefusal } from "../memory-near-duplicate.js";
 import { MEMORY_REF_PATTERN } from "../model-memory.js";
 import {
   listPublicationTargets,
@@ -53,9 +54,21 @@ export default defineTool({
     const preview = await previewPublication(auth, {
       areaRef: input.areaRef!, memoryRef: input.memoryRef!,
     });
-    const published = await publishMemory(auth, {
-      areaRef: input.areaRef!, memoryRef: input.memoryRef!,
-    }, `${ctx.session.id}:${ctx.callId}`);
-    return { ...published, kind: preview.kind };
+    try {
+      const published = await publishMemory(auth, {
+        areaRef: input.areaRef!, memoryRef: input.memoryRef!,
+      }, `${ctx.session.id}:${ctx.callId}`);
+      return { ...published, kind: preview.kind };
+    } catch (error) {
+      // The copy met a similar record in the target area. The stop is answered, not thrown: a
+      // thrown tool error is logged whole, and the similar records are that area's memory.
+      if (!(error instanceof NearDuplicateRefusal)) throw error;
+      return {
+        code: error.code,
+        instruction: "В целевой области уже есть похожая запись; копия не создана. Скажи об этом человеку.",
+        published: false as const,
+        similar: error.candidates.map(({ attribute, content, memoryRef }) => ({ attribute, content, memoryRef })),
+      };
+    }
   },
 });

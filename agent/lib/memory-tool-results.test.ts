@@ -3,6 +3,9 @@
  *
  * Constructs covered:
  * - `remember`: persists the main agent's source-backed decision and optional atomic thread action.
+ * - `remember`: a near-duplicate stop is an ordinary answer with the similar records for the
+ *   model, logged as deferred without content (upstream v0.27.1: thrown, Eve logged the whole
+ *   error, texts of family memory included).
  * - Tool results expose only opaque memory/thread refs and preserve immediate undo guidance.
  * - `list_memories`: projects internal records while preserving an opaque pagination cursor.
  * - `search_memories`: returns the already-safe retrieval DTO unchanged.
@@ -53,6 +56,7 @@ vi.mock("./session-auth.js", () => ({
     },
   }),
 }));
+import { NearDuplicateRefusal } from "./memory-near-duplicate.js";
 import listMemoriesTool from "./tools/list_memories.js";
 import remember from "./tools/remember.js";
 import searchMemories from "./tools/search_memories.js";
@@ -235,6 +239,7 @@ describe("model-facing memory tool results", () => {
         title: "Чай",
       },
     }, context);
+    if (!("item" in result)) throw new Error("expected a saved memory");
 
     expect(result.item).toEqual({
       authorStatus: "current_member",
@@ -326,6 +331,37 @@ describe("model-facing memory tool results", () => {
       code: "AGENT_MEMORY_WRITE_SUCCEEDED",
       sourceKind: "delta",
     }));
+  });
+
+  it("answers a near-duplicate stop with the similar records and logs no content", async () => {
+    const refusal = new NearDuplicateRefusal([
+      { attribute: null, content: "Гоша, кубинский амазон, живёт дома", memoryRef: MEMORY_REF, similarity: 0.71 },
+    ]);
+    expect(refusal.message).not.toContain("Гоша");
+    createMemory.mockRejectedValue(refusal);
+
+    const result = await executeNonStreamingTool(remember, {
+      basis: "agent_inferred",
+      content: "Семейный попугай Гоша живёт дома",
+      kind: "fact",
+      scope: "personal",
+      sensitivity: "normal",
+      subject: { kind: "current_author" },
+    }, context);
+
+    expect(result).toMatchObject({
+      code: "AGENT_MEMORY_NEAR_DUPLICATE",
+      saved: false,
+      similar: [{ attribute: null, content: "Гоша, кубинский амазон, живёт дома", memoryRef: MEMORY_REF }],
+    });
+    expect(logMemoryWriteEvent).toHaveBeenCalledWith({
+      code: "AGENT_MEMORY_WRITE_DEFERRED",
+      errorCode: "AGENT_MEMORY_NEAR_DUPLICATE",
+      scope: "personal",
+      sourceKind: "current",
+      threadAction: "none",
+    });
+    expect(JSON.stringify(logMemoryWriteEvent.mock.calls)).not.toContain("Гоша");
   });
 
   it("logs a structured terminal remember failure without recording memory content", async () => {
