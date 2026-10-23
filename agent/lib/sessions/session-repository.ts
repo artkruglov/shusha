@@ -16,7 +16,7 @@ import { AppError } from "../app-error.js";
 import { database } from "../database.js";
 import {
   continuationTokenForGeneration,
-  sessionNeedsRotation,
+  sessionRotationReason,
 } from "./session-policy.js";
 import {
   sessionRouteRepository,
@@ -54,6 +54,8 @@ export interface PreparedSession {
   spacePolicy?: SessionSpacePolicy;
   continuationToken: string;
   generation: number;
+  /** Set when the turn limit retired a canonical predecessor whose thread this session inherits. */
+  handoff: { retiredSessionStartedAt: Date } | null;
   id: string;
   /** True when rotation, task promotion, or trust-zone recreation requires a fresh Eve generation. */
   rotated: boolean;
@@ -84,6 +86,7 @@ interface SessionRow {
   rotation_requested_at: Date | null;
   retired_at: Date | null;
   scope: ConversationSessionScope;
+  started_at: Date;
   task_state: "completed" | "failed" | "pending" | "running" | null;
   telegram_forum_topic_id: string | null;
   thread_id: string;
@@ -363,7 +366,7 @@ export const sessionRepository = {
         trustZoneRecreated = true;
       }
 
-      const rotate = !trustZoneRecreated && sessionNeedsRotation({
+      const rotationReason = trustZoneRecreated ? null : sessionRotationReason({
         completedTurns: current.completed_turns,
         kind: current.kind,
         lastActivityAt: current.last_activity_at,
@@ -372,15 +375,20 @@ export const sessionRepository = {
         rotationRequestedAt: current.rotation_requested_at,
         scope: current.scope,
       });
-      if (rotate) current = await rotateSession(client, current, input);
+      const predecessor = current;
+      if (rotationReason !== null) current = await rotateSession(client, current, input);
       await upsertSessionRoute(client, input.baseContinuationToken, current.id);
       await client.query("COMMIT");
       return {
         ...(space ? { spacePolicy: space } : {}),
         continuationToken: current.continuation_token,
         generation: current.generation,
+        // A requested clean context and a quiet thread (12 h private, 30 days elsewhere) carry nothing over.
+        handoff: rotationReason === "turns" && predecessor.kind === "canonical"
+          ? { retiredSessionStartedAt: predecessor.started_at }
+          : null,
         id: current.id,
-        rotated: rotate || trustZoneRecreated,
+        rotated: rotationReason !== null || trustZoneRecreated,
         sandboxSessionId: current.thread_id,
       };
     } catch (error) {

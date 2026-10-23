@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   continuationTokenForGeneration,
   sessionNeedsRotation,
+  sessionRotationReason,
 } from "./session-policy.js";
 
 const NOW = new Date("2026-07-12T12:00:00.000Z");
@@ -86,5 +87,18 @@ describe("session rotation policy", () => {
       rotationRequestedAt: NOW,
       ...family,
     })).toBe(true);
+  });
+
+  it("names the reason: a request beats staleness, staleness beats the turn limit", () => {
+    const base = { lastActivityAt: NOW, now: NOW, pendingOperation: false, rotationRequestedAt: null, ...family };
+    const stale = new Date("2026-06-01T00:00:00.000Z");
+    expect(sessionRotationReason({ ...base, completedTurns: 3 })).toBeNull();
+    expect(sessionRotationReason({ ...base, completedTurns: 50 })).toBe("turns");
+    expect(sessionRotationReason({ ...base, completedTurns: 50, lastActivityAt: stale })).toBe("inactivity");
+    expect(sessionRotationReason({ ...base, completedTurns: 50, lastActivityAt: stale, rotationRequestedAt: NOW })).toBe("requested");
+    expect(sessionRotationReason({ ...base, completedTurns: 50, pendingOperation: true, rotationRequestedAt: NOW })).toBeNull();
+    // Twelve quiet hours of a private chat are staleness too: no thread worth handing over.
+    const twelveHours = new Date(NOW.getTime() - 12 * 60 * 60 * 1_000);
+    expect(sessionRotationReason({ ...base, ...privateChat, completedTurns: 50, lastActivityAt: twelveHours })).toBe("inactivity");
   });
 });

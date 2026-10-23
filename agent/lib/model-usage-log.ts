@@ -6,7 +6,10 @@
  * - `normalizeProviderUsage`: maps OpenAI Chat Completions, DeepSeek, and Anthropic usage.
  * - `observeModelUsage`: logs the provider-reported usage of one model response and hands the billed
  *   counts to an optional recorder.
- * - `formatStepUsageLog`: projects Eve `step.completed` usage next to session identity.
+ * - `formatStepUsageLog`: projects Eve `step.completed` usage next to session identity, with the
+ *   measured duration of the step when the hook has one.
+ * - `formatCompactionLog`: one line per Eve compaction event, with its duration once completed.
+ * - `createStepClock`: bounded start markers behind those durations.
  *
  * Key constructs:
  * - DeepSeek reports cache hits only in provider-specific fields the AI SDK does not surface, so
@@ -329,6 +332,7 @@ export interface StepUsageEvent {
 export function formatStepUsageLog(
   event: StepUsageEvent,
   session: { readonly channelKind: string | undefined; readonly familyId?: string; readonly sessionId: string },
+  durationMs: number | null = null,
 ): string {
   const usage = event.data.usage ?? {};
   return JSON.stringify({
@@ -344,5 +348,70 @@ export function formatStepUsageLog(
     ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
     ...(usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: usage.cacheReadTokens }),
     ...(usage.costUsd === undefined ? {} : { costUsd: usage.costUsd }),
+    ...(durationMs === null ? {} : { durationMs }),
+  });
+}
+
+export interface StepClock {
+  /** Milliseconds since the marker, which is forgotten; null without one. */
+  finish(key: string): number | null;
+  /** Remembers when the step started. */
+  start(key: string): void;
+}
+
+const STEP_CLOCK_MAX_MARKERS = 2_048;
+
+/**
+ * Wall-clock markers between Eve `step.started` and `step.completed` (and between the two
+ * compaction events). Whether a prompt of 120k tokens costs seconds was a guess until measured.
+ * A completion the hook never sees must not grow the map, so the oldest marker leaves once the
+ * bound is reached.
+ */
+export function createStepClock(
+  now: () => number = () => performance.now(),
+  maxMarkers: number = STEP_CLOCK_MAX_MARKERS,
+): StepClock {
+  const started = new Map<string, number>();
+  return {
+    finish(key) {
+      const at = started.get(key);
+      if (at === undefined) return null;
+      started.delete(key);
+      return Math.round(now() - at);
+    },
+    start(key) {
+      started.delete(key);
+      if (started.size >= maxMarkers) {
+        const oldest = started.keys().next().value;
+        if (oldest !== undefined) started.delete(oldest);
+      }
+      started.set(key, now());
+    },
+  };
+}
+
+export interface CompactionEvent {
+  readonly data: {
+    readonly modelId: string;
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly usageInputTokens?: number | null;
+  };
+  readonly type: "compaction.completed" | "compaction.requested";
+}
+
+/**
+ * One line per Eve compaction event: the event log is how a compaction is seen at all, and the
+ * duration says what a checkpoint of a 120k-token history costs in seconds.
+ */
+export function formatCompactionLog(event: CompactionEvent, durationMs: number | null = null): string {
+  const requested = event.type === "compaction.requested";
+  return JSON.stringify({
+    code: requested ? "AGENT_COMPACTION_REQUESTED" : "AGENT_COMPACTION_COMPLETED",
+    modelId: event.data.modelId,
+    sessionId: event.data.sessionId,
+    turnId: event.data.turnId,
+    ...(requested ? { usageInputTokens: event.data.usageInputTokens ?? null } : {}),
+    ...(durationMs === null ? {} : { durationMs }),
   });
 }

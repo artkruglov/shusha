@@ -15,6 +15,8 @@
  * - Foreign replies to pending HITL prompts stop before Eve dispatch.
  * - Forum replies inherit routing from the referenced bot message, not a newly assigned thread.
  * - Each accepted turn receives one trusted UTC clock snapshot shared by repository reads.
+ * - The session the turn limit retired is summarized before the new session's context, and the
+ *   turn that carries the summary says so in its trusted attributes.
  */
 import type { TelegramMessage } from "eve/channels/telegram";
 import { describe, expect, it, vi } from "vitest";
@@ -28,6 +30,68 @@ import {
 } from "./telegram-on-message.test-fixtures.js";
 import { createTelegramMessageHandler } from "./telegram-on-message.js";
 describe("createTelegramMessageHandler", () => {
+  it("summarizes the session the turn limit retired before the new session's context is prepared", async () => {
+    const repository = repositories();
+    // A real family id: the summary bills the family's budget only through a verified database id.
+    const familyId = "00000000-0000-4000-8000-000000000181";
+    repository.telegram.findIdentity.mockResolvedValue({ familyId, role: "owner", userId: "user-1" });
+    repository.conversations.getByChatId.mockResolvedValue({
+      familyId, id: "conversation-private-1", label: "Анна", ownerUserId: "user-1", scope: "personal",
+      scopePartitionKey: "user-1", telegramChatId: "telegram-101", telegramGroupId: null,
+    });
+    const retiredSessionStartedAt = new Date("2026-10-10T10:00:00.000Z");
+    repository.session.prepareTurn.mockResolvedValueOnce({
+      continuationToken: "telegram-101:::osinara:1",
+      generation: 1,
+      handoff: { retiredSessionStartedAt },
+      id: "session-2",
+      rotated: true,
+      sandboxSessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    });
+    const handler = createTelegramMessageHandler(repository);
+
+    await handler(telegramContext().context, privateMessage("Продолжим"));
+
+    expect(repository.sessionHandoff.prepare).toHaveBeenCalledWith({
+      applicationSessionId: "session-2",
+      beforeSequence: "1",
+      conversationId: "conversation-private-1",
+      groupId: null,
+      messageThreadId: null,
+      retiredSessionStartedAt,
+      timezone: null,
+      usage: { chatId: null, familyId },
+    });
+    expect(repository.sessionHandoff.prepare.mock.invocationCallOrder[0]!)
+      .toBeLessThan(repository.groupContext.prepare.mock.invocationCallOrder[0]!);
+
+    // The next turn resumes the session: nothing to hand over.
+    await handler(telegramContext().context, privateMessage("И дальше"));
+    expect(repository.sessionHandoff.prepare).toHaveBeenCalledTimes(1);
+  });
+
+  it("announces a carried handoff in the turn's trusted attributes for the hook that marks it shown", async () => {
+    const repository = repositories();
+    repository.telegram.findIdentity.mockResolvedValue({ familyId: "family-1", role: "owner", userId: "user-1" });
+    repository.groupContext.prepare.mockResolvedValueOnce({
+      cursorSequence: "1",
+      currentMessageEnvelope: "<current_telegram_message>test</current_telegram_message>",
+      durableMessage: "<previous_context_summary>\nнить\n</previous_context_summary>\n\n<current_telegram_message>test</current_telegram_message>",
+      handoffBlock: "<previous_context_summary>\nнить\n</previous_context_summary>",
+      omittedBeforeSequence: null,
+      timelineOmission: null,
+      visibleEntryIds: ["00000000-0000-4000-8000-000000000010"],
+      visibleTimelineEntries: [],
+    });
+    const handler = createTelegramMessageHandler(repository);
+
+    const carried = await handler(telegramContext().context, privateMessage("Продолжим"));
+    expect(carried?.auth?.attributes).toMatchObject({ sessionHandoffCarried: "true" });
+    // Nothing is marked at ingress: Eve sends the message after the handler returns.
+    const plain = await handler(telegramContext().context, privateMessage("И дальше"));
+    expect(plain?.auth?.attributes).not.toHaveProperty("sessionHandoffCarried");
+  });
+
   // Регистрация группы требует её точный chat id, а сообщения неподключённой группы молча
   // отбрасывались: владельцу неоткуда было его взять. Обращение к боту оставляет id в логе.
   it("logs the chat id when the bot is addressed in a group that is not registered", async () => {
