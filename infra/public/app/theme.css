@@ -73,6 +73,9 @@ body.has-ask { --ask-space: 76px; }
   filter: drop-shadow(0 10px 16px rgba(60, 36, 10, .18));
 }
 .hero-text { max-width: 70%; }
+/* A separate Шуша pose on the right: the greeting stops where the pose begins instead of running under it. */
+.hero:has(> .hero-shusha) .hero-text { max-width: calc(100% - min(46%, 200px) + 12px); }
+.hero-compact:has(> .hero-shusha) .hero-text { max-width: calc(100% - min(34%, 140px) + 12px); }
 /* «Сегодня»: the picture sets the mood, the tasks are the point; a smaller hero shows them on the first screen. */
 .hero-compact { min-height: 188px; padding-bottom: 12px; }
 .hero-compact .hero-scene { height: 236px; }
@@ -209,11 +212,13 @@ body.has-ask { --ask-space: 76px; }
 .home-move-icon.is-down { transform: rotate(-90deg); }
 
 /* ---- «Знакомство»: the first-steps ring on the «Сегодня» hero (quest.js) ---- */
+/* The pill sits in the text column under the sub (quest.js), so no greeting is ever covered, and its
+   own dark ink does not follow the hero's light text onto the white pill (review of 23 October 2026). */
 .quest-pill {
-  position: absolute; right: 12px; bottom: 8px; display: inline-flex; align-items: center; gap: 6px;
+  display: inline-flex; align-items: center; gap: 6px; margin-top: 10px;
   min-height: 32px; padding: 4px 10px 4px 6px; border: 0; border-radius: 999px;
-  background: rgba(255, 255, 255, .9); color: var(--hero-text); font-size: .8125rem; font-weight: 600;
-  box-shadow: 0 4px 14px rgba(40, 28, 14, .12);
+  background: rgba(255, 255, 255, .9); color: #2b2016; font-size: .8125rem; font-weight: 600;
+  box-shadow: 0 4px 14px rgba(40, 28, 14, .12); text-shadow: none;
 }
 .quest-ring {
   width: 20px; height: 20px; border-radius: 50%;
