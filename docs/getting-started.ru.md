@@ -59,7 +59,12 @@ openssl rand -hex 24   # POSTGRES_PASSWORD
 openssl rand -hex 24   # пароль для WORKFLOW_POSTGRES_URL
 openssl rand -hex 32   # INVITATION_SIGNING_SECRET
 openssl rand -hex 32   # TELEGRAM_WEBHOOK_SECRET_TOKEN
+openssl rand -hex 32   # AGENT_INTERNAL_TOKEN
 ```
+
+Два последних секрета должны быть разными и не короче 32 символов из `A-Z`, `a-z`, `0-9`, `_`, `-`
+(`openssl rand -hex 32` даёт 64): webhook-секрет знает Telegram, а внутренний токен охраняет только
+служебные маршруты между контейнерами. Агент не стартует с коротким, одинаковым или пустым значением.
 
 Откройте `.env` и заполните:
 
@@ -70,6 +75,7 @@ INVITATION_SIGNING_SECRET=<третий секрет>
 TELEGRAM_BOT_TOKEN=<токен от BotFather>
 TELEGRAM_BOT_USERNAME=<username без @>
 TELEGRAM_WEBHOOK_SECRET_TOKEN=<четвёртый секрет>
+AGENT_INTERNAL_TOKEN=<пятый секрет>
 MODEL_API_KEY=<ключ DeepSeek>
 GROQ_API_KEY=<ключ Groq или пусто, если голос выключен>
 
@@ -193,6 +199,13 @@ git pull
 docker compose up -d --build        # миграции базы применяются сами перед стартом агента
 ```
 
+Новая версия может потребовать переменную, которой в вашем `.env` ещё нет: Compose тогда
+откажется стартовать с сообщением вида `AGENT_INTERNAL_TOKEN is required`. Сравните `.env` с
+`.env.example`, добавьте недостающее (секреты — `openssl rand -hex 32`, как в шаге 3) и запустите
+снова. Установкам, обновляющимся с версии без `AGENT_INTERNAL_TOKEN`, нужен именно он: отдельный
+от `TELEGRAM_WEBHOOK_SECRET_TOKEN`; короткий webhook-секрет из старой установки тоже придётся
+заменить на новый и повторить `setWebhook` из шага 6.
+
 Копия базы перед обновлением:
 
 ```bash
@@ -209,6 +222,7 @@ docker compose exec -T postgres pg_dumpall -U osinara | gzip > backup-$(date +%F
 | `AGENT_MODEL_BALANCE_EXHAUSTED` или 402 | Пополните баланс DeepSeek |
 | Агент не стартует, `AGENT_GROQ_API_KEY_REQUIRED` | Задайте `GROQ_API_KEY` или выключите голос в конфиге |
 | Webhook отвечает 401 | `secret_token` в `setWebhook` не совпадает с `TELEGRAM_WEBHOOK_SECRET_TOKEN` |
+| `AGENT_INTERNAL_TOKEN is required`, `AGENT_INTERNAL_TOKEN_WEAK`, `AGENT_TELEGRAM_WEBHOOK_SECRET_WEAK` | В `.env` нет `AGENT_INTERNAL_TOKEN`, он совпадает с webhook-секретом, либо один из них короче 32 символов; см. шаг 3 |
 | В группе бот молчит | Отключён ли privacy mode у BotFather, подключена ли группа (шаг 9), зовут ли бота по имени |
 | Нет картинок | Заданы обе переменные OpenRouter и модель принимает `aspect_ratio` |
 | Место на диске кончается | `docker image prune` после обновлений; `docker system df` |

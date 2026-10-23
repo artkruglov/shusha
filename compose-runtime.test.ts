@@ -258,6 +258,9 @@ describe("Docker Compose runtime wiring", () => {
     expect(page).toContain("script-src 'self' https://telegram.org;");
     expect(page).toContain("frame-ancestors https://web.telegram.org\"");
     expect(page).not.toContain("unsafe-inline");
+    // The public webhook takes a few kilobytes of JSON: the server-wide 50m is not for an unauthenticated route.
+    const webhook = nginx.slice(nginx.indexOf("    location = /eve/v1/telegram {"), nginx.indexOf("    location = /eve/v1/google-oauth/callback {"));
+    expect(webhook).toContain("      client_max_body_size 1m;\n");
     const api = nginx.slice(nginx.indexOf("    location /app-api/ {"), nginx.indexOf("    location / {\n      return 404;"));
     expect(api).toContain("      limit_except GET POST { deny all; }\n");
     expect(api).toContain("      client_max_body_size 4k;\n");

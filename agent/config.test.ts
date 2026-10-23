@@ -2,7 +2,9 @@
  * Runtime environment validation tests.
  *
  * Constructs covered:
- * - `requireRuntimeEnvironment`: requires the agent-model credential and permits optional voice.
+ * - `requireRuntimeEnvironment`: requires the agent-model credential and permits optional voice;
+ *   the webhook secret and the internal token are as strong as the invitation signing secret, and
+ *   the internal token differs from the webhook secret Telegram holds.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -49,17 +51,23 @@ describe("requireRuntimeEnvironment", () => {
     ["outside the Telegram alphabet", `${"s".repeat(40)}!`],
     ["longer than Telegram accepts", "s".repeat(257)],
   ])("rejects a webhook secret %s", (_label, secret) => {
-    // One secret guards the webhook, the drain route and the approval sweep, so it has to be as
-    // strong as the invitation signing secret (security review, 5 October 2026).
+    // As strong as the invitation signing secret (security review, 5 October 2026).
     stubRequiredEnvironment();
     vi.stubEnv("TELEGRAM_WEBHOOK_SECRET_TOKEN", secret);
 
     expect(() => requireRuntimeEnvironment()).toThrowError(/TELEGRAM_WEBHOOK_SECRET_TOKEN/);
   });
 
-  it("rejects an internal token equal to the webhook secret Telegram holds", () => {
+  it.each([
+    ["missing", ""],
+    ["shorter than 32 characters", "s".repeat(31)],
+    ["outside the Telegram alphabet", `${"s".repeat(40)}!`],
+    ["equal to the webhook secret", "telegram-webhook-test-secret-0123456789"],
+  ])("rejects an internal token %s", (_label, token) => {
+    // Telegram holds the webhook secret; it must not also open the drain route, the approval
+    // sweep and the workflow flow route.
     stubRequiredEnvironment();
-    vi.stubEnv("AGENT_INTERNAL_TOKEN", "telegram-webhook-test-secret-0123456789");
+    vi.stubEnv("AGENT_INTERNAL_TOKEN", token);
 
     expect(() => requireRuntimeEnvironment()).toThrowError(/AGENT_INTERNAL_TOKEN/);
   });
