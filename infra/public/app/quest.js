@@ -54,6 +54,7 @@
     const pill = button("quest-pill", "", () => sheet(quest, pill));
     pill.setAttribute("aria-label", "Знакомство: " + quest.done + " из " + quest.total);
     pill.append(ring(quest.done, quest.total), el("span", "quest-pill-text", "Знакомство " + quest.done + "/" + quest.total), FA.icon("chevron-right", "quest-pill-chevron"));
-    hero.append(pill);
+    // Under the greeting, in the text column: a corner pill covered a two-line sub on narrow phones.
+    (hero.querySelector(".hero-text") || hero).append(pill);
   };
 })();
