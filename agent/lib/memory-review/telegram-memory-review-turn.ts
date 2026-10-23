@@ -104,6 +104,7 @@ export async function prepareTelegramMemoryReviewTurn(input: {
                     input.preparedContext.timelineTimezone ?? null,
                   ),
               input.preparedContext.currentMessageEnvelope,
+              input.preparedContext.handoffBlock ?? null,
             ),
           ].join("\n\n"),
           memoryReviewBatchId: reviewBatch.batchId,

@@ -9,7 +9,7 @@
 import { describe, expect, it } from "vitest";
 
 import { modelProviderConfig } from "./model-provider-config.js";
-import { primaryModel, visionModel, visionTransport, voiceTranscriptionModel } from "./model-registry.js";
+import { primaryModel, sessionHandoffModel, visionModel, visionTransport, voiceTranscriptionModel, withReasoningEffort } from "./model-registry.js";
 
 describe("model registry", () => {
   it("selects the configured protocol-native text model", () => {
@@ -50,5 +50,30 @@ describe("model registry", () => {
       reasoning: { effort: "low" as const, format: "reasoning-effort" as const, type: "effort" as const },
     };
     expect(visionTransport(chat as never, vision)).toBe(chat);
+  });
+
+  it("turns reasoning off for the session handoff on every transport that has a switch", () => {
+    // The deployed config: Anthropic Messages with adaptive thinking (config/agent-model-providers.json).
+    const anthropic = {
+      authentication: "api-key" as const,
+      baseUrl: "https://api.deepseek.com/anthropic",
+      protocol: "anthropic-messages" as const,
+      reasoning: { mode: "adaptive" as const, type: "enabled" as const },
+    };
+    expect(withReasoningEffort(anthropic, "none")).toEqual({ ...anthropic, reasoning: { type: "none" } });
+    expect(withReasoningEffort(anthropic, "low")).toBe(anthropic);
+    expect(withReasoningEffort({ ...anthropic, reasoning: null }, "none")).toEqual({ ...anthropic, reasoning: { type: "none" } });
+    const responses = { baseUrl: "https://api.deepseek.com", protocol: "deepseek-responses" as const, reasoning: { effort: "max" as const } };
+    expect(withReasoningEffort(responses, "none")).toEqual({ ...responses, reasoning: { effort: "none" } });
+    const chat = {
+      baseUrl: "https://api.deepseek.com/v1",
+      protocol: "openai-chat-completions" as const,
+      providerName: "deepseek" as const,
+      reasoning: { effort: "high" as const, format: "deepseek" as const, type: "effort" as const },
+    };
+    expect(withReasoningEffort(chat, "none")).toEqual({ ...chat, reasoning: { format: "deepseek", type: "none" } });
+    expect(withReasoningEffort(chat, "low")).toEqual({ ...chat, reasoning: { effort: "low", format: "deepseek", type: "effort" } });
+    expect(withReasoningEffort({ ...chat, reasoning: null }, "none")).toEqual({ ...chat, reasoning: null });
+    expect(sessionHandoffModel.modelId).toBe(modelProviderConfig.agent.models.primary.id);
   });
 });

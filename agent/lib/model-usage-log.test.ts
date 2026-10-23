@@ -11,6 +11,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createConfiguredLanguageModel } from "./model-transport.js";
 import {
+  createStepClock,
+  formatCompactionLog,
   formatStepUsageLog,
   normalizeProviderUsage,
   observeModelUsage,
@@ -394,5 +396,59 @@ describe("formatStepUsageLog", () => {
       stepIndex: 3,
       turnId: "turn_1",
     });
+  });
+
+  it("adds the measured duration of the step when the hook has one", () => {
+    const event = {
+      data: { finishReason: "stop", stepIndex: 0, turnId: "turn_1", usage: { inputTokens: 120_000 } },
+      type: "step.completed" as const,
+    };
+    const session = { channelKind: "telegram", sessionId: "session_1" };
+    expect(JSON.parse(formatStepUsageLog(event, session, 4_321))).toMatchObject({ durationMs: 4321, inputTokens: 120_000 });
+    expect(JSON.parse(formatStepUsageLog(event, session, null))).not.toHaveProperty("durationMs");
+  });
+});
+
+describe("createStepClock", () => {
+  it("measures a step from its start marker and forgets the marker", () => {
+    const now = vi.fn().mockReturnValueOnce(1_000).mockReturnValueOnce(1_250.6);
+    const clock = createStepClock(now);
+    clock.start("wrun_1/turn_1/0");
+    expect(clock.finish("wrun_1/turn_1/0")).toBe(251);
+    expect(clock.finish("wrun_1/turn_1/0")).toBeNull();
+    expect(clock.finish("never-started")).toBeNull();
+  });
+
+  it("drops the oldest marker once the bound is reached, so a lost completion cannot grow the map", () => {
+    let tick = 0;
+    const clock = createStepClock(() => tick++, 2);
+    clock.start("a");
+    clock.start("b");
+    clock.start("c");
+    expect(clock.finish("a")).toBeNull();
+    expect(clock.finish("b")).not.toBeNull();
+    expect(clock.finish("c")).not.toBeNull();
+  });
+});
+
+describe("formatCompactionLog", () => {
+  it("logs a requested compaction with the prompt size that triggered it", () => {
+    expect(JSON.parse(formatCompactionLog({
+      data: { modelId: "deepseek-flash", sessionId: "wrun_1", turnId: "turn_3", usageInputTokens: 121_000 },
+      type: "compaction.requested",
+    }))).toEqual({
+      code: "AGENT_COMPACTION_REQUESTED",
+      modelId: "deepseek-flash",
+      sessionId: "wrun_1",
+      turnId: "turn_3",
+      usageInputTokens: 121_000,
+    });
+  });
+
+  it("adds how long the compaction took when the hook measured it", () => {
+    expect(JSON.parse(formatCompactionLog({
+      data: { modelId: "deepseek-flash", sessionId: "wrun_1", turnId: "turn_3" },
+      type: "compaction.completed",
+    }, 9_870))).toEqual({ code: "AGENT_COMPACTION_COMPLETED", durationMs: 9870, modelId: "deepseek-flash", sessionId: "wrun_1", turnId: "turn_3" });
   });
 });

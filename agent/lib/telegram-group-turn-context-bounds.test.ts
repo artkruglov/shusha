@@ -29,6 +29,7 @@ function entry(sequenceId: string): TelegramGroupJournalEntry {
 
 function preparer(entries: TelegramGroupJournalEntry[]) {
   return createTelegramGroupTurnContextPreparer({
+    handoff: { read: vi.fn().mockResolvedValue(null) },
     journal: {
       listIncremental: vi.fn(),
       listRecent: vi.fn().mockResolvedValue(entries),

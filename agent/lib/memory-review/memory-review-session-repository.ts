@@ -47,6 +47,7 @@ export const memoryReviewSessionRepository = {
     return {
       continuationToken,
       generation: 0,
+      handoff: null,
       id: row.id,
       rotated: false,
       sandboxSessionId: row.thread_id,

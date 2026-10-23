@@ -12,6 +12,7 @@ import type { ApplicationConversation } from "./conversation-repository.js";
 import type { ConversationAccess, RegisteredGroup } from "./family-access.js";
 import type { PreparedTelegramGroupTurnContext } from "./telegram-group-turn-context.js";
 import type { TelegramGroupAttachmentSummary } from "./telegram-group-journal-context.js";
+import { SESSION_HANDOFF_CARRIED_ATTRIBUTE, SESSION_HANDOFF_CARRIED_VALUE } from "./sessions/session-handoff-shown.js";
 import type { PreparedSession } from "./sessions/session-repository.js";
 import type { TelegramInboundActor } from "./telegram-inbound-actor.js";
 import type { TelegramGroupTurnTrigger } from "./telegram-message-policy.js";
@@ -122,6 +123,8 @@ export function buildTelegramTurnResult(input: {
         telegramTimelineEntryId: input.timelineEntryId,
         telegramTimelineSequence: input.turnContext.cursorSequence,
         telegramTimelineVisibleEntryIds: input.turnContext.visibleEntryIds,
+        // The hook on `turn.started` marks the handoff shown for this turn only (`hooks/session-handoff.ts`).
+        ...(input.turnContext.handoffBlock ? { [SESSION_HANDOFF_CARRIED_ATTRIBUTE]: SESSION_HANDOFF_CARRIED_VALUE } : {}),
         ...(input.turnContext.memoryReviewBatchId === undefined
           ? {}
           : { memoryReviewBatchId: input.turnContext.memoryReviewBatchId }),

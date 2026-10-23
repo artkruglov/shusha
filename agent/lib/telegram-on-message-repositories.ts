@@ -34,6 +34,7 @@ import { familylessGroupRepository } from "./familyless-group-repository.js";
 import { runFamilylessGroupCommand } from "./telegram-familyless-group-command.js";
 import { profileProjectionPolicyRepository } from "./profile-projection-policy-repository.js";
 import { proactiveDeliveryRepository } from "./proactive-deliveries/proactive-delivery-repository.js";
+import { prepareSessionHandoff, type SessionHandoffPreparer } from "./sessions/session-handoff.js";
 import { sessionRepository } from "./sessions/session-repository.js";
 import {
   telegramGroupJournalRepository,
@@ -115,6 +116,8 @@ export interface TelegramMessageRepositories {
   /** Проекты области как справка в контексте хода; во внешней группе блока нет. */
   taskProjects: { contextBlock: typeof buildTaskProjectsContext };
   session: Pick<typeof sessionRepository, "hasRoute" | "prepareTurn">;
+  /** Summarizes the session the turn limit retired for the one that replaces it. */
+  sessionHandoff: { prepare: SessionHandoffPreparer };
   spaces: {
     resolveTelegramChatMode: typeof resolveTelegramChatMode;
     resolveTurnSpace: typeof resolveTurnSpace;
@@ -150,6 +153,7 @@ export const productionTelegramMessageRepositories = {
   proactiveDeliveries: proactiveDeliveryRepository,
   taskProjects: { contextBlock: buildTaskProjectsContext },
   session: sessionRepository,
+  sessionHandoff: { prepare: (input) => prepareSessionHandoff(input) },
   spaces: { resolveTelegramChatMode, resolveTurnSpace },
   turnInterjections: turnInterjectionRepository,
   telegram: telegramRepository,

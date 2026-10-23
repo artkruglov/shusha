@@ -577,6 +577,24 @@ export function createTelegramMessageHandler(repositories: TelegramMessageReposi
         error: error instanceof Error ? error.message : String(error),
       }));
     }
+    // The thread of the session the turn limit just retired: summarized now, shown once by the
+    // context preparer below. One turn per fifty waits for it; a miss is a cold start, as before.
+    if (appSession.handoff && inboundTimeline) {
+      await repositories.sessionHandoff.prepare({
+        applicationSessionId: appSession.id,
+        beforeSequence: inboundTimeline.sequenceId,
+        conversationId: group ? null : conversation.id,
+        groupId: group?.groupId ?? null,
+        messageThreadId: forumTopicId,
+        retiredSessionStartedAt: appSession.handoff.retiredSessionStartedAt,
+        timezone,
+        // The same owner the turn's model steps bill (`agent.ts`): the family, else the chat of a familyless group.
+        usage: {
+          chatId: familylessGroup ? message.chat.id : null,
+          familyId: isDatabaseFamilyId(access.familyId) ? access.familyId : null,
+        },
+      });
+    }
     const preparedGroupTurnContext = inboundTimeline
       ? await repositories.groupContext.prepare({
           applicationSessionId: appSession.id,

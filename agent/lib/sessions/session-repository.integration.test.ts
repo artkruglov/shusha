@@ -166,9 +166,38 @@ describeWithDatabase("session repository", () => {
     });
     expect(rotated).toMatchObject({ continuationToken: "102:::osinara:1", generation: 1, rotated: true });
     expect(rotated.sandboxSessionId).toBe(current.sandboxSessionId);
+    // A requested clean context carries nothing over.
+    expect(rotated.handoff).toBeNull();
     await expect(sessionRepository.isCurrentEveSession(current.id, "wrun_old")).resolves.toBe(false);
     await sessionRepository.bindEveSession(rotated.id, "wrun_new");
     await expect(sessionRepository.isCurrentEveSession(rotated.id, "wrun_new")).resolves.toBe(true);
+  });
+
+  it("names the retired session's start when the turn limit rotates a canonical session", async () => {
+    const f = await fixture();
+    const startedAt = new Date("2026-07-12T12:00:00.000Z");
+    const current = await sessionRepository.prepareTurn({
+      baseContinuationToken: "105::", familyId: f.familyId, groupId: null, kind: "canonical",
+      now: startedAt, scope: "personal", telegramForumTopicId: null, userId: f.userId,
+    });
+    expect(current.handoff).toBeNull();
+    await database().query("UPDATE conversation_sessions SET completed_turns = 50 WHERE id = $1", [current.id]);
+
+    const rotated = await sessionRepository.prepareTurn({
+      baseContinuationToken: "105::", familyId: f.familyId, groupId: null, kind: "canonical",
+      now: new Date("2026-07-12T13:00:00.000Z"), scope: "personal", telegramForumTopicId: null, userId: f.userId,
+    });
+    expect(rotated.rotated).toBe(true);
+    expect(rotated.handoff).toEqual({ retiredSessionStartedAt: startedAt });
+
+    // Twelve quiet hours rotate a private chat too, but a stale conversation is not worth a summary.
+    await database().query("UPDATE conversation_sessions SET completed_turns = 50 WHERE id = $1", [rotated.id]);
+    const stale = await sessionRepository.prepareTurn({
+      baseContinuationToken: "105::", familyId: f.familyId, groupId: null, kind: "canonical",
+      now: new Date("2026-07-13T13:00:00.000Z"), scope: "personal", telegramForumTopicId: null, userId: f.userId,
+    });
+    expect(stale.rotated).toBe(true);
+    expect(stale.handoff).toBeNull();
   });
 
   it("moves every delivered Telegram alias to the new generation during rotation", async () => {

@@ -166,6 +166,24 @@ describe("prepareTelegramMemoryReviewTurn", () => {
     );
   });
 
+  it("keeps the handoff of a retired session in front of the recomposed timeline", async () => {
+    const repository = repositories([reviewEntry(1)]);
+    const handoffBlock = "<previous_context_summary>\nО чём шёл разговор\n- вода\n</previous_context_summary>";
+
+    const result = await prepareTelegramMemoryReviewTurn({
+      applicationSessionId: "session-1",
+      conversationId: "conversation-1",
+      currentEntryId: id(5),
+      groupId: "group-1",
+      preparedContext: { ...preparedContext([2, 4], 5), handoffBlock },
+      repositories: { memoryReview: repository, syncParticipants: repository.syncParticipants },
+    });
+
+    expect(result.durableMessage.split("<previous_context_summary>")).toHaveLength(2);
+    expect(result.durableMessage.indexOf("</previous_context_summary>"))
+      .toBeLessThan(result.durableMessage.indexOf("<untrusted_telegram_group_timeline>"));
+  });
+
   it("fails interactive preparation when duplicate source metadata has conflicting sequences", async () => {
     const conflictingReviewEntry = {
       ...reviewEntry(3),
