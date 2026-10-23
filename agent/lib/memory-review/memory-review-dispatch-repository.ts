@@ -16,6 +16,8 @@ import {
   MEMORY_REVIEW_IDLE_MIN_BATCH_SOURCES,
   MEMORY_REVIEW_IDLE_MIN_SOURCES,
   MEMORY_REVIEW_LONG_IDLE_MILLISECONDS,
+  MEMORY_REVIEW_MATERIALIZE_LANE_LIMIT,
+  MEMORY_REVIEW_MAX_IN_FLIGHT,
   MEMORY_REVIEW_PRECEDING_CONTEXT_LIMIT,
 } from "./memory-review-config.js";
 import {
@@ -125,7 +127,7 @@ async function laneHasBatchAtCursor(client: PoolClient, lane: LaneRow): Promise<
 // Load run, 3 October 2026: locking every lane and querying each twice per minute made a turn wait
 // 30-100 s for its own lane at 20 000 chats, and replicas queued behind each other. The caller still
 // re-checks every locked lane with the exact batch rules; this only skips lanes that cannot qualify.
-async function lockedDueLanes(client: PoolClient, now: Date, groupOnly: boolean): Promise<LaneRow[]> {
+async function lockedDueLanes(client: PoolClient, now: Date, groupOnly: boolean, laneLimit: number): Promise<LaneRow[]> {
   const result = await client.query<LaneRow>(
     `WITH due AS (
        SELECT lane.id
@@ -156,11 +158,11 @@ async function lockedDueLanes(client: PoolClient, now: Date, groupOnly: boolean)
             lane.processed_through_sequence::text
        FROM memory_review_lanes AS lane
       WHERE lane.id IN (SELECT id FROM due)
-      ORDER BY lane.created_at, lane.id FOR UPDATE OF lane SKIP LOCKED`,
+      ORDER BY lane.created_at, lane.id FOR UPDATE OF lane SKIP LOCKED LIMIT $8`,
     [groupOnly, MEMORY_REVIEW_BATCH_SIZE,
       groupOnly ? MEMORY_REVIEW_BATCH_SIZE : MEMORY_REVIEW_IDLE_MIN_SOURCES,
       MEMORY_REVIEW_IDLE_MIN_BATCH_SOURCES, MEMORY_REVIEW_IDLE_MILLISECONDS, now,
-      MEMORY_REVIEW_LONG_IDLE_MILLISECONDS],
+      MEMORY_REVIEW_LONG_IDLE_MILLISECONDS, laneLimit],
   );
   return result.rows;
 }
@@ -214,9 +216,9 @@ async function precedingContext(client: PoolClient, input: {
   return result.rows.reverse().map(project);
 }
 
-async function materializeReadyBatches(client: PoolClient, now: Date): Promise<void> {
+async function materializeReadyBatches(client: PoolClient, now: Date, laneLimit: number): Promise<void> {
   // This is the crash-recovery path for a committed 50th message whose inline observer did not run.
-  for (const lane of await lockedDueLanes(client, now, true)) {
+  for (const lane of await lockedDueLanes(client, now, true, laneLimit)) {
     if (await laneHasBatchAtCursor(client, lane)) continue;
     const sources = await pendingSources(client, lane);
     if (sources.length < MEMORY_REVIEW_BATCH_SIZE) continue;
@@ -224,7 +226,7 @@ async function materializeReadyBatches(client: PoolClient, now: Date): Promise<v
   }
 }
 
-async function materializeIdleBatches(client: PoolClient, now: Date): Promise<void> {
+async function materializeIdleBatches(client: PoolClient, now: Date, laneLimit: number): Promise<void> {
   // Personal conversations never had lanes; create them from sequence 0 so history is reviewed once.
   await client.query(
     `INSERT INTO memory_review_lanes (conversation_id, message_thread_id, processed_through_sequence)
@@ -237,7 +239,7 @@ async function materializeIdleBatches(client: PoolClient, now: Date): Promise<vo
         )
      ON CONFLICT (conversation_id, message_thread_id) DO NOTHING`,
   );
-  for (const lane of await lockedDueLanes(client, now, false)) {
+  for (const lane of await lockedDueLanes(client, now, false, laneLimit)) {
     if (await laneHasBatchAtCursor(client, lane)) continue;
     const sources = await pendingSources(client, lane);
     const newest = sources.at(-1);
@@ -258,14 +260,20 @@ export const memoryReviewDispatchRepository = {
   async claimPending(input: {
     leaseMilliseconds: number;
     limit: number;
+    /** Lanes materialized this pass; the rest qualify again next time. */
+    materializeLaneLimit?: number;
+    /** Background reviews allowed to run at once; a claim takes only what is left under it. */
+    maxInFlight?: number;
     now: Date;
   }): Promise<MemoryReviewClaim[]> {
+    const laneLimit = input.materializeLaneLimit ?? MEMORY_REVIEW_MATERIALIZE_LANE_LIMIT;
+    const maxInFlight = input.maxInFlight ?? MEMORY_REVIEW_MAX_IN_FLIGHT;
     const client = await database().connect();
     try {
       await client.query("BEGIN");
       await terminalizeStaleMemoryReviewBatches(client, input.now);
-      await materializeReadyBatches(client, input.now);
-      await materializeIdleBatches(client, input.now);
+      await materializeReadyBatches(client, input.now, laneLimit);
+      await materializeIdleBatches(client, input.now, laneLimit);
       const claimed = await client.query<{
         conversation_chat_id: string; conversation_id: string; family_id: string;
         scope_partition_key: string;
@@ -283,7 +291,10 @@ export const memoryReviewDispatchRepository = {
             WHERE batch.batch_kind = 'background' AND (batch.status = 'pending' OR
               (batch.status = 'leased' AND batch.lease_expires_at <= $1))
               AND batch.predecessor_sequence = candidate_lane.processed_through_sequence
-            ORDER BY batch.created_at, batch.id FOR UPDATE OF batch SKIP LOCKED LIMIT $2
+            ORDER BY batch.created_at, batch.id FOR UPDATE OF batch SKIP LOCKED
+            LIMIT LEAST($2::int, GREATEST(0, $4::int - (
+              SELECT count(*)::int FROM memory_review_batches AS running
+               WHERE running.batch_kind = 'background' AND running.status = 'running')))
          ), sponsors AS (
            -- A personal conversation is reviewed as its owner; a group as the family owner.
            SELECT conversation.id AS conversation_id, membership.user_id, membership.role
@@ -319,7 +330,7 @@ export const memoryReviewDispatchRepository = {
                    sponsors.role::text AS sponsor_role,
                    sponsor.id AS sponsor_user_id,
                    sponsor.telegram_user_id AS sponsor_telegram_user_id`,
-        [input.now, input.limit, input.leaseMilliseconds],
+        [input.now, input.limit, input.leaseMilliseconds, maxInFlight],
       );
       const claims: MemoryReviewClaim[] = [];
       for (const row of claimed.rows) {

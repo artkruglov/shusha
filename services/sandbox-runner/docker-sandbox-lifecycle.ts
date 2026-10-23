@@ -3,7 +3,7 @@
  *
  * Exports:
  * - `SANDBOX_IDLE_SWEEP_INTERVAL_MS`: cadence for bounded idle reconciliation.
- * - `SANDBOX_IDLE_TIMEOUT_MS`: inactivity window before compute is stopped.
+ * - `SANDBOX_IDLE_TIMEOUT_MS`: inactivity window before compute is stopped, `SANDBOX_IDLE_TIMEOUT_MS` in the environment.
  * - `createSandboxActivityRegistry`: tracks active work and serializes session creation.
  * - `sandboxContainerName`: deterministic physical name for a stable conversation thread.
  * - `sandboxContainerNeedsReplacement`: detects stale owner or policy identity.
@@ -13,11 +13,19 @@
  */
 import { createHash } from "node:crypto";
 
+import { integerSetting } from "../../agent/lib/runtime-tuning.js";
 import type { SandboxRunnerCreateRequest } from "../../agent/lib/sandbox-runner/sandbox-runner-contract.js";
 import { SANDBOX_CONTAINER_POLICY_VERSION } from "./docker-sandbox-options.js";
 
 export const SANDBOX_IDLE_SWEEP_INTERVAL_MS = 60 * 1_000;
-export const SANDBOX_IDLE_TIMEOUT_MS = 30 * 60 * 1_000;
+// An idle container costs under a megabyte of resident memory but its file cache and a cold
+// start of about three seconds on the next command, so the window is tunable: one family keeps
+// its container warm for hours, many families on one machine want minutes so that only the chats
+// of the last few minutes hold a container (port of ilkruglov 5e7604c2).
+export const SANDBOX_IDLE_TIMEOUT_MS = integerSetting(
+  "SANDBOX_IDLE_TIMEOUT_MS",
+  { absent: 30 * 60 * 1_000, min: 60 * 1_000, max: 24 * 60 * 60 * 1_000 },
+);
 
 const CONTAINER_PREFIX = "osinara-sandbox-";
 

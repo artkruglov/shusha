@@ -6,6 +6,7 @@
  * - Failed pre-handoff work schedules repository-owned bounded recovery.
  * - A possibly-started handoff becomes ambiguous and is never retried automatically.
  * - One broken claim cannot block the remaining already-claimed reviews.
+ * - Claimed batches are handed off concurrently, each failure on its own.
  */
 import { describe, expect, it, vi } from "vitest";
 
@@ -139,6 +140,41 @@ describe("memory review dispatcher", () => {
     expect(auth.attributes).not.toHaveProperty("groupId");
     expect(auth.attributes).not.toHaveProperty("groupType");
     expect(auth.attributes).not.toHaveProperty("toolAllowlist");
+  });
+
+  it("dispatches the claimed batches concurrently, each failure on its own", async () => {
+    const batches = [1, 2, 3].map((n) => ({ ...batch, batchId: `batch-${n}` }));
+    let started = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const fixture = dependencies({
+      claimPending: vi.fn().mockResolvedValue(batches),
+      prepareSession: vi.fn(async (claimed: { batchId: string }) => {
+        started += 1;
+        if (claimed.batchId === "batch-2") throw new Error("preparation failed");
+        await gate;
+        return {
+          continuationToken: `memory-review:${claimed.batchId}`,
+          generation: 0,
+          id: `session-${claimed.batchId}`,
+          rotated: false,
+          sandboxSessionId: "00000000-0000-4000-8000-000000000070",
+        };
+      }),
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const run = createMemoryReviewDispatcher(fixture.dependencies as never)(
+      new Date("2026-09-03T10:00:00.000Z"),
+    );
+    // All three preparations start before the first one finishes: the handoffs are not serial.
+    await vi.waitFor(() => expect(started).toBe(3));
+    release();
+
+    await expect(run).resolves.toBe(3);
+    expect(fixture.dependencies.failClaim).toHaveBeenCalledTimes(1);
+    expect(fixture.dependencies.markRunning).toHaveBeenCalledTimes(2);
+    consoleError.mockRestore();
   });
 
   it("marks a rejected handoff ambiguous because Eve may already have started", async () => {

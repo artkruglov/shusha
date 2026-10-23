@@ -15,7 +15,13 @@ import type {
 } from "eve/channels/telegram";
 import { parseTelegramUpdate } from "eve/channels/telegram";
 
-import { TELEGRAM_INGRESS_LEASE_MS, TELEGRAM_PRIVATE_BURST_MAX_WAIT_MS, TELEGRAM_PRIVATE_BURST_QUIET_MS } from "../config.js";
+import {
+  TELEGRAM_INGRESS_LEASE_MS,
+  TELEGRAM_INGRESS_MAX_CONCURRENT_CALLBACK_DRAINS,
+  TELEGRAM_INGRESS_MAX_CONCURRENT_DRAINS,
+  TELEGRAM_PRIVATE_BURST_MAX_WAIT_MS,
+  TELEGRAM_PRIVATE_BURST_QUIET_MS,
+} from "../config.js";
 import { AppError } from "./app-error.js";
 import { transcribeTelegramVoice } from "./groq-voice-transcription.js";
 import type { TelegramIngressClaim, TelegramIngressRepository, TelegramPrivateBurstPolicy } from "./telegram-ingress-contract.js";
@@ -648,6 +654,8 @@ export const handleTelegramDurableIngress = createTelegramDurableIngress({
   taskButtonTurn: staleTaskTurn,
   handleSoftwareUpdateCallback,
   leaseMilliseconds: TELEGRAM_INGRESS_LEASE_MS,
+  maxConcurrentCallbackDrains: TELEGRAM_INGRESS_MAX_CONCURRENT_CALLBACK_DRAINS,
+  maxConcurrentDrains: TELEGRAM_INGRESS_MAX_CONCURRENT_DRAINS,
   notifyFailure: sendTelegramFailureNotice,
   repository: telegramIngressRepository,
   async requestSessionRotation(eveSessionId) {

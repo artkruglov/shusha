@@ -124,6 +124,13 @@ services:
       WORKFLOW_POSTGRES_URL: ${WORKFLOW_POSTGRES_URL:?WORKFLOW_POSTGRES_URL is required}
       WORKFLOW_POSTGRES_WORKER_CONCURRENCY: "10"
       WORKFLOW_QUEUE_NAMESPACE: eve6f73696e6172612d66616d696c792d6167656e74
+      # Installation-size settings; blank means the single-family default (see .env.example).
+      TELEGRAM_INGRESS_MAX_CONCURRENT_DRAINS: ${TELEGRAM_INGRESS_MAX_CONCURRENT_DRAINS-}
+      TELEGRAM_INGRESS_MAX_CONCURRENT_CALLBACK_DRAINS: ${TELEGRAM_INGRESS_MAX_CONCURRENT_CALLBACK_DRAINS-}
+      MEMORY_REVIEW_MAX_IN_FLIGHT: ${MEMORY_REVIEW_MAX_IN_FLIGHT-}
+      MEMORY_REVIEW_MATERIALIZE_LANE_LIMIT: ${MEMORY_REVIEW_MATERIALIZE_LANE_LIMIT-}
+      TELEGRAM_PRIVATE_BURST_QUIET_MS: ${TELEGRAM_PRIVATE_BURST_QUIET_MS-}
+      TELEGRAM_PRIVATE_BURST_MAX_WAIT_MS: ${TELEGRAM_PRIVATE_BURST_MAX_WAIT_MS-}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/eve/v1/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 5s
@@ -234,6 +241,8 @@ services:
         condition: service_completed_successfully
     environment:
       SANDBOX_RUNTIME_IMAGE: ${SANDBOX_RUNTIME_IMAGE:?SANDBOX_RUNTIME_IMAGE must be an exact digest reference}
+      SANDBOX_MAX_RUNNING: ${SANDBOX_MAX_RUNNING-}
+      SANDBOX_IDLE_TIMEOUT_MS: ${SANDBOX_IDLE_TIMEOUT_MS-}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 5s

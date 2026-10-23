@@ -7,9 +7,12 @@
  * - Telegram group journal and proactive delivery model-context limits.
  * - Cross-process advisory-lock namespaces for sensitive workspace state.
  * - Bounded credentialed Google Workspace command execution.
+ * - Installation-size settings (drains, private-burst windows) read from the environment.
  * - `requireRuntimeEnvironment`: reads required environment-specific values.
  */
 import { z } from "zod";
+import { AppError } from "./lib/app-error.js";
+import { integerSetting } from "./lib/runtime-tuning.js";
 import { readTelegramAgentIdentity } from "./lib/telegram-agent-identity.js";
 import { telegramBotUsernames } from "./lib/telegram-bot-usernames.js";
 
@@ -90,11 +93,39 @@ export const TELEGRAM_ATTACHMENT_REFERENCE_LIST_DEFAULT_LIMIT = 50;
 export const TELEGRAM_ATTACHMENT_REFERENCE_LIST_MAX_LIMIT = 50;
 export const TELEGRAM_GROUP_TRUST_LOCK_HASH_SEED = 1;
 export const TELEGRAM_INGRESS_LEASE_MS = 15 * 60 * 1_000;
+// Each drain holds its chat until the turn reaches a session boundary, so this is the number of
+// turns the whole bot runs at once; callback drains answer buttons beside them. One family on one
+// core keeps the defaults, many families on a bigger machine raise them (port of ilkruglov
+// 5e7604c2); Workflow steps are bounded separately by WORKFLOW_POSTGRES_WORKER_CONCURRENCY.
+export const TELEGRAM_INGRESS_MAX_CONCURRENT_DRAINS = integerSetting(
+  "TELEGRAM_INGRESS_MAX_CONCURRENT_DRAINS",
+  { absent: 3, min: 1, max: 100 },
+);
+export const TELEGRAM_INGRESS_MAX_CONCURRENT_CALLBACK_DRAINS = integerSetting(
+  "TELEGRAM_INGRESS_MAX_CONCURRENT_CALLBACK_DRAINS",
+  { absent: 2, min: 1, max: 100 },
+);
 // A person often sends several messages in a row (26 September 2026: five private messages in a
 // minute gave five turns). A private chat's head is claimed only after the chat has been quiet this
-// long, so the series behind it is complete; a steady stream waits at most the cap.
-export const TELEGRAM_PRIVATE_BURST_QUIET_MS = 2_000;
-export const TELEGRAM_PRIVATE_BURST_MAX_WAIT_MS = 20_000;
+// long, so the series behind it is complete; a steady stream waits at most the cap. Both are
+// tunable: the quiet window is paid on every private message, so an installation that values
+// the answer's speed over series completeness can shorten it.
+export const TELEGRAM_PRIVATE_BURST_QUIET_MS = integerSetting(
+  "TELEGRAM_PRIVATE_BURST_QUIET_MS",
+  { absent: 2_000, min: 0, max: 60_000 },
+);
+export const TELEGRAM_PRIVATE_BURST_MAX_WAIT_MS = integerSetting(
+  "TELEGRAM_PRIVATE_BURST_MAX_WAIT_MS",
+  { absent: 20_000, min: 0, max: 300_000 },
+);
+// The ingress claim repository rejects a cap below the quiet window on every claim, which would
+// stop every chat after a start that passed; the pair is refused here instead.
+if (TELEGRAM_PRIVATE_BURST_MAX_WAIT_MS < TELEGRAM_PRIVATE_BURST_QUIET_MS) {
+  throw new AppError(
+    "AGENT_RUNTIME_TUNING_INVALID",
+    "TELEGRAM_PRIVATE_BURST_MAX_WAIT_MS не может быть меньше TELEGRAM_PRIVATE_BURST_QUIET_MS",
+  );
+}
 export const TELEGRAM_MAX_INBOUND_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const TELEGRAM_MAX_ATTACHMENTS_PER_MESSAGE = 1;
 export const TELEGRAM_MAX_OUTBOUND_DOCUMENT_BYTES = 50 * 1024 * 1024;

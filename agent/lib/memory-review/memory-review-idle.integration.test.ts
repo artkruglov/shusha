@@ -7,6 +7,7 @@
  *   least five sources, and a long-idle lane (six hours) flushes whatever it holds.
  * - The review prompt carries already processed messages before the batch as read-only context.
  * - Personal conversations get a lazily created lane and a claimable private review batch.
+ * - A claim takes only what the in-flight cap leaves; a pass materializes a bounded number of lanes.
  */
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -40,6 +41,24 @@ async function insertUserMessage(input: {
     [input.conversationId, input.groupId, input.sequence,
       `Сообщение памяти ${input.sequence}`, input.sentAt],
   )).rows[0]!;
+}
+
+// Another family group of the fixture's family with its own lane, so several lanes are due at once.
+async function familyGroupLane(familyId: string, chatId: string) {
+  const group = await database().query<{ id: string }>(
+    `INSERT INTO telegram_groups (family_id, telegram_chat_id, title, type, message_mode)
+     VALUES ($1, $2, 'Семья', 'family_private', 'addressed_only') RETURNING id`,
+    [familyId, chatId],
+  );
+  const conversation = await database().query<{ id: string }>(
+    "SELECT id FROM application_conversations WHERE telegram_group_id = $1", [group.rows[0]!.id],
+  );
+  await memoryReviewRepository.initializeLane({
+    conversationId: conversation.rows[0]!.id,
+    messageThreadId: null,
+    processedThroughSequence: "0",
+  });
+  return { conversationId: conversation.rows[0]!.id, groupId: group.rows[0]!.id };
 }
 
 describeWithDatabase("idle memory review", () => {
@@ -240,6 +259,67 @@ describeWithDatabase("idle memory review", () => {
       [fixture.conversationId],
     );
     expect(batches.rows[0]!.count).toBe("1");
+  });
+
+  // The review shares the Workflow workers with the turns, so the number of reviews in flight is
+  // capped; a claim takes only what the cap leaves (port of ilkruglov 3e69a02c).
+  it("claims no more background batches than the in-flight cap leaves", async () => {
+    const fixture = await createMainAgentMemoryFixture();
+    const lanes = await Promise.all([1, 2, 3].map((n) => familyGroupLane(fixture.familyId, `-100-cap-${n}`)));
+    for (const lane of lanes) {
+      for (let sequence = 1; sequence <= 10; sequence += 1) {
+        await insertUserMessage({
+          conversationId: lane.conversationId, groupId: lane.groupId,
+          sentAt: "2026-09-03T10:00:00.000Z", sequence,
+        });
+      }
+    }
+    const first = await memoryReviewDispatchRepository.claimPending({
+      leaseMilliseconds: 600_000, limit: 10, maxInFlight: 2, now: new Date("2026-09-03T10:01:00.000Z"),
+    });
+    expect(first).toHaveLength(2);
+    // Both dispatched and still running: the cap is full, the third lane waits.
+    for (const [index, claimed] of first.entries()) {
+      await database().query(
+        `UPDATE memory_review_batches SET status = 'running', eve_session_id = $2, eve_turn_id = 'turn_0'
+          WHERE id = $1`,
+        [claimed.batchId, `wrun_cap_${index}`],
+      );
+    }
+    const full = await memoryReviewDispatchRepository.claimPending({
+      leaseMilliseconds: 600_000, limit: 10, maxInFlight: 2, now: new Date("2026-09-03T10:02:00.000Z"),
+    });
+    expect(full).toHaveLength(0);
+    // One review finished: one slot, one claim.
+    await database().query(
+      "UPDATE memory_review_batches SET status = 'completed', completed_at = now() WHERE id = $1",
+      [first[0]!.batchId],
+    );
+    const freed = await memoryReviewDispatchRepository.claimPending({
+      leaseMilliseconds: 600_000, limit: 10, maxInFlight: 2, now: new Date("2026-09-03T10:03:00.000Z"),
+    });
+    expect(freed).toHaveLength(1);
+  });
+
+  it("materializes at most the configured number of lanes per pass and the rest next time", async () => {
+    const fixture = await createMainAgentMemoryFixture();
+    const lanes = await Promise.all([1, 2, 3].map((n) => familyGroupLane(fixture.familyId, `-100-lanes-${n}`)));
+    for (const lane of lanes) {
+      for (let sequence = 1; sequence <= 10; sequence += 1) {
+        await insertUserMessage({
+          conversationId: lane.conversationId, groupId: lane.groupId,
+          sentAt: "2026-09-03T10:00:00.000Z", sequence,
+        });
+      }
+    }
+    const first = await memoryReviewDispatchRepository.claimPending({
+      leaseMilliseconds: 600_000, limit: 10, materializeLaneLimit: 2, now: new Date("2026-09-03T10:01:00.000Z"),
+    });
+    expect(first).toHaveLength(2);
+    const second = await memoryReviewDispatchRepository.claimPending({
+      leaseMilliseconds: 600_000, limit: 10, materializeLaneLimit: 2, now: new Date("2026-09-03T10:02:00.000Z"),
+    });
+    expect(second).toHaveLength(1);
   });
 
   it("claims a personal conversation batch sponsored by the conversation owner", async () => {
