@@ -1,5 +1,6 @@
 /** Version-pinned seams: a lost PostgreSQL connection must not crash the process or strand queue work. */
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
+import { stripTypeScriptTypes } from "node:module";
 import { resolve } from "node:path";
 
 type Replace = (path: string, before: string, after: string) => Promise<void>;
@@ -9,6 +10,7 @@ export async function patchPostgresConnectionRecovery(replace: Replace) {
   const pkg = JSON.parse(await readFile(`${world}/package.json`, "utf8"));
   if (pkg.version !== "5.0.0-beta.35") throw new Error("AGENT_WORKFLOW_PATCH_VERSION_UNSUPPORTED: Expected world-postgres 5.0.0-beta.35");
   await patchStreamListenClient(replace, `${world}/dist/streamer.js`);
+  await patchStaleWorkerLockRelease(replace, world);
   const graphile = resolve("node_modules/graphile-worker");
   const graphilePkg = JSON.parse(await readFile(`${graphile}/package.json`, "utf8"));
   if (graphilePkg.version !== "0.16.6") throw new Error("AGENT_GRAPHILE_PATCH_VERSION_UNSUPPORTED: Expected graphile-worker 0.16.6");
@@ -63,6 +65,21 @@ async function patchGraphileConnectionRetries(replace: Replace, lib: string) {
     { code: "08006", backoffMS: 1000 },`);
   await replace(lib, "const retryable = RETRYABLE_ERROR_CODES.find(({ code }) => code === e.code);",
     `const retryable = RETRYABLE_ERROR_CODES.find(({ code }) => code === e.code || (code === '08006' && ${CONNECTION_MESSAGES}.includes(e.message)));`);
+}
+
+// The worker replacement above frees the job of a worker that died inside a live process. A process
+// killed mid-step (kill, OOM, a deploy without drain) leaves its workers' locks behind, and Graphile
+// frees them only after four hours: the chat whose turn was locked stays silent until then. The
+// world's start releases every lock taken before this process started, right after the queue
+// starts (its schema exists then; this process's own locks are newer), before the native replay of
+// active runs so the replayed jobs are not queued behind a dead worker's lock.
+export async function patchStaleWorkerLockRelease(replace: Replace, world: string) {
+  await writeFile(`${world}/dist/osinara-stale-worker-locks.js`, stripTypeScriptTypes(await readFile("scripts/eve-runtime/stale-worker-locks.ts", "utf8")), "utf8");
+  const index = `${world}/dist/index.js`;
+  await replace(index, "import { createQueue } from './queue.js';",
+    "import { createQueue } from './queue.js';\nimport { releaseStaleWorkerLocks } from './osinara-stale-worker-locks.js';");
+  await replace(index, "        async start() {\n            await queue.start();\n            await reenqueueActiveRuns(",
+    "        async start() {\n            const startedAt = new Date();\n            await queue.start();\n            await releaseStaleWorkerLocks(pool, startedAt);\n            await reenqueueActiveRuns(");
 }
 
 // The dedicated LISTEN client is created outside the pool, so no pool or Graphile listener covers it:

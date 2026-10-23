@@ -5,7 +5,8 @@
  * - `replaceExact`: fail-fast, count-checked, idempotent artifact replacement.
  * - Production startup health wait: permits bounded first-run sandbox preparation.
  * - PostgreSQL connection recovery: a lost LISTEN connection is logged instead of crashing, and a
- *   Graphile worker that died with its connection is unlocked and replaced.
+ *   Graphile worker that died with its connection is unlocked and replaced; locks left by a process
+ *   that died are released when the world starts.
  * - Workflow transport: a 35-minute internal HTTP window and a process-local fence for live redelivery.
  * - Model exact-once policy: disables Eve reissues after observed steps and multi-call compaction
  *   recovery; the empty-response reissue stays because it cannot duplicate a side effect.
