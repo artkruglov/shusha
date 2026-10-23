@@ -20,6 +20,8 @@
  * - Provider web search: dynamic provider models select the native backend by provider prefix.
  * - Compaction: a tool result already truncated is never truncated again, and every compaction
  *   check is logged with its session and turn.
+ * - Workflow journal storage: a step's payload lives in its events only, a run's slot marker is
+ *   read once per process, and large payload strings are stored once by content hash.
  */
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -30,6 +32,7 @@ import { patchStuckRunRecovery } from "./eve-patches/stuck-run-recovery.ts";
 import { patchTelegramSendPacing } from "./eve-patches/telegram-send-pacing.ts";
 import { patchWebFetchHtml } from "./eve-patches/web-fetch-html.ts";
 import { patchWebhookVerifyFirst } from "./eve-patches/webhook-verify-first.ts";
+import { patchWorkflowJournalStorage } from "./eve-patches/workflow-journal-storage.ts";
 import { patchWorkflowTransport } from "./eve-patches/workflow-transport.ts";
 
 const EXPECTED_EVE_VERSION = "0.40.0";
@@ -137,6 +140,11 @@ if (evePackage.version !== EXPECTED_EVE_VERSION) {
 // in an out-of-memory crash. Reads become paged and demand-driven, delta persistence is paced.
 await patchStreamRecovery(replaceExact);
 await patchEventLogCache(replaceExact);
+// Osinara 1.8.18–1.8.20: a step's input and output are not written twice (about a third less
+// storage per turn), the slot marker is read once per process, and the repeated large strings of
+// a payload (system prompt, instructions, history) are stored once by hash behind
+// OSINARA_WORKFLOW_PAYLOAD_BLOBS=1; reads of both forms are always on.
+await patchWorkflowJournalStorage(replaceExact);
 // Upstream nyxandro 2167e2c: a dropped PostgreSQL connection must not crash the process.
 await patchPostgresConnectionRecovery(replaceExact);
 // Upstream nyxandro 33c935f + 795ae11: a flow request may outlive Node's 300 s header deadline, and

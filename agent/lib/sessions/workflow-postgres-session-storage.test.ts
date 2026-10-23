@@ -76,6 +76,28 @@ describe("deletePostgresEveSession", () => {
     expect(statements.at(-1)).toBe("COMMIT");
   });
 
+  // Security review of 24 October 2026: a conversation deleted on request must not leave its text in
+  // payload blobs until a later sweep. The blobs the removed runs were the last to refer to go in the
+  // same transaction; a blob another run still refers to stays.
+  it("deletes the payload blobs the removed runs were the last to refer to, in the same transaction", async () => {
+    const client = clientWithRows([[], [{ parked: true, status: "failed" }], [], [{ exists: false }], [{ hash: "h-1" }, { hash: "h-2" }]]);
+
+    await expect(deletePostgresEveSession(runId, client)).resolves.toBeUndefined();
+
+    const blobDelete = client.query.mock.calls.find(([sql]) => String(sql).includes("DELETE FROM workflow.workflow_payload_blobs"));
+    expect(blobDelete).toBeDefined();
+    expect(String(blobDelete![0])).toContain("NOT EXISTS (SELECT 1 FROM workflow.workflow_payload_blob_refs");
+    expect(blobDelete![1]).toEqual([["h-1", "h-2"]]);
+    const statements = client.query.mock.calls.map(([sql]) => String(sql));
+    const refsDelete = statements.indexOf("DELETE FROM workflow.workflow_payload_blob_refs WHERE run_id = ANY($1)");
+    const lock = statements.findIndex((sql) => sql.includes("FROM workflow.workflow_payload_blobs WHERE hash = ANY($1) ORDER BY hash FOR UPDATE"));
+    const blobsDelete = statements.findIndex((sql) => sql.includes("DELETE FROM workflow.workflow_payload_blobs"));
+    expect(refsDelete).toBeLessThan(lock);
+    expect(lock).toBeLessThan(blobsDelete);
+    expect(client.query.mock.calls[lock]![1]).toEqual([["h-1", "h-2"]]);
+    expect(statements.at(-1)).toBe("COMMIT");
+  });
+
   it("deletes all public per-run records in one transaction", async () => {
     const client = clientWithRows([[], [{ parked: true, status: "failed" }], [], [{ exists: false }]]);
 
@@ -86,12 +108,14 @@ describe("deletePostgresEveSession", () => {
       expect.stringContaining("FROM workflow.workflow_runs"),
       expect.stringContaining("$rootRunId"),
       expect.stringContaining("FROM workflow.workflow_hooks"),
+      expect.stringContaining("SELECT DISTINCT hash FROM workflow.workflow_payload_blob_refs"),
       "DELETE FROM workflow.workflow_stream_chunks WHERE run_id = ANY($1)",
       "DELETE FROM workflow.workflow_waits WHERE run_id = ANY($1)",
       "DELETE FROM workflow.workflow_hooks WHERE run_id = ANY($1)",
       "DELETE FROM workflow.workflow_steps WHERE run_id = ANY($1)",
       "DELETE FROM workflow.workflow_events WHERE run_id = ANY($1)",
       "DELETE FROM workflow.workflow_event_slots WHERE run_id = ANY($1)",
+      "DELETE FROM workflow.workflow_payload_blob_refs WHERE run_id = ANY($1)",
       "DELETE FROM workflow.workflow_runs WHERE id = $1",
       "COMMIT",
     ]);
