@@ -52,6 +52,14 @@ async function deleteRunProjections(client: WorkflowQueryClient, ids: readonly s
   }
   const hashes = referenced.rows.map((row) => String(row.hash));
   if (hashes.length > 0) {
+    // The lock waits out a writer that touched a blob under its own lock; the delete is then a
+    // separate statement with a fresh snapshot that sees that writer's reference (a single DELETE
+    // re-checked after the wait would still run NOT EXISTS on its old snapshot). Hash order, as
+    // every writer takes its blob locks, so the two never wait in a cycle.
+    await client.query(
+      "SELECT hash FROM workflow.workflow_payload_blobs WHERE hash = ANY($1) ORDER BY hash FOR UPDATE",
+      [hashes],
+    );
     await client.query(
       `DELETE FROM workflow.workflow_payload_blobs AS blob
         WHERE blob.hash = ANY($1)
