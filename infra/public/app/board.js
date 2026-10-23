@@ -34,8 +34,10 @@
 
   const SAID = {
     accept: "Принято: ",
+    accept_transfer: "Теперь это ваше: ",
     claim: "Теперь это ваше: ",
     decline: "Автор узнает, что вы не можете: ",
+    decline_transfer: "Передача отклонена: ",
   };
 
   /**
@@ -76,13 +78,16 @@
       });
     }
 
-    if (has("accept")) {
+    // A request to the person and a handover to them are answered the same way: «Беру / Не могу».
+    const answer = has("accept") ? { no: "decline", yes: "accept" }
+      : has("accept_transfer") ? { no: "decline_transfer", yes: "accept_transfer" } : null;
+    if (answer) {
       const bar = el("div", "task-actions");
-      const take = button("pill", "Беру", () => act("accept", take, FA.nonce()));
+      const take = button("pill", "Беру", () => act(answer.yes, take, FA.nonce()));
       take.setAttribute("aria-label", "Беру: " + row.title);
       bar.append(take);
-      if (has("decline")) {
-        const no = button("pill pill-quiet", "Не могу", () => act("decline", no, FA.nonce()));
+      if (has(answer.no)) {
+        const no = button("pill pill-quiet", "Не могу", () => act(answer.no, no, FA.nonce()));
         no.setAttribute("aria-label", "Не могу: " + row.title);
         bar.append(no);
       }

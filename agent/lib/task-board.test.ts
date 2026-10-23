@@ -39,6 +39,20 @@ describe("task board", () => {
     ]);
   });
 
+  it("puts a task handed over to the person in «Ждут согласия», naming who hands it over", () => {
+    // The task stays the sender's until taken (`shared-task-handover.ts`), so it is not among the person's own.
+    const board = formatTaskBoard({
+      now: NOW, style: "plain", timezone: "UTC",
+      offered: [task("Записать Мишу к врачу", { assignee: "Юля" }), task("Уже снято", { assignee: "Юля", status: "cancelled" })],
+      tasks: [task("Отвезти машину"), task("Купить щёточку", { assignee: "Юля", status: "proposed" })],
+    })!;
+    expect(board.split("\n\n")).toEqual([
+      "Ждут согласия · 2\n• Купить щёточку — Юля\n• Записать Мишу к врачу — передаёт: Юля",
+      "Разобрать · 1\n• Отвезти машину\nСкажи, куда положить или какой первый шаг.",
+      "Открытых дел: 2",
+    ]);
+  });
+
   it("shows what nobody took and what waits for someone's yes apart from tasks somebody is doing", () => {
     // Прод 1 октября 2026: 19 ничьих дел висели среди живых, и «записано» читалось как «делается».
     const board = formatTaskBoard({
