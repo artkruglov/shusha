@@ -4,6 +4,7 @@
  * Constructs covered:
  * - Deterministic delayed text and forum-topic targeting.
  * - Provider rejection and timeout errors propagate to the durable dispatcher.
+ * - A chat Telegram calls gone fails with the stable unreachable code and reason.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -82,5 +83,20 @@ describe("deliverTelegramReminder", () => {
     );
 
     await expect(deliverTelegramReminder(delayedJob)).rejects.toBeDefined();
+  });
+
+  it("names a bot removed from the group with the stable unreachable code, without the reminder text in the log", async () => {
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "telegram-bot-secret");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      description: "Forbidden: bot was kicked from the supergroup chat", error_code: 403, ok: false,
+    }), { status: 403 })));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(deliverTelegramReminder(delayedJob)).rejects.toMatchObject({
+      chatId: "-1001", code: "AGENT_TELEGRAM_RECIPIENT_UNREACHABLE", reason: "kicked",
+    });
+    expect(JSON.parse(String(errors.mock.calls[0]?.[0]))).toMatchObject({ code: "AGENT_TELEGRAM_RECIPIENT_UNREACHABLE" });
+    expect(JSON.stringify(errors.mock.calls)).not.toContain("Собрать документы");
+    errors.mockRestore();
   });
 });

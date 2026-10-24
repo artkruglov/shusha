@@ -7,6 +7,8 @@
  *   лейн может принадлежать соседней, и её название было бы содержимым чужой области.
  * - Nothing is sent before the digest hour; one send per family per day through the claim.
  * - A failed delivery releases the claim and does not stop other families.
+ * - Telegram's webhook view: piled-up updates, a fresh delivery error or a failed check are failures,
+ *   read once per pass; an unreachable owner chat keeps the day's claim.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -16,7 +18,10 @@ import {
   formatOwnerHealthDigest,
 } from "./owner-health-digest.js";
 import type { OwnerHealthReport } from "./owner-health-digest-repository.js";
-import { MemoryReviewOwnerAlertTransportError } from "../memory-review/memory-review-owner-alert-transport.js";
+import {
+  MemoryReviewOwnerAlertTransportError,
+  TelegramRecipientUnreachableError,
+} from "../memory-review/memory-review-owner-alert-transport.js";
 
 const quiet: OwnerHealthReport = {
   alertDeliveryFailures: 0,
@@ -37,6 +42,36 @@ const quiet: OwnerHealthReport = {
 };
 
 describe("formatOwnerHealthDigest", () => {
+  const webhook = (pendingUpdateCount: number, lastErrorAt: string | null, lastErrorMessage: string | null = null) => ({
+    lastErrorAt: lastErrorAt === null ? null : new Date(lastErrorAt),
+    lastErrorMessage,
+    pendingUpdateCount,
+    status: "read" as const,
+    url: "https://bot.example.com/eve/v1/telegram",
+  });
+
+  it("names a webhook that piles up updates or failed within the day, and stays quiet about a healthy one", () => {
+    expect(formatOwnerHealthDigest(quiet, null, webhook(3, "2026-09-07T05:00:00.000Z", "old"))).toContain("сбоев нет");
+
+    const piled = formatOwnerHealthDigest(quiet, null, webhook(153, null));
+    expect(piled).not.toContain("сбоев нет");
+    expect(piled).toContain("Вебхук Telegram: ожидающих апдейтов 153.");
+
+    const failing = formatOwnerHealthDigest(quiet, null,
+      webhook(4, "2026-09-09T02:00:00.000Z", `Wrong response from the webhook: 502 Bad Gateway${"!".repeat(300)}`));
+    expect(failing).not.toContain("сбоев нет");
+    expect(failing).toContain("Вебхук Telegram: ожидающих апдейтов 4, последняя ошибка доставки 9 сентября в 05:00: Wrong response from the webhook: 502 Bad Gateway");
+    const line = failing.split("\n").find((item) => item.startsWith("Вебхук"))!;
+    expect(line.length).toBeLessThan(300);
+  });
+
+  it("reports a webhook that could not be checked, or is not set, as a failure", () => {
+    expect(formatOwnerHealthDigest(quiet, null, { status: "unreadable" }))
+      .toContain("Вебхук Telegram: не удалось проверить вебхук.");
+    expect(formatOwnerHealthDigest(quiet, null, { ...webhook(0, null), url: "" }))
+      .toContain("Вебхук Telegram не установлен");
+  });
+
   it("does not report a healthy day when reminder or schedule delivery needs attention", () => {
     const text = formatOwnerHealthDigest({
       ...quiet,
@@ -199,6 +234,26 @@ describe("createOwnerHealthDigestDispatcher", () => {
     expect(deps.release).not.toHaveBeenCalled();
     expect(deps.abandon).toHaveBeenCalledWith("family-1", "2026-09-09",
       "AGENT_OWNER_HEALTH_DIGEST_AMBIGUOUS");
+  });
+
+  it("reads the webhook once per pass and puts it into the digest", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const webhook = vi.fn().mockResolvedValue({ status: "unreadable" });
+    const deliver = vi.fn().mockResolvedValue(undefined);
+    const deps = dependencies({ deliver, webhook });
+    await expect(createOwnerHealthDigestDispatcher(deps)(new Date("2026-09-09T06:10:00.000Z"))).resolves.toBe(2);
+    expect(webhook).toHaveBeenCalledTimes(1);
+    expect(String(deliver.mock.calls[0]?.[0]?.text)).toContain("не удалось проверить вебхук");
+  });
+
+  it("keeps the day's claim for an owner chat Telegram calls unreachable", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const deps = dependencies({
+      deliver: vi.fn().mockRejectedValue(new TelegramRecipientUnreachableError("101", "blocked")),
+    });
+    await createOwnerHealthDigestDispatcher(deps)(new Date("2026-09-09T06:10:00.000Z"));
+    expect(deps.release).not.toHaveBeenCalled();
+    expect(deps.abandon).toHaveBeenCalledWith("family-1", "2026-09-09", "AGENT_TELEGRAM_RECIPIENT_UNREACHABLE");
   });
 
   it("lets a refused delivery be retried, because nothing was sent", async () => {

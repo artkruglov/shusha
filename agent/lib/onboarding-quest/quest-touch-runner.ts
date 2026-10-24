@@ -6,8 +6,11 @@
  *
  * Идёт в том же десятиминутном тике, что «фишка» (`agent/schedules/feature-tip.ts`), и тем же видом заявки: в один
  * местный день человек получает либо касание, либо совет. Фон работает в системной области, как у «фишки».
+ * Касание начинает сам бот, поэтому чат, который Telegram уже назвал недоступным, пропускается без запроса.
  */
 import { recordInitiativeDelivery } from "../initiative/initiative-delivery.js";
+import { TelegramRecipientUnreachableError } from "../memory-review/memory-review-owner-alert-transport.js";
+import { unreachableTelegramRecipient } from "../telegram-reachability/reachability-guard.js";
 import { personalTimeRepository } from "../personal-time/personal-time-repository.js";
 import { questAvailability } from "./quest-availability.js";
 import { questCardKeyboard } from "./quest-keyboard.js";
@@ -18,7 +21,11 @@ import { questTransport } from "./quest-transport.js";
 export function dispatchQuestTouches(now = new Date()): Promise<number> {
   return createQuestTouchDispatcher({
     availability: questAvailability,
-    card: (input) => questTransport.card(input),
+    async card(input) {
+      const unreachable = await unreachableTelegramRecipient(input.chatId, "onboarding_quest");
+      if (unreachable !== null) throw new TelegramRecipientUnreachableError(input.chatId, unreachable);
+      return questTransport.card(input);
+    },
     claim: (person, localDate, day, at) => questRepository.claimTouch(person, localDate, day, at),
     facts: (person) => questRepository.facts(person),
     keyboard: (person, step, at) => questCardKeyboard({

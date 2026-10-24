@@ -5,6 +5,7 @@
  * - `ConfigureTelegramWebhookOptions`: explicit credentials, target, fetch, and timeout inputs.
  * - `configureTelegramWebhook`: sets and verifies the exact Osinara webhook without dropping updates.
  */
+import { TELEGRAM_ALLOWED_UPDATES } from "../../agent/lib/telegram-webhook/allowed-updates.js";
 import { InstallerError } from "./errors.js";
 
 const TELEGRAM_API_ORIGIN = "https://api.telegram.org";
@@ -74,7 +75,8 @@ export async function configureTelegramWebhook(
 
   const targetUrl = `https://${options.hostname}${TELEGRAM_WEBHOOK_PATH}`;
   const registered = await telegramJson(options, "setWebhook", {
-    allowed_updates: ["message", "callback_query", "guest_message", "chat_join_request"],
+    // The running agent compares the same list on every tick (`webhook-subscription.ts`).
+    allowed_updates: [...TELEGRAM_ALLOWED_UPDATES],
     secret_token: options.secretToken,
     url: targetUrl,
   });

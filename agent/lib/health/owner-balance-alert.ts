@@ -10,13 +10,16 @@
  *   balance and warns the owner the first time it is low or blocked on a UTC day.
  * - Sent through the Bot API without the model, so it arrives even when every model call is 402.
  * - Quiet hours postpone it; a Telegram refusal releases the claim, an unclear send stays terminal.
+ *   An owner chat Telegram calls unreachable keeps the day's claim: every tick would only skip again.
  */
 import { DEEPSEEK_BALANCE_ALERT_USD } from "../../config.js";
 import { isWithinQuietHours } from "../initiative/quiet-hours.js";
 import {
   MemoryReviewOwnerAlertTransportError,
   memoryReviewOwnerAlertTransport,
+  TelegramRecipientUnreachableError,
 } from "../memory-review/memory-review-owner-alert-transport.js";
+import { TELEGRAM_RECIPIENT_UNREACHABLE_CODE } from "../telegram-reachability/recipient-failure.js";
 import { readConfiguredDeepSeekBalance } from "./deepseek-balance.js";
 import { formatDeepSeekBalance, type DeepSeekBalance } from "./model-spend.js";
 import { ownerBalanceAlertRepository } from "./owner-balance-alert-repository.js";
@@ -49,7 +52,9 @@ export function createOwnerBalanceAlertDispatcher(dependencies: OwnerBalanceAler
         sent += 1;
       } catch (error) {
         const refused = error instanceof MemoryReviewOwnerAlertTransportError;
-        if (refused) await dependencies.release(recipient.familyId, alertDate);
+        if (error instanceof TelegramRecipientUnreachableError) {
+          await dependencies.abandon(recipient.familyId, alertDate, TELEGRAM_RECIPIENT_UNREACHABLE_CODE);
+        } else if (refused) await dependencies.release(recipient.familyId, alertDate);
         else await dependencies.abandon(recipient.familyId, alertDate, "AGENT_OWNER_BALANCE_ALERT_AMBIGUOUS");
         console.error(JSON.stringify({
           code: refused ? "AGENT_OWNER_BALANCE_ALERT_FAILED" : "AGENT_OWNER_BALANCE_ALERT_AMBIGUOUS",

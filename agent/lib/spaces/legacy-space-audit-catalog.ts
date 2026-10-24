@@ -256,6 +256,10 @@ add("conversation_route_generations eve_session_event_cursors memory_reinforceme
   action: "control", reason: "Retain monotonic/deduplication metadata; deleting it could replay an old side effect",
 });
 add("schema_migrations telegram_chat_reaction_policies", { action: "control", reason: "Schema ledger or public Telegram protocol metadata" });
+add("telegram_chat_reachability", {
+  action: "control",
+  reason: "Telegram transport state of a chat (bot blocked, removed from the group, chat unknown); chat ids, reasons and times only, no audience and no content",
+});
 add("memory_items", { action: "control", reason: "Soft-delete view: migration must account for memory_items_all including retained deleted rows" });
 
 export const legacyAuditCatalog: Readonly<Record<string, LegacyAuditRule>> = rules;

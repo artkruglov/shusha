@@ -16,7 +16,7 @@ import {
   type ClaimedReminder,
   reminderDispatchRepository,
 } from "./reminder-dispatch-repository.js";
-import { deliverTelegramReminder } from "./telegram-reminder-delivery.js";
+import { deliverReachableTelegramReminder } from "./telegram-reminder-delivery.js";
 import {
   telegramGroupJournalRepository,
   type TelegramGroupJournalRepository,
@@ -123,7 +123,7 @@ export function createReminderDispatcher(dependencies: ReminderDispatcherDepende
 }
 
 export const dispatchDueReminders = createReminderDispatcher({
-  deliver: deliverTelegramReminder,
+  deliver: deliverReachableTelegramReminder,
   repository: reminderDispatchRepository,
   timeline: telegramGroupJournalRepository,
 });

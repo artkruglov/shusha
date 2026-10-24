@@ -20,6 +20,8 @@
  * - Provider web search: dynamic provider models select the native backend by provider prefix.
  * - Compaction: a tool result already truncated is never truncated again, and every compaction
  *   check is logged with its session and turn.
+ * - Telegram `my_chat_member`: a verified update reaches the application hook `onMyChatMember`.
+ * - Telegram request deadlines: every channel Bot API attempt and every file download time out.
  */
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -27,6 +29,8 @@ import { patchEventLogCache } from "./eve-patches/event-log-cache.ts";
 import { patchPostgresConnectionRecovery } from "./eve-patches/postgres-connection-recovery.ts";
 import { patchStreamRecovery } from "./eve-patches/stream-recovery.ts";
 import { patchStuckRunRecovery } from "./eve-patches/stuck-run-recovery.ts";
+import { patchTelegramMyChatMember } from "./eve-patches/telegram-my-chat-member.ts";
+import { patchTelegramRequestTimeouts } from "./eve-patches/telegram-request-timeouts.ts";
 import { patchTelegramSendPacing } from "./eve-patches/telegram-send-pacing.ts";
 import { patchWebFetchHtml } from "./eve-patches/web-fetch-html.ts";
 import { patchWebhookVerifyFirst } from "./eve-patches/webhook-verify-first.ts";
@@ -629,3 +633,10 @@ await replaceExact(
   "type TelegramInboundResultOrPromise, type TelegramReceiveTarget, }",
   "type TelegramDrainContext, type TelegramGuestUpdateContext, type TelegramHitlCallbackResult, type TelegramInboundResultOrPromise, type TelegramReceiveTarget, type TelegramVerifiedUpdateContext, }",
 );
+
+// 24 October 2026: a blocked bot or a bot removed from a group arrives as `my_chat_member`; layered on the
+// guest/join-request seam above, so it runs after that replacement and its declarations.
+await patchTelegramMyChatMember(replaceExact);
+// 24 October 2026: a stuck Bot API request held a turn up to Node's 300 s header deadline; layered on the
+// send pacing patch, whose thunk it bounds.
+await patchTelegramRequestTimeouts(replaceExact);

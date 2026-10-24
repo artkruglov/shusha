@@ -10,6 +10,7 @@
  * - `pacedTelegramSend`: one Bot API request under the pacer, repeated once after a 429; the installed copy
  *   also registers it on `globalThis` under `osinara.pacedTelegramSend`, because the application image has no
  *   `scripts/` tree and reaches the pacer only through Eve's channel (`agent/lib/telegram-send-pacer.ts`).
+ * - `TelegramDeliveryFailureReport`: a failed send as the pacer reports it to the application.
  *
  * Key construct:
  * - Telegram allows a bot about thirty messages a second in all, one a second to one private chat and twenty
@@ -19,6 +20,12 @@
  * - A 429 naming a chat pauses only that chat; a 429 without a chat pauses every call (the global limit).
  *   The ilkruglov original paused every call on any 429, so one busy group stopped all families for up to a minute.
  * - A 429 means Telegram did not deliver, so the one repeat cannot duplicate a message.
+ * - The final answer of a failed send to a chat goes to the observer the application registers on
+ *   `globalThis` under `osinara.telegramDeliveryFailureObserver` (`agent/lib/telegram-reachability/`):
+ *   every call passes here, so a blocked bot or a removed group is noticed whichever path wrote. The
+ *   report carries `startedAt`, the moment the answered attempt was handed to fetch: a proof of
+ *   reachability received after it makes that answer stale. The observer is awaited, so the next send
+ *   of the same caller already sees its mark; its own failure is logged and never replaces the answer.
  */
 const PACED_METHODS = new Set([
   "copyMessage",
@@ -43,6 +50,9 @@ const GROUP_WINDOW_MS = 60_000;
 const RETRY_AFTER_MAX_SECONDS = 60;
 const ACQUIRE_ROUNDS_MAX = 1_000;
 const PACER_KEY = Symbol.for("osinara.telegramSendPacer");
+const DELIVERY_FAILURE_OBSERVER_KEY = Symbol.for("osinara.telegramDeliveryFailureObserver");
+// Calls whose failure can say the chat itself is gone; reads and bot settings never mark a chat.
+const OBSERVED_METHODS = new Set([...PACED_METHODS, "sendChatAction"]);
 
 const SETTING_BOUNDS = {
   TELEGRAM_SEND_GLOBAL_PER_SECOND: { absent: 25, max: 30, min: 1 },
@@ -207,6 +217,39 @@ export interface PacedTelegramResponse {
   readonly response: Response;
 }
 
+export interface TelegramDeliveryFailureReport {
+  readonly body: unknown;
+  readonly chatId: string;
+  readonly method: string;
+  /** Epoch milliseconds when the answered attempt started, after its wait for a slot. */
+  readonly startedAt: number;
+  readonly status: number;
+}
+
+interface PacedAttempt extends PacedTelegramResponse {
+  readonly startedAt: number;
+}
+
+async function reportDeliveryFailure(method: string, requestBody: unknown, answer: PacedAttempt): Promise<void> {
+  if (answer.response.ok || !OBSERVED_METHODS.has(method)) return;
+  const chat = chatKey(requestBody);
+  const observer = (globalThis as { [key: symbol]: unknown })[DELIVERY_FAILURE_OBSERVER_KEY];
+  if (!chat || typeof observer !== "function") return;
+  try {
+    const report: TelegramDeliveryFailureReport = {
+      body: answer.body, chatId: chat.id, method, startedAt: answer.startedAt, status: answer.response.status,
+    };
+    await (observer as (failure: TelegramDeliveryFailureReport) => unknown)(report);
+  } catch (error) {
+    console.error(JSON.stringify({
+      chatId: chat.id,
+      code: "AGENT_TELEGRAM_DELIVERY_OBSERVER_FAILED",
+      errorName: error instanceof Error ? error.name : "UnknownError",
+      method,
+    }));
+  }
+}
+
 /**
  * Sends one Bot API request under the pacer. `body` only identifies the chat (`chat_id`); `send` performs the
  * request and may be called twice, the second time only after a 429 that named its wait.
@@ -218,10 +261,23 @@ export async function pacedTelegramSend(
   parse: (response: Response) => Promise<unknown>,
   pacer: TelegramSendPacer = telegramSendPacer,
 ): Promise<PacedTelegramResponse> {
+  const answer = await sendUnderPacer(method, body, send, parse, pacer);
+  await reportDeliveryFailure(method, body, answer);
+  return { body: answer.body, response: answer.response };
+}
+
+async function sendUnderPacer(
+  method: string,
+  body: unknown,
+  send: () => Promise<Response>,
+  parse: (response: Response) => Promise<unknown>,
+  pacer: TelegramSendPacer,
+): Promise<PacedAttempt> {
   await pacer.acquire(method, body);
+  let startedAt = Date.now();
   let response = await send();
   let parsed = await parse(response);
-  if (response.status !== 429) return { body: parsed, response };
+  if (response.status !== 429) return { body: parsed, response, startedAt };
   const seconds = telegramRetryAfterSeconds(parsed);
   console.error(JSON.stringify({
     code: "AGENT_TELEGRAM_RATE_LIMITED",
@@ -229,13 +285,14 @@ export async function pacedTelegramSend(
     method,
     retryAfterSeconds: seconds,
   }));
-  if (seconds === null) return { body: parsed, response };
+  if (seconds === null) return { body: parsed, response, startedAt };
   pacer.retryAfter(body, seconds);
   await pacer.waitForPause(body);
   await pacer.acquire(method, body);
+  startedAt = Date.now();
   response = await send();
   parsed = await parse(response);
-  return { body: parsed, response };
+  return { body: parsed, response, startedAt };
 }
 
 (globalThis as { [key: symbol]: unknown })[Symbol.for("osinara.pacedTelegramSend")] = pacedTelegramSend;

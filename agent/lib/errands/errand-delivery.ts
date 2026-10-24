@@ -1,4 +1,7 @@
-/** Durable single-attempt delivery. An uncertain POST is never retried. */
+/**
+ * Durable single-attempt delivery. An uncertain POST is never retried. A recipient whose private chat
+ * Telegram already calls unreachable (blocked bot, deleted account) is `recipient_unavailable` before any send.
+ */
 import { database } from "../database.js";
 import { initiativeRepository } from "../initiative/initiative-repository.js";
 import { decideInitiative } from "../initiative/initiative-policy.js";
@@ -7,6 +10,8 @@ import { authorizeRecordSpaceAction } from "../spaces/space-access.js";
 import type { ErrandRow } from "./errand-records.js";
 import type { ErrandState } from "./errand-contract.js";
 import { AppError } from "../app-error.js";
+import { unreachableTelegramRecipient } from "../telegram-reachability/reachability-guard.js";
+import { telegramReachabilityRepository } from "../telegram-reachability/reachability-repository.js";
 
 interface Outcome { state: ErrandState; delivered: boolean | null; reason?: string }
 const outcome = (state: ErrandState, reason?: string): Outcome => ({ state,
@@ -57,6 +62,10 @@ export function createErrandDelivery(dependencies = { send: deliverErrandResult 
       [row.family_id, row.recipient_user_id])).rows[0];
       if (!route) return await reject("recipient_unavailable");
       chatId = route.telegram_chat_id;
+      const unreachable = await unreachableTelegramRecipient(chatId, "errand", {
+        unreachableReason: (id) => telegramReachabilityRepository.unreachableReason(id, client),
+      });
+      if (unreachable !== null) return await reject("recipient_unavailable");
       const policy = await initiativeRepository.read(row.recipient_user_id, now, client);
       if (!policy) return await reject("recipient_unavailable");
       const decision = decideInitiative(policy.settings, policy.state, now);

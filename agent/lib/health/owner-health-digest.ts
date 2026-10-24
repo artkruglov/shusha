@@ -13,6 +13,9 @@
  *   dispatcher itself is down.
  * - The schedule ticks every ten minutes; the dispatcher sends after the digest hour and takes a
  *   durable claim first, so a restart neither skips a day nor sends it twice.
+ * - Telegram's webhook view is read once per pass: updates piling up or a fresh delivery error are a
+ *   failure line (`telegram-webhook-health.ts`), a failed check is the line «не удалось проверить вебхук».
+ * - An owner chat Telegram calls unreachable keeps today's claim: the next tick would only skip again.
  */
 import { DEEPSEEK_BALANCE_ALERT_USD } from "../../config.js";
 import { isWithinQuietHours } from "../initiative/quiet-hours.js";
@@ -22,10 +25,17 @@ import { formatFamilylessGroups, readFamilylessGroupsHealth } from "./familyless
 import { formatOtherFamilies, readOtherFamiliesHealth } from "./other-families-health.js";
 import { formatBackupHealth } from "./backup-health.js";
 import { formatStorageHeadroom } from "./storage-headroom.js";
+import {
+  formatTelegramWebhookHealth,
+  readTelegramWebhookHealth,
+  type TelegramWebhookHealth,
+} from "./telegram-webhook-health.js";
+import { TELEGRAM_RECIPIENT_UNREACHABLE_CODE } from "../telegram-reachability/recipient-failure.js";
 import { familyBudgetRepository, formatFamilySpend } from "../family-budget-repository.js";
 import {
   MemoryReviewOwnerAlertTransportError,
   memoryReviewOwnerAlertTransport,
+  TelegramRecipientUnreachableError,
 } from "../memory-review/memory-review-owner-alert-transport.js";
 import {
   type OwnerHealthRecipient,
@@ -44,8 +54,13 @@ function when(date: Date): string {
   return MOSCOW.format(date);
 }
 
-export function formatOwnerHealthDigest(report: OwnerHealthReport, balance: DeepSeekBalance | null = null): string {
+export function formatOwnerHealthDigest(
+  report: OwnerHealthReport,
+  balance: DeepSeekBalance | null = null,
+  webhook: TelegramWebhookHealth | null = null,
+): string {
   const lines: string[] = [];
+  const windowEnd = new Date(report.windowStart.getTime() + OWNER_HEALTH_DIGEST_WINDOW_MILLISECONDS);
   // Кончившийся баланс DeepSeek значит, что бот не отвечает: это сбой, а не справка.
   const balanceLine = formatDeepSeekBalance(balance, DEEPSEEK_BALANCE_ALERT_USD);
   if (balanceLine?.warning) lines.push(balanceLine.text);
@@ -53,6 +68,9 @@ export function formatOwnerHealthDigest(report: OwnerHealthReport, balance: Deep
     lines.push(`Сессии: ${report.rotations.count} ротаций после сбоя` +
       (report.rotations.latestAt ? `, последняя ${when(report.rotations.latestAt)}` : "") + ".");
   }
+  // Telegram, not the agent, knows that updates stopped arriving: a deaf webhook looks like a quiet day.
+  const webhookLine = formatTelegramWebhookHealth(webhook, windowEnd);
+  if (webhookLine !== null) lines.push(webhookLine);
   if (report.ingressFailures.count > 0) {
     const codes = report.ingressFailures.codes.map((entry) => `${entry.code} ×${entry.count}`).join(", ");
     lines.push(`Очередь Telegram: ${report.ingressFailures.count} сбоев (${codes}).`);
@@ -84,7 +102,7 @@ export function formatOwnerHealthDigest(report: OwnerHealthReport, balance: Deep
   const storage = formatStorageHeadroom(report.storage);
   if (storage !== null) lines.push(storage);
   // Копия, которая не ушла, это сбой дня; ушедшая во все хранилища это одна строка справки.
-  const backup = formatBackupHealth(report.backups, new Date(report.windowStart.getTime() + OWNER_HEALTH_DIGEST_WINDOW_MILLISECONDS));
+  const backup = formatBackupHealth(report.backups, windowEnd);
   if (backup?.warning) lines.push(backup.text);
   const written = report.memoryWritten.reduce((sum, entry) => sum + entry.count, 0);
   const breakdown = report.memoryWritten.map((entry) => `${entry.scope} ${entry.kind} ${entry.count}`).join(", ");
@@ -116,6 +134,8 @@ interface OwnerHealthDigestDependencies {
   claim(familyId: string, digestDate: string, now: Date): Promise<boolean>;
   complete(familyId: string, digestDate: string, now: Date, textLength: number): Promise<void>;
   deliver(input: { chatId: string; text: string }): Promise<void>;
+  /** Вебхук глазами Telegram; читается один раз за проход, без зависимости строки нет. */
+  webhook?(): Promise<TelegramWebhookHealth>;
   /** Блок о других семьях установки для оператора; без зависимости блока нет. */
   otherFamilies?(operatorFamilyId: string, windowStart: Date): Promise<string | null>;
   recipients(): Promise<OwnerHealthRecipient[]>;
@@ -135,6 +155,7 @@ export function createOwnerHealthDigestDispatcher(dependencies: OwnerHealthDiges
     if (digestDate === null) return 0;
     let sent = 0;
     let balance: Promise<DeepSeekBalance | null> | undefined;
+    let webhook: Promise<TelegramWebhookHealth | null> | undefined;
     for (const recipient of await dependencies.recipients()) {
       // Заявка не берётся вовсе: взятая и неотправленная, она стоила бы владельцу дайджеста за
       // сутки, а тихие часы кончаются в тех же сутках, и следующий тик отправит его сам.
@@ -144,8 +165,9 @@ export function createOwnerHealthDigestDispatcher(dependencies: OwnerHealthDiges
         const windowStart = new Date(now.getTime() - OWNER_HEALTH_DIGEST_WINDOW_MILLISECONDS);
         const report = await dependencies.report(recipient.familyId, windowStart, now);
         balance ??= dependencies.balance();
+        webhook ??= dependencies.webhook?.() ?? Promise.resolve(null);
         const others = dependencies.otherFamilies ? await dependencies.otherFamilies(recipient.familyId, windowStart) : null;
-        const text = [formatOwnerHealthDigest(report, await balance), ...(others === null ? [] : [others])].join("\n");
+        const text = [formatOwnerHealthDigest(report, await balance, await webhook), ...(others === null ? [] : [others])].join("\n");
         await dependencies.deliver({ chatId: recipient.ownerTelegramUserId, text });
         await dependencies.complete(recipient.familyId, digestDate, now, text.length);
         console.info(JSON.stringify({
@@ -161,7 +183,9 @@ export function createOwnerHealthDigestDispatcher(dependencies: OwnerHealthDiges
         // дайджест это ровно то молчание, ради которого он и существует. Любой другой сбой
         // оставляет исход неизвестным: Telegram мог сообщение принять, поэтому повтора нет.
         const refused = error instanceof MemoryReviewOwnerAlertTransportError;
-        if (refused) await dependencies.release(recipient.familyId, digestDate);
+        if (error instanceof TelegramRecipientUnreachableError) {
+          await dependencies.abandon(recipient.familyId, digestDate, TELEGRAM_RECIPIENT_UNREACHABLE_CODE);
+        } else if (refused) await dependencies.release(recipient.familyId, digestDate);
         else await dependencies.abandon(recipient.familyId, digestDate, "AGENT_OWNER_HEALTH_DIGEST_AMBIGUOUS");
         console.error(JSON.stringify({
           code: refused ? "AGENT_OWNER_HEALTH_DIGEST_FAILED" : "AGENT_OWNER_HEALTH_DIGEST_AMBIGUOUS",
@@ -181,6 +205,7 @@ export function dispatchOwnerHealthDigests(now = new Date()): Promise<number> {
     claim: (familyId, digestDate, at) => ownerHealthDigestRepository.claim(familyId, digestDate, at),
     complete: (familyId, digestDate, at, length) => ownerHealthDigestRepository.complete(familyId, digestDate, at, length),
     deliver: (input) => memoryReviewOwnerAlertTransport.deliver(input),
+    webhook: () => readTelegramWebhookHealth({ botToken: process.env.TELEGRAM_BOT_TOKEN }),
     otherFamilies: async (operatorFamilyId, windowStart) => {
       const [families, groups, spend] = await Promise.all([
         readOtherFamiliesHealth(operatorFamilyId, windowStart),

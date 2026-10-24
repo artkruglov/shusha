@@ -118,12 +118,16 @@ curl -s https://shusha.example.com/eve/v1/health
 source .env
 curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
   -H 'content-type: application/json' \
-  -d "{\"url\":\"https://shusha.example.com/eve/v1/telegram\",\"secret_token\":\"${TELEGRAM_WEBHOOK_SECRET_TOKEN}\",\"allowed_updates\":[\"message\",\"callback_query\",\"guest_message\"]}"
+  -d "{\"url\":\"https://shusha.example.com/eve/v1/telegram\",\"secret_token\":\"${TELEGRAM_WEBHOOK_SECRET_TOKEN}\",\"allowed_updates\":[\"message\",\"callback_query\",\"guest_message\",\"chat_join_request\",\"my_chat_member\"]}"
 curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo"
 ```
 
 `callback_query` нужен для кнопок подтверждения, `guest_message` для гостевого режима: ответа на упоминание бота
-в любой переписке (включается переключателем Guest Mode в настройках бота в @BotFather). В `getWebhookInfo` не должно быть
+в любой переписке (включается переключателем Guest Mode в настройках бота в @BotFather), `chat_join_request` для
+заявок на вход в группу по ссылке бота, `my_chat_member` для блокировки бота в личке и удаления из группы: такой чат
+перестаёт получать сообщения, которые бот начинает сам. Запущенный агент раз в десять минут сверяет этот список с
+`getWebhookInfo` и при расхождении повторяет `setWebhook` с тем же адресом и секретом; вебхук, закреплённый за IP
+(`ip_address`), который не совпадает с DNS адреса, агент не трогает, его перерегистрируют вручную. В `getWebhookInfo` не должно быть
 `last_error_message`.
 
 ## 7. Станьте владельцем

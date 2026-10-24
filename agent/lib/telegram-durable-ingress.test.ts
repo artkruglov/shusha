@@ -13,6 +13,7 @@
  * - A rich message (Bot API 10.1) reaches dispatch with its text unfolded from the blocks.
  * - A turn silent for a lease, or a stream closed without a boundary, fails and rotates the session.
  * - Button presses have their own small drain pool, so long model turns cannot hold them.
+ * - Any verified message clears the unreachable mark of its chat, a refused file included; a press does not.
  */
 import type { TelegramVerifiedUpdateContext } from "eve/channels/telegram";
 import { parseTelegramUpdate } from "eve/channels/telegram";
@@ -1125,6 +1126,48 @@ describe("createTelegramDurableIngress", () => {
     expect(transcribeVoice).not.toHaveBeenCalled();
     expect(dispatch).not.toHaveBeenCalled();
     expect(waitUntil).not.toHaveBeenCalled();
+  });
+
+  it("clears the unreachable mark of a chat a verified message comes from, even with a refused file", async () => {
+    const storage = repository();
+    storage.value.claimNext.mockReset().mockResolvedValue(null);
+    const noteInboundMessage = vi.fn().mockResolvedValue(undefined);
+    const raw = voicePayload();
+    (raw.message as Record<string, unknown>).chat = { id: -1001, type: "supergroup" };
+    const update = parseTelegramUpdate(raw);
+    if (!update) throw new Error("AGENT_TEST_TELEGRAM_UPDATE_INVALID: Не создано тестовое сообщение");
+    const press = {
+      callback_query: {
+        chat_instance: "1", data: "eve:0", from: { first_name: "Анна", id: 101, is_bot: false }, id: "cb-9",
+        message: { chat: { id: 101, type: "private" }, date: 1_700_000_000, message_id: 88, text: "Кнопка" },
+      },
+      update_id: 1009,
+    };
+    const pressUpdate = parseTelegramUpdate(press);
+    if (!pressUpdate) throw new Error("AGENT_TEST_TELEGRAM_UPDATE_INVALID: Не создано тестовое нажатие");
+    const handle = createTelegramDurableIngress({
+      acceptMedia: vi.fn().mockResolvedValue(false),
+      authorizeVoice: vi.fn(),
+      botUsername: "osinara_bot",
+      handleGuestMessage: vi.fn(),
+      handleGuestReminderCallback: vi.fn().mockResolvedValue(false),
+      handleSoftwareUpdateCallback: vi.fn().mockResolvedValue(false),
+      leaseMilliseconds: 60_000,
+      noteInboundMessage,
+      repository: storage.value,
+      requestSessionRotation: vi.fn(),
+      transcribeVoice: vi.fn(),
+    });
+
+    const response = await handle({ dispatch: vi.fn(), raw, update, waitUntil: vi.fn() } as TelegramVerifiedUpdateContext);
+    await handle({ dispatch: vi.fn(), raw: press, update: pressUpdate, waitUntil: vi.fn() } as TelegramVerifiedUpdateContext);
+
+    expect(response.status).toBe(200);
+    expect(storage.value.enqueue).toHaveBeenCalledTimes(1);
+    expect(noteInboundMessage).toHaveBeenCalledTimes(1);
+    expect(noteInboundMessage).toHaveBeenCalledWith({
+      chatId: "-1001", message: expect.objectContaining({ date: 1_700_000_000 }), updateId: "1001",
+    });
   });
 
   it("dispatches a captionless photo with a non-empty factual model message", async () => {
