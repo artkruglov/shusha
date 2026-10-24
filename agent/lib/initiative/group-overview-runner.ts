@@ -12,10 +12,12 @@ import { recordGroupOverviewDelivery } from "./group-overview-delivery.js";
 import { createGroupOverviewDispatcher } from "./group-overview-dispatch.js";
 import { groupOverviewRepository } from "./group-overview-repository.js";
 import { groupOverviewKeyboard } from "../task-buttons/request-keyboards.js";
+import { claimIfReachable } from "../telegram-reachability/reachability-guard.js";
 
 export function dispatchGroupOverviews(now = new Date()): Promise<number> {
   return createGroupOverviewDispatcher({
-    claim: (group, localDate) => groupOverviewRepository.claim(group, localDate),
+    claim: (group, localDate) => claimIfReachable(group.telegramChatId, "initiative",
+      () => groupOverviewRepository.claim(group, localDate)),
     groups: () => groupOverviewRepository.groups(now),
     keyboard: (group, tasks, at) => groupOverviewKeyboard({ chatId: group.telegramChatId, familyId: group.familyId, now: at, tasks }),
     overview: async (group, at) => ({

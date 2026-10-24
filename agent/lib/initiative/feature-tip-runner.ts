@@ -16,6 +16,7 @@ import { webAppCapabilities } from "../web-app/web-app-hints.js";
 import { createFeatureTipDispatcher } from "./feature-tip-dispatch.js";
 import { featureTipRepository } from "./feature-tip-repository.js";
 import { recordInitiativeDelivery } from "./initiative-delivery.js";
+import { claimIfReachable } from "../telegram-reachability/reachability-guard.js";
 
 export function dispatchFeatureTips(now = new Date()): Promise<number> {
   const capabilities = webAppCapabilities();
@@ -28,7 +29,8 @@ export function dispatchFeatureTips(now = new Date()): Promise<number> {
       const tip = selectFeatureTip({ availability, shown, used });
       return tip === null ? null : { first: shown.size === 0, tip };
     },
-    claim: (recipient, localDate, tip, at) => featureTipRepository.claim(recipient, localDate, tip.id, at),
+    claim: (recipient, localDate, tip, at) => claimIfReachable(recipient.telegramUserId, "initiative",
+      () => featureTipRepository.claim(recipient, localDate, tip.id, at)),
     keyboard: (recipient, tip, at) => featureTipKeyboard({
       familyId: recipient.familyId, now: at, telegramUserId: recipient.telegramUserId, tip,
     }),

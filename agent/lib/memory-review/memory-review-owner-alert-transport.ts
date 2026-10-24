@@ -14,8 +14,8 @@
  * `send` returns the confirmed Telegram message id: a message the bot started must land in the
  * proactive delivery journal, or the person's reply reaches a turn that never saw the question.
  * The unreachable error extends the definite rejection, so every dispatcher treats it as a refusal:
- * nothing was delivered. Dispatchers that release a refused claim for the next tick (the digest, the
- * balance alert) keep the day's claim for this one instead, or every tick would only skip again.
+ * nothing was delivered. Dispatchers check reachability before their claim (`claimIfReachable`, claim
+ * queries that leave marked chats out), so this skip is only the backstop for a chat marked meanwhile.
  */
 import { callTelegramApi } from "eve/channels/telegram";
 

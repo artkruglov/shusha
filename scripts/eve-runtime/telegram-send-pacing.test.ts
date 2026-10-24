@@ -197,6 +197,22 @@ describe("pacedTelegramSend delivery failure observer", () => {
     expect(observer).not.toHaveBeenCalled();
   });
 
+  it("does not hold Telegram's answer behind an observer that never settles", async () => {
+    holder[OBSERVER_KEY] = () => new Promise(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const send = async () => new Response(JSON.stringify({ description: "Forbidden: bot was blocked by the user", ok: false }), { status: 403 });
+
+    const started = Date.now();
+    const result = await pacedTelegramSend("sendMessage", { chat_id: 44 }, send, parse, createTelegramSendPacer());
+
+    expect(result.response.status).toBe(403);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(JSON.parse(String(error.mock.calls[0]?.[0]))).toEqual({
+      chatId: "44", code: "AGENT_TELEGRAM_DELIVERY_OBSERVER_REPORT_TIMEOUT", method: "sendMessage",
+    });
+    error.mockRestore();
+  });
+
   it("logs an observer failure without replacing Telegram's answer", async () => {
     holder[OBSERVER_KEY] = async () => {
       throw new Error("database down");

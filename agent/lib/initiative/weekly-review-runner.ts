@@ -9,10 +9,12 @@ import { personalTimeRepository } from "../personal-time/personal-time-repositor
 import { recordInitiativeDelivery } from "./initiative-delivery.js";
 import { createWeeklyReviewDispatcher } from "./weekly-review-dispatch.js";
 import { weeklyReviewRepository } from "./weekly-review-repository.js";
+import { claimIfReachable } from "../telegram-reachability/reachability-guard.js";
 
 export function dispatchWeeklyReviews(now = new Date()): Promise<number> {
   return createWeeklyReviewDispatcher({
-    claim: (recipient, localDate, at) => weeklyReviewRepository.claim(recipient, localDate, at),
+    claim: (recipient, localDate, at) => claimIfReachable(recipient.telegramUserId, "initiative",
+      () => weeklyReviewRepository.claim(recipient, localDate, at)),
     personalTime: (recipient, at) => personalTimeRepository.conflictFor(recipient.telegramUserId, recipient.familyId, at),
     recipients: () => weeklyReviewRepository.recipients(now),
     record: recordInitiativeDelivery,

@@ -1,6 +1,7 @@
 /**
  * Durable single-attempt delivery. An uncertain POST is never retried. A recipient whose private chat
- * Telegram already calls unreachable (blocked bot, deleted account) is `recipient_unavailable` before any send.
+ * Telegram already calls unreachable (blocked bot, deleted account) keeps the errand queued, like quiet
+ * hours do: the result goes once the person writes again.
  */
 import { database } from "../database.js";
 import { initiativeRepository } from "../initiative/initiative-repository.js";
@@ -65,7 +66,10 @@ export function createErrandDelivery(dependencies = { send: deliverErrandResult 
       const unreachable = await unreachableTelegramRecipient(chatId, "errand", {
         unreachableReason: (id) => telegramReachabilityRepository.unreachableReason(id, client),
       });
-      if (unreachable !== null) return await reject("recipient_unavailable");
+      if (unreachable !== null) {
+        await client.query("COMMIT");
+        return outcome("queued", "recipient_unreachable");
+      }
       const policy = await initiativeRepository.read(row.recipient_user_id, now, client);
       if (!policy) return await reject("recipient_unavailable");
       const decision = decideInitiative(policy.settings, policy.state, now);

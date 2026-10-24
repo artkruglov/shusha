@@ -4,12 +4,18 @@
  * Exports:
  * - `ConfigureTelegramWebhookOptions`: explicit credentials, target, fetch, and timeout inputs.
  * - `configureTelegramWebhook`: sets and verifies the exact Osinara webhook without dropping updates.
+ *
+ * The URL and the `setWebhook` body come from `webhook-registration.ts`, the same builder the running
+ * agent's subscription check uses. The installer never fixes the webhook to an IP: that is only the
+ * optional `TELEGRAM_WEBHOOK_IP_ADDRESS`, which the agent applies; `ipAddress` here exists for that one rule.
  */
-import { TELEGRAM_ALLOWED_UPDATES } from "../../agent/lib/telegram-webhook/allowed-updates.js";
+import {
+  telegramWebhookRegistration,
+  telegramWebhookUrl,
+} from "../../agent/lib/telegram-webhook/webhook-registration.js";
 import { InstallerError } from "./errors.js";
 
 const TELEGRAM_API_ORIGIN = "https://api.telegram.org";
-const TELEGRAM_WEBHOOK_PATH = "/eve/v1/telegram";
 const MAX_TIMEOUT_MS = 120_000;
 const BOT_TOKEN_PATTERN = /^[0-9]+:[A-Za-z0-9_-]+$/u;
 const HOSTNAME_PATTERN = /^(?=.{1,253}$)(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
@@ -18,6 +24,8 @@ const SECRET_PATTERN = /^[A-Za-z0-9_-]{1,256}$/u;
 export interface ConfigureTelegramWebhookOptions {
   readonly fetch: typeof globalThis.fetch;
   readonly hostname: string;
+  /** Validated `TELEGRAM_WEBHOOK_IP_ADDRESS`; the initial installation passes none. */
+  readonly ipAddress?: string | null;
   readonly secretToken: string;
   readonly timeoutMs: number;
   readonly token: string;
@@ -73,13 +81,13 @@ export async function configureTelegramWebhook(
     );
   }
 
-  const targetUrl = `https://${options.hostname}${TELEGRAM_WEBHOOK_PATH}`;
-  const registered = await telegramJson(options, "setWebhook", {
-    // The running agent compares the same list on every tick (`webhook-subscription.ts`).
-    allowed_updates: [...TELEGRAM_ALLOWED_UPDATES],
-    secret_token: options.secretToken,
+  // The hostname passed the pattern above, so its https origin always yields the URL.
+  const targetUrl = telegramWebhookUrl(`https://${options.hostname}`)!;
+  const registered = await telegramJson(options, "setWebhook", telegramWebhookRegistration({
+    ipAddress: options.ipAddress ?? null,
+    secretToken: options.secretToken,
     url: targetUrl,
-  });
+  }));
   if (registered.ok !== true || registered.result !== true) {
     throw new InstallerError(
       "OSINARA_INSTALL_TELEGRAM_WEBHOOK_SET_FAILED",

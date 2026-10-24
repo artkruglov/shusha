@@ -14,7 +14,8 @@
  *   member). Statuses per Bot API 10.3, `ChatMember`. The update changes the mark at once, without
  *   waiting for a proactive send to fail.
  * - The mark is written before Telegram gets 200, so a failed write is retried by Telegram itself;
- *   repeated or reordered deliveries are ordered by the update's date and id in the repository.
+ *   repeated or reordered deliveries are ordered by the update's date and then id in the repository,
+ *   against messages too.
  * - Nothing of the update reaches Eve or the model: it carries no message.
  */
 import type { TelegramGuestUpdateContext } from "eve/channels/telegram";

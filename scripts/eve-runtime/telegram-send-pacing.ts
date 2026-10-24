@@ -24,8 +24,10 @@
  *   `globalThis` under `osinara.telegramDeliveryFailureObserver` (`agent/lib/telegram-reachability/`):
  *   every call passes here, so a blocked bot or a removed group is noticed whichever path wrote. The
  *   report carries `startedAt`, the moment the answered attempt was handed to fetch: a proof of
- *   reachability received after it makes that answer stale. The observer is awaited, so the next send
- *   of the same caller already sees its mark; its own failure is logged and never replaces the answer.
+ *   reachability received after it makes that answer stale. The caller waits for the observer at most
+ *   `DELIVERY_FAILURE_REPORT_WAIT_MS`, so the next send of the same caller usually sees its mark, yet a
+ *   hung database never holds an answer Telegram already gave. A report still running after the wait
+ *   and the observer's own failure are logged by code; neither replaces the answer.
  */
 const PACED_METHODS = new Set([
   "copyMessage",
@@ -51,6 +53,7 @@ const RETRY_AFTER_MAX_SECONDS = 60;
 const ACQUIRE_ROUNDS_MAX = 1_000;
 const PACER_KEY = Symbol.for("osinara.telegramSendPacer");
 const DELIVERY_FAILURE_OBSERVER_KEY = Symbol.for("osinara.telegramDeliveryFailureObserver");
+const DELIVERY_FAILURE_REPORT_WAIT_MS = 500;
 // Calls whose failure can say the chat itself is gone; reads and bot settings never mark a chat.
 const OBSERVED_METHODS = new Set([...PACED_METHODS, "sendChatAction"]);
 
@@ -235,18 +238,28 @@ async function reportDeliveryFailure(method: string, requestBody: unknown, answe
   const chat = chatKey(requestBody);
   const observer = (globalThis as { [key: symbol]: unknown })[DELIVERY_FAILURE_OBSERVER_KEY];
   if (!chat || typeof observer !== "function") return;
-  try {
-    const report: TelegramDeliveryFailureReport = {
-      body: answer.body, chatId: chat.id, method, startedAt: answer.startedAt, status: answer.response.status,
-    };
-    await (observer as (failure: TelegramDeliveryFailureReport) => unknown)(report);
-  } catch (error) {
-    console.error(JSON.stringify({
-      chatId: chat.id,
-      code: "AGENT_TELEGRAM_DELIVERY_OBSERVER_FAILED",
-      errorName: error instanceof Error ? error.name : "UnknownError",
-      method,
-    }));
+  const report: TelegramDeliveryFailureReport = {
+    body: answer.body, chatId: chat.id, method, startedAt: answer.startedAt, status: answer.response.status,
+  };
+  const reported = Promise.resolve()
+    .then(() => (observer as (failure: TelegramDeliveryFailureReport) => unknown)(report))
+    .then(() => "reported" as const, (error: unknown) => {
+      console.error(JSON.stringify({
+        chatId: chat.id,
+        code: "AGENT_TELEGRAM_DELIVERY_OBSERVER_FAILED",
+        errorName: error instanceof Error ? error.name : "UnknownError",
+        method,
+      }));
+      return "failed" as const;
+    });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const waited = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), DELIVERY_FAILURE_REPORT_WAIT_MS);
+  });
+  const outcome = await Promise.race([reported, waited]);
+  clearTimeout(timer);
+  if (outcome === "timeout") {
+    console.error(JSON.stringify({ chatId: chat.id, code: "AGENT_TELEGRAM_DELIVERY_OBSERVER_REPORT_TIMEOUT", method }));
   }
 }
 

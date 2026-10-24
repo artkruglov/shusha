@@ -11,12 +11,13 @@
  *   had lost its retry job; its lease kept being renewed, so nothing looked wrong. Workflow's
  *   stuck-run scan now re-enqueues such runs within 10–25 minutes; this alert is for what it misses.
  * - The claim is written before sending: a crash after the claim loses that one alert rather than
- *   repeating it every tick.
+ *   repeating it every tick. While Telegram no longer delivers to any owner, no claim is taken at all.
  */
 import { database } from "./database.js";
 import { readTelegramAgentIdentity } from "./telegram-agent-identity.js";
 import { ownerHealthDigestRepository, type OwnerHealthRecipient } from "./health/owner-health-digest-repository.js";
 import { memoryReviewOwnerAlertTransport } from "./memory-review/memory-review-owner-alert-transport.js";
+import { unreachableTelegramRecipient } from "./telegram-reachability/reachability-guard.js";
 
 export const TELEGRAM_INGRESS_STALL_ALERT_AFTER_MS = 30 * 60 * 1000;
 
@@ -61,16 +62,26 @@ export async function dispatchIngressStallAlerts(dependencies: {
   deliver: (input: { chatId: string; text: string }) => Promise<void>;
   now?: () => Date;
   recipients: () => Promise<OwnerHealthRecipient[]>;
+  /** True when Telegram no longer delivers to that owner's chat (migration 199). */
+  unreachable?: (chatId: string) => Promise<boolean>;
 } = {
   claim: () => claimStalledIngress(),
   deliver: (input) => memoryReviewOwnerAlertTransport.deliver(input),
   recipients: () => ownerHealthDigestRepository.recipients(),
+  unreachable: async (chatId) => await unreachableTelegramRecipient(chatId, "ingress_stall_alert") !== null,
 }): Promise<number> {
-  const stalled = await dependencies.claim();
-  if (stalled.length === 0) return 0;
   // Only the operator hears about it (recipients() is the owner of the earliest family): the alert names a chat type and a
   // time, never a family or a text, and other families have no owner-facing channel for installation health.
-  const owners = await dependencies.recipients();
+  const recipients = await dependencies.recipients();
+  const owners: OwnerHealthRecipient[] = [];
+  for (const owner of recipients) {
+    if (!await dependencies.unreachable?.(owner.ownerTelegramUserId)) owners.push(owner);
+  }
+  // The claim stamps `stall_alerted_at` for good, so it is not taken while no owner can be told: the stall is
+  // reported once the owner's chat is back. The skip itself is logged at most once an hour.
+  if (recipients.length > 0 && owners.length === 0) return 0;
+  const stalled = await dependencies.claim();
+  if (stalled.length === 0) return 0;
   const now = (dependencies.now ?? (() => new Date()))();
   for (const item of stalled) {
     console.error(JSON.stringify({ code: "AGENT_TELEGRAM_INGRESS_STALLED", receivedAt: item.receivedAt, updateId: item.updateId }));

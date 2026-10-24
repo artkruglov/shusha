@@ -8,7 +8,7 @@
  * - Nothing is sent before the digest hour; one send per family per day through the claim.
  * - A failed delivery releases the claim and does not stop other families.
  * - Telegram's webhook view: piled-up updates, a fresh delivery error or a failed check are failures,
- *   read once per pass; an unreachable owner chat keeps the day's claim.
+ *   read once per pass; an unreachable owner chat takes no claim and keeps the day's digest.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -246,14 +246,23 @@ describe("createOwnerHealthDigestDispatcher", () => {
     expect(String(deliver.mock.calls[0]?.[0]?.text)).toContain("не удалось проверить вебхук");
   });
 
-  it("keeps the day's claim for an owner chat Telegram calls unreachable", async () => {
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
+  it("keeps the day's digest for an unreachable owner instead of spending it on a skip", async () => {
+    // The skip line comes from the reachability guard, at most once an hour; the dispatcher adds none per tick.
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const skipped = dependencies({ unreachable: vi.fn().mockResolvedValue(true) });
+    await expect(createOwnerHealthDigestDispatcher(skipped)(new Date("2026-09-09T06:10:00.000Z"))).resolves.toBe(0);
+    await expect(createOwnerHealthDigestDispatcher(skipped)(new Date("2026-09-09T06:20:00.000Z"))).resolves.toBe(0);
+    expect(skipped.claim).not.toHaveBeenCalled();
+
     const deps = dependencies({
       deliver: vi.fn().mockRejectedValue(new TelegramRecipientUnreachableError("101", "blocked")),
     });
     await createOwnerHealthDigestDispatcher(deps)(new Date("2026-09-09T06:10:00.000Z"));
-    expect(deps.release).not.toHaveBeenCalled();
-    expect(deps.abandon).toHaveBeenCalledWith("family-1", "2026-09-09", "AGENT_TELEGRAM_RECIPIENT_UNREACHABLE");
+    expect(deps.release).toHaveBeenCalledWith("family-1", "2026-09-09");
+    expect(deps.abandon).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it("lets a refused delivery be retried, because nothing was sent", async () => {

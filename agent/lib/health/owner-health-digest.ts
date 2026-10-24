@@ -15,7 +15,7 @@
  *   durable claim first, so a restart neither skips a day nor sends it twice.
  * - Telegram's webhook view is read once per pass: updates piling up or a fresh delivery error are a
  *   failure line (`telegram-webhook-health.ts`), a failed check is the line «не удалось проверить вебхук».
- * - An owner chat Telegram calls unreachable keeps today's claim: the next tick would only skip again.
+ * - An owner chat Telegram calls unreachable takes no claim: the day's digest goes once the chat is back.
  */
 import { DEEPSEEK_BALANCE_ALERT_USD } from "../../config.js";
 import { isWithinQuietHours } from "../initiative/quiet-hours.js";
@@ -30,7 +30,7 @@ import {
   readTelegramWebhookHealth,
   type TelegramWebhookHealth,
 } from "./telegram-webhook-health.js";
-import { TELEGRAM_RECIPIENT_UNREACHABLE_CODE } from "../telegram-reachability/recipient-failure.js";
+import { unreachableTelegramRecipient } from "../telegram-reachability/reachability-guard.js";
 import { familyBudgetRepository, formatFamilySpend } from "../family-budget-repository.js";
 import {
   MemoryReviewOwnerAlertTransportError,
@@ -134,6 +134,8 @@ interface OwnerHealthDigestDependencies {
   claim(familyId: string, digestDate: string, now: Date): Promise<boolean>;
   complete(familyId: string, digestDate: string, now: Date, textLength: number): Promise<void>;
   deliver(input: { chatId: string; text: string }): Promise<void>;
+  /** True when Telegram no longer delivers to the owner's chat: the claim is not taken, the next tick asks again. */
+  unreachable?(chatId: string): Promise<boolean>;
   /** Вебхук глазами Telegram; читается один раз за проход, без зависимости строки нет. */
   webhook?(): Promise<TelegramWebhookHealth>;
   /** Блок о других семьях установки для оператора; без зависимости блока нет. */
@@ -160,6 +162,7 @@ export function createOwnerHealthDigestDispatcher(dependencies: OwnerHealthDiges
       // Заявка не берётся вовсе: взятая и неотправленная, она стоила бы владельцу дайджеста за
       // сутки, а тихие часы кончаются в тех же сутках, и следующий тик отправит его сам.
       if (isWithinQuietHours(recipient, now)) continue;
+      if (await dependencies.unreachable?.(recipient.ownerTelegramUserId)) continue;
       if (!await dependencies.claim(recipient.familyId, digestDate, now)) continue;
       try {
         const windowStart = new Date(now.getTime() - OWNER_HEALTH_DIGEST_WINDOW_MILLISECONDS);
@@ -183,9 +186,12 @@ export function createOwnerHealthDigestDispatcher(dependencies: OwnerHealthDiges
         // дайджест это ровно то молчание, ради которого он и существует. Любой другой сбой
         // оставляет исход неизвестным: Telegram мог сообщение принять, поэтому повтора нет.
         const refused = error instanceof MemoryReviewOwnerAlertTransportError;
+        // The chat became unreachable after the check above: nothing went out, the claim waits for its return.
         if (error instanceof TelegramRecipientUnreachableError) {
-          await dependencies.abandon(recipient.familyId, digestDate, TELEGRAM_RECIPIENT_UNREACHABLE_CODE);
-        } else if (refused) await dependencies.release(recipient.familyId, digestDate);
+          await dependencies.release(recipient.familyId, digestDate);
+          continue;
+        }
+        if (refused) await dependencies.release(recipient.familyId, digestDate);
         else await dependencies.abandon(recipient.familyId, digestDate, "AGENT_OWNER_HEALTH_DIGEST_AMBIGUOUS");
         console.error(JSON.stringify({
           code: refused ? "AGENT_OWNER_HEALTH_DIGEST_FAILED" : "AGENT_OWNER_HEALTH_DIGEST_AMBIGUOUS",
@@ -205,6 +211,7 @@ export function dispatchOwnerHealthDigests(now = new Date()): Promise<number> {
     claim: (familyId, digestDate, at) => ownerHealthDigestRepository.claim(familyId, digestDate, at),
     complete: (familyId, digestDate, at, length) => ownerHealthDigestRepository.complete(familyId, digestDate, at, length),
     deliver: (input) => memoryReviewOwnerAlertTransport.deliver(input),
+    unreachable: async (chatId) => await unreachableTelegramRecipient(chatId, "proactive_message") !== null,
     webhook: () => readTelegramWebhookHealth({ botToken: process.env.TELEGRAM_BOT_TOKEN }),
     otherFamilies: async (operatorFamilyId, windowStart) => {
       const [families, groups, spend] = await Promise.all([

@@ -3,14 +3,20 @@
  *
  * Constructs covered:
  * - `unreachableTelegramRecipient`: a marked chat is skipped with a log of id, kind and reason only.
- * - `noteInboundTelegramMessage`: a message is recorded as proof with its date, update id and receipt
- *   time; the service message about the bot's own removal is not proof; a failed write is logged and
- *   never thrown.
+ * - `unreachableTelegramRecipient` logs a skip of the same chat and kind at most once an hour.
+ * - `claimIfReachable`: no claim for an unreachable chat.
+ * - `noteInboundTelegramMessage`: a message is recorded as proof with its date, update id and receipt time;
+ *   the service message about the bot's own removal is not proof; a failed write is logged and never thrown.
  * - `isTelegramBotItself`: the bot is recognized by the id in its token, or by its username.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { isTelegramBotItself, noteInboundTelegramMessage, unreachableTelegramRecipient } from "./reachability-guard.js";
+import {
+  claimIfReachable,
+  isTelegramBotItself,
+  noteInboundTelegramMessage,
+  unreachableTelegramRecipient,
+} from "./reachability-guard.js";
 
 const self = { id: "7000", username: "shusha_bot" };
 const receivedAt = new Date("2026-10-24T06:00:00.000Z");
@@ -38,6 +44,43 @@ describe("unreachableTelegramRecipient", () => {
     await expect(unreachableTelegramRecipient("101", "errand", {
       unreachableReason: vi.fn().mockRejectedValue(new Error("connection terminated")),
     })).rejects.toThrow("connection terminated");
+  });
+});
+
+describe("skip log and claim", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("logs a repeated skip of the same chat at most once an hour, and again after the chat came back", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const marked = { unreachableReason: vi.fn().mockResolvedValue("kicked") };
+    let clock = 1_000_000;
+    const now = () => clock;
+
+    await unreachableTelegramRecipient("-5001", "initiative", marked, now);
+    clock += 10 * 60 * 1_000;
+    await unreachableTelegramRecipient("-5001", "initiative", marked, now);
+    expect(warn).toHaveBeenCalledTimes(1);
+    clock += 60 * 60 * 1_000;
+    await unreachableTelegramRecipient("-5001", "initiative", marked, now);
+    expect(warn).toHaveBeenCalledTimes(2);
+    await unreachableTelegramRecipient("-5001", "initiative", { unreachableReason: vi.fn().mockResolvedValue(null) }, now);
+    await unreachableTelegramRecipient("-5001", "initiative", marked, now);
+    expect(warn).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not take a claim for a chat marked unreachable", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const claim = vi.fn().mockResolvedValue("ref-1");
+    const { telegramReachabilityRepository } = await import("./reachability-repository.js");
+    const lookup = vi.spyOn(telegramReachabilityRepository, "unreachableReason");
+
+    lookup.mockResolvedValueOnce("blocked");
+    await expect(claimIfReachable("5002", "initiative", claim)).resolves.toBeNull();
+    expect(claim).not.toHaveBeenCalled();
+
+    lookup.mockResolvedValueOnce(null);
+    await expect(claimIfReachable("5002", "initiative", claim)).resolves.toBe("ref-1");
+    expect(claim).toHaveBeenCalledTimes(1);
   });
 });
 

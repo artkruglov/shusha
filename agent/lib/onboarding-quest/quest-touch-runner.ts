@@ -10,7 +10,7 @@
  */
 import { recordInitiativeDelivery } from "../initiative/initiative-delivery.js";
 import { TelegramRecipientUnreachableError } from "../memory-review/memory-review-owner-alert-transport.js";
-import { unreachableTelegramRecipient } from "../telegram-reachability/reachability-guard.js";
+import { claimIfReachable, unreachableTelegramRecipient } from "../telegram-reachability/reachability-guard.js";
 import { personalTimeRepository } from "../personal-time/personal-time-repository.js";
 import { questAvailability } from "./quest-availability.js";
 import { questCardKeyboard } from "./quest-keyboard.js";
@@ -26,7 +26,8 @@ export function dispatchQuestTouches(now = new Date()): Promise<number> {
       if (unreachable !== null) throw new TelegramRecipientUnreachableError(input.chatId, unreachable);
       return questTransport.card(input);
     },
-    claim: (person, localDate, day, at) => questRepository.claimTouch(person, localDate, day, at),
+    claim: (person, localDate, day, at) => claimIfReachable(person.telegramUserId, "initiative",
+      () => questRepository.claimTouch(person, localDate, day, at)),
     facts: (person) => questRepository.facts(person),
     keyboard: (person, step, at) => questCardKeyboard({
       familyId: person.familyId, now: at, step, telegramUserId: person.telegramUserId,

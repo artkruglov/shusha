@@ -1,13 +1,12 @@
 /**
  * Trusted proactive Telegram reminder delivery.
  *
- * Exports:
+ * Export:
  * - `deliverTelegramReminder`: sends deterministic text and returns its durable delivery receipt.
- * - `deliverReachableTelegramReminder`: the same after the reachability check of the target chat.
  *
  * A chat Telegram calls gone (blocked bot, deleted account, bot removed from the group) fails the reminder
- * with `AGENT_TELEGRAM_RECIPIENT_UNREACHABLE`, and a chat already marked so is skipped without a request:
- * the reminder fails with the same code instead of writing into the chat again.
+ * with `AGENT_TELEGRAM_RECIPIENT_UNREACHABLE`. A chat already marked so is never claimed at all
+ * (`reminder-dispatch-repository.ts`): its reminder waits for the chat's return instead of failing.
  */
 import { callTelegramApi } from "eve/channels/telegram";
 
@@ -15,7 +14,6 @@ import { TELEGRAM_API_REQUEST_TIMEOUT_MS } from "../../config.js";
 import { AppError } from "../app-error.js";
 import { TelegramRecipientUnreachableError } from "../memory-review/memory-review-owner-alert-transport.js";
 import { classifyTelegramRecipientFailure } from "../telegram-reachability/recipient-failure.js";
-import { unreachableTelegramRecipient } from "../telegram-reachability/reachability-guard.js";
 import type { ProactiveDeliveryReceipt } from "../proactive-deliveries/proactive-delivery-repository.js";
 import type { ClaimedReminder } from "./reminder-dispatch-repository.js";
 
@@ -94,10 +92,4 @@ export async function deliverTelegramReminder(job: ClaimedReminder): Promise<Pro
     }));
     throw error;
   }
-}
-
-export async function deliverReachableTelegramReminder(job: ClaimedReminder): Promise<ProactiveDeliveryReceipt> {
-  const reason = await unreachableTelegramRecipient(job.telegramChatId, "reminder");
-  if (reason !== null) throw new TelegramRecipientUnreachableError(job.telegramChatId, reason);
-  return deliverTelegramReminder(job);
 }

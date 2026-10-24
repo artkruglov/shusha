@@ -3,12 +3,9 @@
  *
  * Exports:
  * - `createSoftwareUpdateProposalDelivery`: placeholder, exact binding, then actionable edit.
- * - `deliverSoftwareUpdateProposal`: production delivery with PostgreSQL and Telegram adapters; an owner
- *   chat Telegram already calls unreachable fails definitely before the placeholder is sent.
+ * - `deliverSoftwareUpdateProposal`: production delivery with PostgreSQL and Telegram adapters.
  */
 import { softwareUpdateRepository } from "./repository.js";
-import { TELEGRAM_RECIPIENT_UNREACHABLE_CODE } from "../telegram-reachability/recipient-failure.js";
-import { unreachableTelegramRecipient } from "../telegram-reachability/reachability-guard.js";
 import {
   SoftwareUpdateTransportError,
   softwareUpdateTelegramTransport,
@@ -126,25 +123,5 @@ export function createSoftwareUpdateProposalDelivery(dependencies: ProposalDeliv
 
 export const deliverSoftwareUpdateProposal = createSoftwareUpdateProposalDelivery({
   repository: softwareUpdateRepository,
-  transport: {
-    editProposal: (input) => softwareUpdateTelegramTransport.editProposal(input),
-    async sendPlaceholder(input) {
-      // Nothing reaches Telegram before this check, so its own failure is a definite one too.
-      const unreachable = await unreachableTelegramRecipient(input.chatId, "software_update").catch(() => {
-        throw new SoftwareUpdateTransportError(
-          "failed",
-          "AGENT_TELEGRAM_REACHABILITY_UNAVAILABLE",
-          "Не удалось проверить, доступен ли личный чат владельца; предложение не отправлено",
-        );
-      });
-      if (unreachable !== null) {
-        throw new SoftwareUpdateTransportError(
-          "failed",
-          TELEGRAM_RECIPIENT_UNREACHABLE_CODE,
-          "Telegram не доставляет сообщения в личный чат владельца: бот заблокирован или аккаунт удалён",
-        );
-      }
-      return softwareUpdateTelegramTransport.sendPlaceholder(input);
-    },
-  },
+  transport: softwareUpdateTelegramTransport,
 });

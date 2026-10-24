@@ -279,6 +279,13 @@ export const agentScheduleDispatchRepository = {
            JOIN users ON users.id = schedule.author_user_id
           WHERE schedule.status = 'active' AND schedule.next_run_at <= $1
             AND schedule.attempts < $3
+            -- A chat Telegram calls unreachable (migration 199) runs nothing either: the schedule waits,
+            -- unfailed and without a model call, and its due run goes once the chat is reachable again.
+            AND NOT EXISTS (
+              SELECT 1 FROM telegram_chat_reachability AS reachability
+               WHERE reachability.telegram_chat_id = schedule.telegram_chat_id
+                 AND reachability.unreachable_reason IS NOT NULL
+            )
             -- A family past its monthly model budget (migration 181) runs nothing on its own either: the
             -- schedule waits, unfailed, and its due run goes once the next UTC month starts.
             AND NOT EXISTS (

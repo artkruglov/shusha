@@ -11,13 +11,17 @@
  *   only when no proof of reachability arrived after that send started. A 403 is Telegram's answer at
  *   the moment of the request; an unblock or a message received meanwhile is newer than it. The check
  *   and the write are one statement on one row, so a concurrent proof cannot slip between them.
- * - `applyMembershipChange`: Telegram's `my_chat_member` marks or clears the chat, but only when it
- *   is newer than the last applied one: parallel webhook connections may deliver a block and the
- *   following unblock in either order. A change that shows the bot present is proof of reachability.
+ * - Order between Telegram updates is (Telegram date of the event, update id): (`last_event_at`,
+ *   `last_update_id`) is the newest message or membership change applied to the chat, and an update not
+ *   newer by that pair changes nothing. A later date wins, an equal date is decided by update id; the id
+ *   alone is no order, since after a week without updates Telegram picks the next one at random (Bot API,
+ *   `Update`). Parallel webhook connections may deliver a block, the unblock and a message in any order;
+ *   a delayed block never silences a chat that has written since.
+ * - `applyMembershipChange`: Telegram's `my_chat_member` marks or clears the chat. A change that shows
+ *   the bot present is proof of reachability.
  * - `recordInboundMessage`: a message from the chat proves the bot is reachable there and clears the
- *   mark. A message that is not newer than the last applied membership change, by date and then by
- *   update id, proves nothing about it. The proof is recorded even for a chat without a mark, so a
- *   late 403 of an older send cannot mark it afterwards.
+ *   mark. The proof is recorded even for a chat without a mark, so a late 403 of an older send cannot
+ *   mark it afterwards.
  * - Proof times are the application's receipt times and send starts come from the same clock, so a
  *   stale answer is told by comparison, not by Telegram's second-precision dates.
  * - `unreachableReason`: what a proactive send reads before it writes.
@@ -28,6 +32,7 @@ import { database } from "../database.js";
 import type { TelegramRecipientUnreachableReason } from "./recipient-failure.js";
 
 export interface TelegramMembershipChange {
+  /** `my_chat_member.date`: when Telegram says the change happened. */
   readonly changedAt: Date;
   readonly chatId: string;
   /** Null when the change shows the bot back in the chat. */
@@ -40,13 +45,14 @@ export interface TelegramMembershipChange {
 export interface TelegramInboundEvidence {
   readonly chatId: string;
   readonly receivedAt: Date;
+  /** The message's `date`. */
   readonly sentAt: Date;
   readonly updateId: string;
 }
 
 export interface TelegramReachabilityRepository {
   applyMembershipChange(change: TelegramMembershipChange): Promise<boolean>;
-  /** Null when the message is not newer than the last membership change; otherwise whether a mark was cleared. */
+  /** Null when the message is not newer than the last applied update; otherwise whether a mark was cleared. */
   recordInboundMessage(evidence: TelegramInboundEvidence): Promise<{ readonly cleared: boolean } | null>;
   /** False when a proof of reachability arrived after the failed send started. */
   markUndeliverable(chatId: string, reason: TelegramRecipientUnreachableReason, sendStartedAt: Date): Promise<boolean>;
@@ -73,24 +79,23 @@ export const telegramReachabilityRepository: TelegramReachabilityRepository = {
   async applyMembershipChange(change) {
     const result = await database().query(
       `INSERT INTO telegram_chat_reachability AS current
-         (telegram_chat_id, unreachable_reason, unreachable_since, source,
-          membership_update_id, membership_changed_at, reachable_evidence_at)
+         (telegram_chat_id, unreachable_reason, unreachable_since, source, last_event_at, last_update_id,
+          reachable_evidence_at)
        VALUES ($1, $2::text, CASE WHEN $2::text IS NULL THEN NULL ELSE now() END,
-               'membership_update', $3, $4, CASE WHEN $2::text IS NULL THEN $5::timestamptz END)
+               'membership_update', $5, $3, CASE WHEN $2::text IS NULL THEN $4::timestamptz END)
        ON CONFLICT (telegram_chat_id) DO UPDATE
          SET unreachable_reason = EXCLUDED.unreachable_reason,
              unreachable_since = CASE WHEN EXCLUDED.unreachable_reason IS NULL THEN NULL
                ELSE COALESCE(current.unreachable_since, EXCLUDED.unreachable_since) END,
              source = 'membership_update',
-             membership_update_id = EXCLUDED.membership_update_id,
-             membership_changed_at = EXCLUDED.membership_changed_at,
+             last_event_at = EXCLUDED.last_event_at,
+             last_update_id = EXCLUDED.last_update_id,
              reachable_evidence_at = GREATEST(current.reachable_evidence_at, EXCLUDED.reachable_evidence_at),
              updated_at = now()
-         WHERE current.membership_changed_at IS NULL
-            OR (EXCLUDED.membership_changed_at, EXCLUDED.membership_update_id)
-               > (current.membership_changed_at, current.membership_update_id)
+         WHERE current.last_event_at IS NULL
+            OR (EXCLUDED.last_event_at, EXCLUDED.last_update_id) > (current.last_event_at, current.last_update_id)
        RETURNING 1`,
-      [change.chatId, change.reason, change.updateId, change.changedAt, change.receivedAt],
+      [change.chatId, change.reason, change.updateId, change.receivedAt, change.changedAt],
     );
     return (result.rowCount ?? 0) > 0;
   },
@@ -102,16 +107,19 @@ export const telegramReachabilityRepository: TelegramReachabilityRepository = {
       `WITH prior AS (
          SELECT unreachable_reason FROM telegram_chat_reachability WHERE telegram_chat_id = $1
        )
-       INSERT INTO telegram_chat_reachability AS current (telegram_chat_id, source, reachable_evidence_at)
-       VALUES ($1, 'inbound_message', $4)
+       INSERT INTO telegram_chat_reachability AS current
+         (telegram_chat_id, source, last_event_at, last_update_id, reachable_evidence_at)
+       VALUES ($1, 'inbound_message', $4, $2, $3)
        ON CONFLICT (telegram_chat_id) DO UPDATE
          SET unreachable_reason = NULL, unreachable_since = NULL, source = 'inbound_message',
+             last_event_at = EXCLUDED.last_event_at,
+             last_update_id = EXCLUDED.last_update_id,
              reachable_evidence_at = GREATEST(current.reachable_evidence_at, EXCLUDED.reachable_evidence_at),
              updated_at = now()
-         WHERE current.membership_changed_at IS NULL
-            OR ($2::timestamptz, $3::bigint) > (current.membership_changed_at, current.membership_update_id)
+         WHERE current.last_event_at IS NULL
+            OR (EXCLUDED.last_event_at, EXCLUDED.last_update_id) > (current.last_event_at, current.last_update_id)
        RETURNING (SELECT unreachable_reason IS NOT NULL FROM prior) IS TRUE AS cleared`,
-      [evidence.chatId, evidence.sentAt, evidence.updateId, evidence.receivedAt],
+      [evidence.chatId, evidence.updateId, evidence.receivedAt, evidence.sentAt],
     );
     const row = result.rows[0];
     return row === undefined ? null : { cleared: row.cleared };

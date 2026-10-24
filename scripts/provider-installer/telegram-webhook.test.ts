@@ -45,6 +45,21 @@ describe("configureTelegramWebhook", () => {
     expect(String(fetch.mock.calls[1]?.[0])).toContain("/getWebhookInfo");
   });
 
+  it("sends ip_address only when it is given explicitly", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: true })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ok: true, result: { has_custom_certificate: false, pending_update_count: 0, url: "https://bot.example.com/eve/v1/telegram" },
+      })));
+
+    await configureTelegramWebhook({
+      fetch, hostname: "bot.example.com", ipAddress: "203.0.113.7", secretToken: "webhook_secret-123", timeoutMs: 30_000,
+      token: "123456:Abc_def-123",
+    });
+
+    expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toMatchObject({ ip_address: "203.0.113.7" });
+  });
+
   it("fails when Telegram does not confirm the exact target", async () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: true })))

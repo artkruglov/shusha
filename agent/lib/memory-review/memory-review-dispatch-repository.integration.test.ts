@@ -290,6 +290,34 @@ describeWithDatabase("memory review dispatch repository", () => {
     );
   });
 
+  it("does not lease an alert to an owner Telegram no longer delivers to, and leases it once the chat is back", async () => {
+    const { claim } = await claimBackgroundBatch();
+    const session = await memoryReviewSessionRepository.prepare(claim, new Date());
+    await memoryReviewDispatchRepository.markAmbiguous(
+      claim, "AGENT_MEMORY_REVIEW_HANDOFF_AMBIGUOUS", session.id,
+    );
+    await database().query(
+      `INSERT INTO telegram_chat_reachability (telegram_chat_id, unreachable_reason, unreachable_since, source)
+       VALUES ($1, 'blocked', now(), 'delivery')
+       ON CONFLICT (telegram_chat_id) DO UPDATE SET unreachable_reason = 'blocked', unreachable_since = now()`,
+      ["agent-memory-author"],
+    );
+    try {
+      await expect(memoryReviewOwnerAlertRepository.claimPending({
+        leaseMilliseconds: 60_000, limit: 1, now: new Date("2026-08-12T10:01:00.000Z"),
+      })).resolves.toEqual([]);
+      await expect(database().query(
+        "SELECT status::text FROM memory_review_owner_alerts WHERE batch_id = $1", [claim.batchId],
+      )).resolves.toMatchObject({ rows: [{ status: "pending" }] });
+    } finally {
+      await database().query("DELETE FROM telegram_chat_reachability WHERE telegram_chat_id = $1", ["agent-memory-author"]);
+    }
+    const [back] = await memoryReviewOwnerAlertRepository.claimPending({
+      leaseMilliseconds: 60_000, limit: 1, now: new Date("2026-08-12T10:02:00.000Z"),
+    });
+    expect(back).toMatchObject({ batchId: claim.batchId });
+  });
+
   it("terminalizes an ownerless alert without blocking other claims", async () => {
     const { claim, fixture } = await claimBackgroundBatch();
     const session = await memoryReviewSessionRepository.prepare(claim, new Date());
