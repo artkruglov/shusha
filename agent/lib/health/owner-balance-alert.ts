@@ -10,13 +10,16 @@
  *   balance and warns the owner the first time it is low or blocked on a UTC day.
  * - Sent through the Bot API without the model, so it arrives even when every model call is 402.
  * - Quiet hours postpone it; a Telegram refusal releases the claim, an unclear send stays terminal.
+ *   An owner chat Telegram calls unreachable takes no claim: the alert goes once the chat is back.
  */
 import { DEEPSEEK_BALANCE_ALERT_USD } from "../../config.js";
 import { isWithinQuietHours } from "../initiative/quiet-hours.js";
 import {
   MemoryReviewOwnerAlertTransportError,
   memoryReviewOwnerAlertTransport,
+  TelegramRecipientUnreachableError,
 } from "../memory-review/memory-review-owner-alert-transport.js";
+import { unreachableTelegramRecipient } from "../telegram-reachability/reachability-guard.js";
 import { readConfiguredDeepSeekBalance } from "./deepseek-balance.js";
 import { formatDeepSeekBalance, type DeepSeekBalance } from "./model-spend.js";
 import { ownerBalanceAlertRepository } from "./owner-balance-alert-repository.js";
@@ -28,6 +31,8 @@ interface OwnerBalanceAlertDependencies {
   claim(familyId: string, alertDate: string, now: Date): Promise<boolean>;
   complete(familyId: string, alertDate: string, now: Date): Promise<void>;
   deliver(input: { chatId: string; text: string }): Promise<void>;
+  /** True when Telegram no longer delivers to the owner's chat: the claim is not taken, the next tick asks again. */
+  unreachable?(chatId: string): Promise<boolean>;
   recipients(): Promise<OwnerHealthRecipient[]>;
   release(familyId: string, alertDate: string): Promise<void>;
   readonly thresholdUsd: number;
@@ -41,6 +46,7 @@ export function createOwnerBalanceAlertDispatcher(dependencies: OwnerBalanceAler
     let sent = 0;
     for (const recipient of await dependencies.recipients()) {
       if (isWithinQuietHours(recipient, now)) continue;
+      if (await dependencies.unreachable?.(recipient.ownerTelegramUserId)) continue;
       if (!await dependencies.claim(recipient.familyId, alertDate, now)) continue;
       try {
         await dependencies.deliver({ chatId: recipient.ownerTelegramUserId, text: line.text });
@@ -49,6 +55,11 @@ export function createOwnerBalanceAlertDispatcher(dependencies: OwnerBalanceAler
         sent += 1;
       } catch (error) {
         const refused = error instanceof MemoryReviewOwnerAlertTransportError;
+        // The chat became unreachable after the check above: nothing went out, the claim waits for its return.
+        if (error instanceof TelegramRecipientUnreachableError) {
+          await dependencies.release(recipient.familyId, alertDate);
+          continue;
+        }
         if (refused) await dependencies.release(recipient.familyId, alertDate);
         else await dependencies.abandon(recipient.familyId, alertDate, "AGENT_OWNER_BALANCE_ALERT_AMBIGUOUS");
         console.error(JSON.stringify({
@@ -69,6 +80,7 @@ export function dispatchOwnerBalanceAlerts(now = new Date()): Promise<number> {
     claim: (familyId, alertDate, at) => ownerBalanceAlertRepository.claim(familyId, alertDate, at),
     complete: (familyId, alertDate, at) => ownerBalanceAlertRepository.complete(familyId, alertDate, at),
     deliver: (input) => memoryReviewOwnerAlertTransport.deliver(input),
+    unreachable: async (chatId) => await unreachableTelegramRecipient(chatId, "proactive_message") !== null,
     recipients: () => ownerHealthDigestRepository.recipients(),
     release: (familyId, alertDate) => ownerBalanceAlertRepository.release(familyId, alertDate),
     thresholdUsd: DEEPSEEK_BALANCE_ALERT_USD,

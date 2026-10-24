@@ -4,6 +4,9 @@
  * Exports:
  * - `createAgentScheduleDispatcher`: injectable deterministic lease-to-Eve handoff processor.
  * - `dispatchDueAgentSchedules`: production dispatcher used by the Eve minute schedule.
+ *
+ * A schedule whose chat Telegram already calls unreachable is never claimed (`claimDue`): it waits for the
+ * chat's return instead of failing, and costs no model call meanwhile.
  */
 import { telegramContinuationToken } from "eve/channels/telegram";
 import type { ScheduleToFn } from "eve/schedules";

@@ -16,10 +16,12 @@ import { memoryReviewOwnerAlertTransport } from "../memory-review/memory-review-
 import { personalTimeRepository } from "../personal-time/personal-time-repository.js";
 import { overviewKeyboard } from "../task-buttons/overview-keyboard.js";
 import { webAppUrl } from "../web-app/web-app-menu.js";
+import { claimIfReachable } from "../telegram-reachability/reachability-guard.js";
 
 export function dispatchDailyOverviews(now = new Date()): Promise<number> {
   return createDailyOverviewDispatcher({
-    claim: (recipient, localDate) => dailyOverviewRepository.claim(recipient, localDate),
+    claim: (recipient, localDate) => claimIfReachable(recipient.telegramUserId, "initiative",
+      () => dailyOverviewRepository.claim(recipient, localDate)),
     keyboard: (recipient, overview, at) => overviewKeyboard({
       familyId: recipient.familyId, now: at, openCount: overview.openCount,
       shown: overview.shown, telegramUserId: recipient.telegramUserId, webAppUrl: webAppUrl(),

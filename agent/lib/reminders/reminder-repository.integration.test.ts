@@ -84,7 +84,7 @@ function familyAuth(fixture: Fixture, user: "member" | "owner") {
 describeWithDatabase("reminder repositories", () => {
   beforeEach(async () => {
     await database().query(
-      "TRUNCATE reminders, user_notification_settings, telegram_groups, family_memberships, users, families CASCADE",
+      "TRUNCATE reminders, user_notification_settings, telegram_groups, family_memberships, users, families, telegram_chat_reachability CASCADE",
     );
   });
   afterAll(async () => closeDatabase());
@@ -384,6 +384,37 @@ describeWithDatabase("reminder repositories", () => {
 
     const { items: [stored] } = await reminderRepository.list(auth, { limit: 100 });
     expect(stored).toMatchObject({ id: reminder.id, nextRunAt: "2026-03-29T07:00:00.000Z", status: "active" });
+  });
+
+  it("leaves a reminder to an unreachable chat active and unclaimed, and delivers it late once the chat is back", async () => {
+    const fixture = await createFixture();
+    const auth = privateAuth(fixture, "member");
+    await reminderRepository.configureNotifications(auth, { quietEnd: null, quietStart: null, timezone: "UTC" });
+    const reminder = await reminderRepository.create(auth, {
+      content: "Дождаться",
+      firstRunAt: new Date("2026-07-12T10:00:00.000Z"),
+      operationKey: "unreachable-created",
+      recurrence: null,
+      scope: "personal",
+      timezone: "UTC",
+    });
+    await database().query(
+      `INSERT INTO telegram_chat_reachability (telegram_chat_id, unreachable_reason, unreachable_since, source)
+       VALUES ('reminder-member', 'blocked', now(), 'delivery')`,
+    );
+
+    await expect(reminderDispatchRepository.claimDue({
+      leaseMilliseconds: 300_000, limit: 10, now: new Date("2026-07-12T10:00:00.000Z"),
+    })).resolves.toEqual([]);
+    await expect(reminderRepository.list(auth, { limit: 100 })).resolves.toMatchObject({
+      items: [expect.objectContaining({ id: reminder.id, status: "active" })],
+    });
+
+    await database().query("DELETE FROM telegram_chat_reachability WHERE telegram_chat_id = 'reminder-member'");
+    const [claimed] = await reminderDispatchRepository.claimDue({
+      leaseMilliseconds: 300_000, limit: 10, now: new Date("2026-07-12T15:00:00.000Z"),
+    });
+    expect(claimed).toMatchObject({ delayed: true, id: reminder.id });
   });
 
   it("does not retry an expired lease after Telegram dispatch may have started", async () => {

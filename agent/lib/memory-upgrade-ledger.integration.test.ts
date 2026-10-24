@@ -228,6 +228,7 @@ const POST_V0101_MIGRATIONS = [
   "195_feature_tips_and_evening.sql",
   "196_feature_tip_evening_claims.sql",
   "197_onboarding_quest.sql",
+  "199_telegram_chat_reachability.sql",
 ] as const;
 
 const EXPECTED_R0_R7_TABLES = [

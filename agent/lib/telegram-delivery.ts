@@ -5,10 +5,17 @@
  * - `deliverFamilyInvitation`: sends a one-time invitation without model exposure.
  * - `notifyWaitlistPerson`: tells someone from the signup queue that a place has opened.
  * - `notifyOwnerMemberJoined`: tells the owner, outside the model, that someone joined by their link.
+ *
+ * The three notices are started by the bot, so each skips a chat Telegram already calls unreachable; the
+ * invitation answers the owner's own request in their chat and never does.
  */
 import { sendTelegramMessage } from "eve/channels/telegram";
 
 import { TELEGRAM_API_REQUEST_TIMEOUT_MS } from "../config.js";
+import {
+  type TelegramProactiveDeliveryKind,
+  unreachableTelegramRecipient,
+} from "./telegram-reachability/reachability-guard.js";
 
 interface FamilyInvitationDelivery {
   chatId: string;
@@ -74,6 +81,10 @@ export async function deliverFamilyInvitation(input: FamilyInvitationDelivery): 
   }
 }
 
+async function reachable(chatId: string, kind: TelegramProactiveDeliveryKind): Promise<boolean> {
+  return await unreachableTelegramRecipient(chatId, kind) === null;
+}
+
 /** Сбой уведомления не отменяет вход: человек уже в семье, владелец узнает из списка участников. */
 export async function notifyOwnerMemberJoined(input: {
   memberName: string;
@@ -84,6 +95,7 @@ export async function notifyOwnerMemberJoined(input: {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) return;
   try {
+    if (!await reachable(input.ownerTelegramUserId, "member_joined_notice")) return;
     await sendTelegramMessage({
       body: {
         text: `${input.via === "group" ? "Новый участник вошёл в семью через вашу группу" : "По вашей ссылке в семью добавлен"}: ${input.memberName}. Если это не тот человек, напишите мне «убери ${input.memberName}».`,
@@ -106,6 +118,7 @@ export async function notifyOperatorWaitlist(input: { name: string; username?: s
   if (!botToken) return;
   const who = input.username ? `${input.name} (@${input.username})` : input.name;
   try {
+    if (!await reachable(input.operatorTelegramUserId, "waitlist_notice")) return;
     await sendTelegramMessage({
       body: { text: `Новая заявка: ${who} ждёт приглашения. Пустить первых из очереди: /signup open <число мест> [слово].` },
       chatId: input.operatorTelegramUserId,
@@ -128,6 +141,7 @@ export async function notifyWaitlistPerson(telegramUserId: string, word: string 
   const bot = process.env.TELEGRAM_BOT_USERNAME;
   const how = word !== null && bot ? `Откройте ссылку https://t.me/${bot}?start=${word} и я подключу вашу семью.` : "Напишите мне /start, и я подключу вашу семью.";
   try {
+    if (!await reachable(telegramUserId, "waitlist_notice")) return false;
     await sendTelegramMessage({
       body: { text: `Появились места. ${how}` },
       chatId: telegramUserId,

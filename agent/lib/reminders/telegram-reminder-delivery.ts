@@ -3,11 +3,17 @@
  *
  * Export:
  * - `deliverTelegramReminder`: sends deterministic text and returns its durable delivery receipt.
+ *
+ * A chat Telegram calls gone (blocked bot, deleted account, bot removed from the group) fails the reminder
+ * with `AGENT_TELEGRAM_RECIPIENT_UNREACHABLE`. A chat already marked so is never claimed at all
+ * (`reminder-dispatch-repository.ts`): its reminder waits for the chat's return instead of failing.
  */
-import { sendTelegramMessage } from "eve/channels/telegram";
+import { callTelegramApi } from "eve/channels/telegram";
 
 import { TELEGRAM_API_REQUEST_TIMEOUT_MS } from "../../config.js";
 import { AppError } from "../app-error.js";
+import { TelegramRecipientUnreachableError } from "../memory-review/memory-review-owner-alert-transport.js";
+import { classifyTelegramRecipientFailure } from "../telegram-reachability/recipient-failure.js";
 import type { ProactiveDeliveryReceipt } from "../proactive-deliveries/proactive-delivery-repository.js";
 import type { ClaimedReminder } from "./reminder-dispatch-repository.js";
 
@@ -51,27 +57,36 @@ export async function deliverTelegramReminder(job: ClaimedReminder): Promise<Pro
 
   // Telegram has no idempotency key; the durable marker is written before this boundary call.
   try {
-    const sent = await sendTelegramMessage({
+    const threadId = job.messageThreadId === null ? undefined : messageThreadId(job.messageThreadId);
+    const response = await callTelegramApi({
       body: {
-        ...(job.messageThreadId === null
-          ? {}
-          : { message_thread_id: messageThreadId(job.messageThreadId) }),
+        chat_id: job.telegramChatId,
+        ...(threadId === undefined ? {} : { message_thread_id: threadId }),
         text,
       },
-      chatId: job.telegramChatId,
-      credentials: { botToken: requireBotToken() },
+      botToken: requireBotToken(),
       fetch: fetchWithTimeout,
+      method: "sendMessage",
     });
-    if (!/^[1-9]\d*$/u.test(sent.id)) {
+    if (!response.ok) {
+      const reason = classifyTelegramRecipientFailure(response.status, response.body);
+      if (reason !== null) throw new TelegramRecipientUnreachableError(job.telegramChatId, reason);
+      throw new Error(`Telegram sendMessage failed with HTTP ${response.status}.`);
+    }
+    const sentId = (response.body as { result?: { message_id?: unknown } } | null)?.result?.message_id;
+    const messageId = typeof sentId === "number" || typeof sentId === "string" ? String(sentId) : "";
+    if (!/^[1-9]\d*$/u.test(messageId)) {
       throw new AppError(
         "AGENT_REMINDER_TELEGRAM_DELIVERY_AMBIGUOUS",
         "Telegram принял напоминание, но не подтвердил идентификатор сообщения",
       );
     }
-    return { messageId: sent.id, text };
+    return { messageId, text };
   } catch (error) {
     console.error(JSON.stringify({
-      code: "AGENT_REMINDER_TELEGRAM_DELIVERY_FAILED",
+      code: error instanceof TelegramRecipientUnreachableError
+        ? error.code
+        : "AGENT_REMINDER_TELEGRAM_DELIVERY_FAILED",
       errorName: error instanceof Error ? error.name : "UnknownError",
       reminderId: job.id,
     }));

@@ -256,6 +256,13 @@ export const reminderDispatchRepository = {
            WHERE reminder.status = 'active' AND reminder.available_at <= $1
              AND reminder.attempts < $4
              AND (reminder.shared_task_id IS NULL OR ${linkedTaskActive('reminder')})
+             -- A chat Telegram calls unreachable (migration 199) keeps its reminder active and unclaimed: it
+             -- goes, marked as delayed, once the chat writes again or the bot is back in the group.
+             AND NOT EXISTS (
+               SELECT 1 FROM telegram_chat_reachability AS reachability
+                WHERE reachability.telegram_chat_id = reminder.telegram_chat_id
+                  AND reachability.unreachable_reason IS NOT NULL
+             )
            ORDER BY reminder.available_at, reminder.id
            FOR UPDATE OF reminder SKIP LOCKED
            LIMIT $2

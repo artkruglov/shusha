@@ -20,7 +20,7 @@ import type { MemoryAuthorization } from "../memory-context.js";
 import { currentTimeRepository } from "../current-time-repository.js";
 import { initiativeRepository } from "../initiative/initiative-repository.js";
 import { dailyOverviewRepository } from "../initiative/daily-overview-repository.js";
-import { memoryReviewOwnerAlertTransport } from "../memory-review/memory-review-owner-alert-transport.js";
+import { telegramReplyTransport } from "../memory-review/memory-review-owner-alert-transport.js";
 import { sharedTaskRepository } from "../shared-task-repository.js";
 import { sharedTaskVisibility } from "../shared-task-visibility.js";
 import { authorizeTaskButtonPress, productionTaskButtonAuthorizer } from "./task-button-authorization.js";
@@ -168,7 +168,7 @@ export function handleTaskButtonCallback(query: TelegramCallbackQuery): Promise<
       if (auth.userId === null) throw new AppError("AGENT_TASK_BUTTON_FAILED", TEXT.failed);
       const setting = await dailyOverviewSettings.read(auth.userId);
       const replyMarkup = await digestSettingsKeyboard({ chatId, familyId: auth.familyId, now: new Date(), setting });
-      await memoryReviewOwnerAlertTransport.send({ chatId, replyMarkup, text: digestSettingsText(setting) });
+      await telegramReplyTransport.send({ chatId, replyMarkup, text: digestSettingsText(setting) });
     },
     async changeDigest(auth, setting, message) {
       if (auth.userId === null) throw new AppError("AGENT_TASK_BUTTON_FAILED", TEXT.failed);
@@ -200,7 +200,7 @@ export function handleTaskButtonCallback(query: TelegramCallbackQuery): Promise<
       // The same board «покажи дела» sends, with «✓» in its text (ревью 21 октября 2026: был простой текст).
       const board = await boardMarkdown({ auth, now: overview.now, query: { source: "overview" }, tasks: overview.tasks, timezone,
         waiting: overview.waiting, ...(overview.projects ? { projects: overview.projects } : {}) });
-      if (board === null) await memoryReviewOwnerAlertTransport.send({ chatId, text: "Открытых дел нет." });
+      if (board === null) await telegramReplyTransport.send({ chatId, text: "Открытых дел нет." });
       else await sendBoardMessage(chatId, board);
     },
   });

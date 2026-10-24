@@ -123,6 +123,13 @@ export const memoryReviewOwnerAlertRepository = {
               -- Предупреждение о памяти не срочнее сна владельца: оно никуда не денется, а аренда
               -- на спящего адресата означала бы взятую строку без отправки.
               AND NOT COALESCE(${quietHoursClause({ alias: "settings", now: "$1" })}, false)
+              -- Владелец, до которого Telegram не доставляет (миграция 199), получит предупреждение, когда
+              -- снова станет доступен: взятая на недоступного строка ушла бы в сбой без отправки.
+              AND NOT EXISTS (
+                SELECT 1 FROM telegram_chat_reachability AS reachability
+                 WHERE reachability.telegram_chat_id = owner.telegram_user_id
+                   AND reachability.unreachable_reason IS NOT NULL
+              )
             ORDER BY alert.created_at, alert.id
             FOR UPDATE OF alert SKIP LOCKED
             LIMIT $2

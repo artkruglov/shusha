@@ -71,6 +71,24 @@ async function prepared(mode: "draft" | "send" = "send") {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the errand queued while the recipient's private chat is unreachable and delivers on return", async () => {
+    const id = await prepared();
+    await database().query(`INSERT INTO telegram_chat_reachability(telegram_chat_id,unreachable_reason,unreachable_since,source)
+      VALUES($1,'blocked',now(),'delivery') ON CONFLICT (telegram_chat_id) DO UPDATE SET unreachable_reason='blocked',unreachable_since=now()`,
+    [fixture.spouse.telegramUserId]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const send = vi.fn().mockResolvedValue("903");
+    const deliver = createErrandDelivery({ send });
+    expect(await deliver(id, morning))
+      .toMatchObject({ state: "queued", delivered: false, reason: "recipient_unreachable" });
+    expect(send).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("AGENT_TELEGRAM_PROACTIVE_DELIVERY_SKIPPED"));
+    warn.mockRestore();
+    await database().query("DELETE FROM telegram_chat_reachability WHERE telegram_chat_id=$1", [fixture.spouse.telegramUserId]);
+    expect(await deliver(id, morning)).toMatchObject({ state: "sent", delivered: true });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps an uncertain send terminal and does not call it a rejection", async () => {
     const send = vi.fn().mockRejectedValue(new Error("response lost"));
     const deliver = createErrandDelivery({ send });

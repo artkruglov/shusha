@@ -88,6 +88,20 @@ describe("software update checker", () => {
     }
   });
 
+  it("writes no proposal row for an owner Telegram no longer delivers to, so the version stays proposable", async () => {
+    const values = dependencies();
+    const ownerUnreachable = vi.fn().mockResolvedValue(true);
+    await expect(createSoftwareUpdateChecker({ ...values, ownerUnreachable })()).resolves.toBe("unreachable");
+    expect(ownerUnreachable).toHaveBeenCalledWith(owner);
+    expect(values.repository.prepareProposal).not.toHaveBeenCalled();
+    expect(values.deliverProposal).not.toHaveBeenCalled();
+    expect(values.recordInitiative).not.toHaveBeenCalled();
+
+    await expect(createSoftwareUpdateChecker({ ...values, ownerUnreachable: vi.fn().mockResolvedValue(false) })())
+      .resolves.toBe("proposed");
+    expect(values.repository.prepareProposal).toHaveBeenCalledTimes(1);
+  });
+
   it("counts a proposal against the day only once it is delivered", async () => {
     const values = dependencies();
     await expect(createSoftwareUpdateChecker(values)()).resolves.toBe("proposed");

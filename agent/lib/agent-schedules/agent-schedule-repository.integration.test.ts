@@ -89,10 +89,43 @@ describeWithDatabase("agent schedule repositories", () => {
     await database().query(
       `TRUNCATE proactive_deliveries, agent_schedule_operations, agent_schedule_runs, agent_schedules,
        conversation_session_routes, conversation_sessions, telegram_groups,
-       family_memberships, users, families CASCADE`,
+       family_memberships, users, families, telegram_chat_reachability CASCADE`,
     );
   });
   afterAll(async () => closeDatabase());
+
+  it("leaves a schedule of an unreachable chat active and unclaimed, and runs it once the chat is back", async () => {
+    const fixture = await createFixture();
+    const auth = privateAuth(fixture, "member");
+    await agentScheduleRepository.create(auth, {
+      firstRunAt: new Date("2026-07-17T09:00:00.000Z"),
+      operationKey: "unreachable-created",
+      recurrence: { daysOfWeek: [1, 2, 3, 4, 5], interval: 1, kind: "weekly" },
+      scenarioPrompt: "Сделать будничную сводку.",
+      scope: "personal",
+      timezone: "UTC",
+      title: "Сводка недоступному",
+      userRequest: "Каждый будний день присылай сводку",
+    });
+    await database().query(
+      `INSERT INTO telegram_chat_reachability (telegram_chat_id, unreachable_reason, unreachable_since, source)
+       VALUES ('schedule-member', 'blocked', now(), 'delivery')`,
+    );
+
+    await expect(agentScheduleDispatchRepository.claimDue({
+      leaseMilliseconds: 300_000, limit: 10, now: new Date("2026-07-17T09:00:01.000Z"),
+    })).resolves.toEqual([]);
+    const stored = await database().query<{ status: string }>(
+      "SELECT status FROM agent_schedules WHERE title = 'Сводка недоступному'",
+    );
+    expect(stored.rows[0]).toEqual({ status: "active" });
+
+    await database().query("DELETE FROM telegram_chat_reachability WHERE telegram_chat_id = 'schedule-member'");
+    const [claimed] = await agentScheduleDispatchRepository.claimDue({
+      leaseMilliseconds: 300_000, limit: 10, now: new Date("2026-07-17T12:00:00.000Z"),
+    });
+    expect(claimed).toMatchObject({ telegramChatId: "schedule-member", title: "Сводка недоступному" });
+  });
 
   it("creates and lists a personal scheduled agent scenario", async () => {
     const fixture = await createFixture();

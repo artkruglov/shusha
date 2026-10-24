@@ -16,6 +16,7 @@ import {
 import { decideInitiative, type InitiativeDecision } from "../initiative/initiative-policy.js";
 import { initiativeRepository } from "../initiative/initiative-repository.js";
 import { deliverSoftwareUpdateProposal } from "./proposal-delivery.js";
+import { unreachableTelegramRecipient } from "../telegram-reachability/reachability-guard.js";
 import { softwareUpdateRepository } from "./repository.js";
 import type {
   SoftwareUpdateRecipient,
@@ -28,6 +29,8 @@ interface SoftwareUpdateCheckerDependencies {
   createCallbackToken(): string;
   currentVersion: string;
   authorizeInitiative(owner: SoftwareUpdateRecipient): Promise<InitiativeDecision>;
+  /** True when Telegram no longer delivers to the owner's chat (migration 199). */
+  ownerUnreachable?(owner: SoftwareUpdateRecipient): Promise<boolean>;
   deliverProposal(input: DeliverSoftwareUpdateProposalInput): Promise<void>;
   recordInitiative(owner: SoftwareUpdateRecipient): Promise<void>;
   releaseClient: GitHubSoftwareReleaseClient;
@@ -40,7 +43,8 @@ export type SoftwareUpdateCheckResult =
   | "held"
   | "no_owner"
   | "no_update"
-  | "proposed";
+  | "proposed"
+  | "unreachable";
 
 export function createSoftwareUpdateChecker(dependencies: SoftwareUpdateCheckerDependencies) {
   return async function checkSoftwareUpdate(): Promise<SoftwareUpdateCheckResult> {
@@ -59,6 +63,10 @@ export function createSoftwareUpdateChecker(dependencies: SoftwareUpdateCheckerD
       }));
       return "held";
     }
+
+    // The proposal row is the version's only chance: a failed delivery stays terminal and a new check calls
+    // the version a duplicate. An owner Telegram no longer delivers to gets no row; the next check asks again.
+    if (await dependencies.ownerUnreachable?.(owner)) return "unreachable";
 
     // Only the hash crosses the durable boundary; the random token exists until initial delivery.
     const callbackToken = dependencies.createCallbackToken();
@@ -97,6 +105,7 @@ export const runSoftwareUpdateCheck = createSoftwareUpdateChecker({
     return decideInitiative(current.settings, current.state, new Date());
   },
   deliverProposal: deliverSoftwareUpdateProposal,
+  ownerUnreachable: async (owner) => await unreachableTelegramRecipient(owner.telegramUserId, "software_update") !== null,
   recordInitiative: (owner) => initiativeRepository.record({
     familyId: owner.familyId, kind: "update_proposal", now: new Date(), userId: owner.userId,
   }),

@@ -11,12 +11,16 @@
  * - Scheduled final delivery bound to its owner-approved Telegram chat and forum topic.
  * - Verified group replies anchored to the triggering member message.
  * - Successfully delivered final group output persisted as one logical timeline entry.
+ * - `my_chat_member` marks or clears an unreachable chat before the ACK; every failed send of the
+ *   process reports to the reachability observer installed here.
  */
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { telegramChannel, type TelegramEventContext } from "eve/channels/telegram";
 
 import { handleTelegramDurableIngress } from "../lib/telegram-durable-ingress.js";
+import { installTelegramDeliveryFailureObserver } from "../lib/telegram-reachability/delivery-failure-observer.js";
+import { handleMyChatMemberUpdate } from "../lib/telegram-reachability/my-chat-member.js";
 import { formatTelegramTurnFailure, isUnrecoverableHistoryFailure } from "../lib/telegram-interface.js";
 import { TELEGRAM_EVE_UPLOAD_POLICY } from "../lib/telegram-message-policy.js";
 import { handleTelegramMessage } from "../lib/telegram-on-message.js";
@@ -198,6 +202,9 @@ async function deliveryAllowed(
   if (request === null) return true;
   return (await authorizeSpaceDelivery(request)).allowed;
 }
+
+// Registration only: the pacer calls it after a failed send, so discovery and build stay offline.
+installTelegramDeliveryFailureObserver();
 
 export default telegramChannel({
   botUsername: process.env.TELEGRAM_BOT_USERNAME as string,
@@ -792,6 +799,7 @@ export default telegramChannel({
   onDrain: handleTelegramDurableIngress.drain,
   onGuestUpdate: handleTelegramDurableIngress.guest,
   onChatJoinRequest: handleTelegramDurableIngress.joinRequest,
+  onMyChatMember: handleMyChatMemberUpdate,
   onHitlCallbackQuery: authorizeTelegramHitlCallback,
   onMessage: handleTelegramMessage,
   onVerifiedUpdate: handleTelegramDurableIngress,

@@ -43,9 +43,22 @@ describe("ingress stall alerts", () => {
 
   it("sends nothing when no message is stalled", async () => {
     const deliver = vi.fn();
-    const recipients = vi.fn();
+    const recipients = vi.fn(async () => [{ familyId: "f", ownerTelegramUserId: "101", quietEnd: null, quietStart: null, timezone: "UTC" }]);
     await expect(dispatchIngressStallAlerts({ claim: async () => [], deliver, recipients })).resolves.toBe(0);
-    expect(recipients).not.toHaveBeenCalled();
     expect(deliver).not.toHaveBeenCalled();
+  });
+
+  it("does not stamp a stall as alerted while no owner can be reached, and alerts once one can", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const claim = vi.fn(async () => [{ chatType: "private", receivedAt: new Date("2026-10-01T22:22:00Z"), updateId: "7" }]);
+    const deliver = vi.fn(async () => undefined);
+    const recipients = async () => [{ familyId: "f", ownerTelegramUserId: "101", quietEnd: null, quietStart: null, timezone: "UTC" }];
+
+    await expect(dispatchIngressStallAlerts({ claim, deliver, recipients, unreachable: async () => true })).resolves.toBe(0);
+    expect(claim).not.toHaveBeenCalled();
+
+    await expect(dispatchIngressStallAlerts({ claim, deliver, recipients, unreachable: async () => false })).resolves.toBe(1);
+    expect(claim).toHaveBeenCalledTimes(1);
+    expect(deliver).toHaveBeenCalledWith(expect.objectContaining({ chatId: "101" }));
   });
 });

@@ -10,10 +10,12 @@ import { eveningReflectionKeyboard } from "../task-buttons/coach-touch-keyboard.
 import { createEveningReflectionDispatcher } from "./evening-reflection-dispatch.js";
 import { eveningReflectionRepository } from "./evening-reflection-repository.js";
 import { recordInitiativeDelivery } from "./initiative-delivery.js";
+import { claimIfReachable } from "../telegram-reachability/reachability-guard.js";
 
 export function dispatchEveningReflections(now = new Date()): Promise<number> {
   return createEveningReflectionDispatcher({
-    claim: (recipient, localDate, at) => eveningReflectionRepository.claim(recipient, localDate, at),
+    claim: (recipient, localDate, at) => claimIfReachable(recipient.telegramUserId, "initiative",
+      () => eveningReflectionRepository.claim(recipient, localDate, at)),
     content: (recipient, localDate, at) => eveningReflectionRepository.content(recipient, localDate, at),
     keyboard: (recipient, at) => eveningReflectionKeyboard({
       familyId: recipient.familyId, now: at, telegramUserId: recipient.telegramUserId,

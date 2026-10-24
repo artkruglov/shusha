@@ -6,6 +6,8 @@
  * - Other update kinds Eve cannot parse stay acknowledged and dropped.
  * - The guest hook never runs before webhook authentication.
  * - `onChatJoinRequest`: a verified `chat_join_request` reaches the application the same way.
+ * - `onMyChatMember`: a verified `my_chat_member` (bot blocked, unblocked, removed or added) reaches the
+ *   application with the raw body, never before authentication and never through Eve's dispatch.
  */
 import { telegramChannel } from "eve/channels/telegram";
 import { describe, expect, it, vi } from "vitest";
@@ -105,5 +107,56 @@ describe("Eve Telegram guest update patch", () => {
     expect(onGuestUpdate).not.toHaveBeenCalled();
     const [context] = onChatJoinRequest.mock.calls[0] as unknown as [Record<string, unknown>];
     expect(context.raw).toEqual(joinUpdate);
+  });
+
+  it("hands a verified my_chat_member update to its own hook, and never before authentication", async () => {
+    const onMyChatMember = vi.fn(async () => new Response("member-ok"));
+    const onVerifiedUpdate = vi.fn();
+    const channel = telegramChannel({
+      credentials: { webhookSecretToken: "webhook-secret" },
+      onMyChatMember,
+      onVerifiedUpdate,
+    });
+    const blocked = {
+      my_chat_member: {
+        chat: { first_name: "Анна", id: 101, type: "private" },
+        date: 1_760_000_000,
+        from: { first_name: "Анна", id: 101, is_bot: false },
+        new_chat_member: { status: "kicked", until_date: 0, user: { first_name: "Шуша", id: 7, is_bot: true } },
+        old_chat_member: { status: "member", user: { first_name: "Шуша", id: 7, is_bot: true } },
+      },
+      update_id: 2004,
+    };
+
+    expect((await post(channel.routes[0] as unknown as HttpRoute, blocked, "wrong-secret")).status).toBe(401);
+    expect(onMyChatMember).not.toHaveBeenCalled();
+    const response = await post(channel.routes[0] as unknown as HttpRoute, blocked);
+
+    expect(await response.text()).toBe("member-ok");
+    expect(onVerifiedUpdate).not.toHaveBeenCalled();
+    const [context] = onMyChatMember.mock.calls[0] as unknown as [Record<string, unknown>];
+    expect(context.raw).toEqual(blocked);
+    expect(typeof context.waitUntil).toBe("function");
+    expect(context).not.toHaveProperty("dispatch");
+  });
+
+  it("keeps acknowledging my_chat_member without a hook and leaves messages to the verified-update hook", async () => {
+    const onVerifiedUpdate = vi.fn(async () => new Response("message-ok"));
+    const onMyChatMember = vi.fn();
+    const silent = telegramChannel({ credentials: { webhookSecretToken: "webhook-secret" } });
+    const withHook = telegramChannel({ credentials: { webhookSecretToken: "webhook-secret" }, onMyChatMember, onVerifiedUpdate });
+
+    const dropped = await post(silent.routes[0] as unknown as HttpRoute, {
+      my_chat_member: { chat: { id: -1001, type: "supergroup" }, date: 1, new_chat_member: { status: "left" } },
+      update_id: 2005,
+    });
+    const message = await post(withHook.routes[0] as unknown as HttpRoute, {
+      message: { chat: { id: 101, type: "private" }, date: 1, from: { first_name: "А", id: 101, is_bot: false }, message_id: 1, text: "привет" },
+      update_id: 2006,
+    });
+
+    expect(await dropped.text()).toBe("ok");
+    expect(await message.text()).toBe("message-ok");
+    expect(onMyChatMember).not.toHaveBeenCalled();
   });
 });

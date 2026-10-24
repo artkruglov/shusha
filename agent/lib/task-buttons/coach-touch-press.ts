@@ -18,7 +18,7 @@ import { featureTipByNumber } from "../coach-touches/feature-tips.js";
 import { featureTipRepository } from "../initiative/feature-tip-repository.js";
 import { recordInitiativeDelivery, type InitiativeDelivery } from "../initiative/initiative-delivery.js";
 import type { MemoryAuthorization } from "../memory-context.js";
-import { memoryReviewOwnerAlertTransport } from "../memory-review/memory-review-owner-alert-transport.js";
+import { telegramReplyTransport } from "../memory-review/memory-review-owner-alert-transport.js";
 import type { TaskButtonRow } from "./task-button-repository.js";
 
 export const COACH_TOUCH_ACTIONS = ["tip_try", "tip_dismiss", "tips_off", "evening_off"] as const;
@@ -47,7 +47,7 @@ export interface CoachTouchPressDependencies {
 export const coachTouchPressDependencies: CoachTouchPressDependencies = {
   answer: (input) => featureTipRepository.answer(input),
   record: recordInitiativeDelivery,
-  send: (input) => memoryReviewOwnerAlertTransport.send(input),
+  send: (input) => telegramReplyTransport.send(input),
   switchOff: (input) => featureTipRepository.switchOff(input),
 };
 

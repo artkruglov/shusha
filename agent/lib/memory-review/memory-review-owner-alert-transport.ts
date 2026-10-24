@@ -3,16 +3,30 @@
  *
  * Exports:
  * - `MemoryReviewOwnerAlertTransportError`: definite Telegram delivery rejection.
+ * - `TelegramRecipientUnreachableError`: the definite rejection of a chat that can no longer receive
+ *   messages, or the skip of a chat already known to be so.
  * - `createMemoryReviewOwnerAlertTransport`: injectable no-retry transport.
- * - `memoryReviewOwnerAlertTransport`: lazy production transport using the required bot token.
+ * - `memoryReviewOwnerAlertTransport`: lazy production transport for messages the bot starts itself
+ *   (overviews, coach touches, digests, alerts); skips a chat marked unreachable without a request.
+ * - `telegramReplyTransport`: the same transport for an answer to a person's own button or page
+ *   action, which never skips: whoever pressed is reachable.
  *
  * `send` returns the confirmed Telegram message id: a message the bot started must land in the
  * proactive delivery journal, or the person's reply reaches a turn that never saw the question.
+ * The unreachable error extends the definite rejection, so every dispatcher treats it as a refusal:
+ * nothing was delivered. Dispatchers check reachability before their claim (`claimIfReachable`, claim
+ * queries that leave marked chats out), so this skip is only the backstop for a chat marked meanwhile.
  */
 import { callTelegramApi } from "eve/channels/telegram";
 
 import { TELEGRAM_API_REQUEST_TIMEOUT_MS } from "../../config.js";
 import { AppError } from "../app-error.js";
+import {
+  classifyTelegramRecipientFailure,
+  TELEGRAM_RECIPIENT_UNREACHABLE_CODE,
+  type TelegramRecipientUnreachableReason,
+} from "../telegram-reachability/recipient-failure.js";
+import { unreachableTelegramRecipient } from "../telegram-reachability/reachability-guard.js";
 
 export class MemoryReviewOwnerAlertTransportError extends AppError {
   readonly delivery: "failed";
@@ -24,10 +38,28 @@ export class MemoryReviewOwnerAlertTransportError extends AppError {
   }
 }
 
+export class TelegramRecipientUnreachableError extends MemoryReviewOwnerAlertTransportError {
+  readonly chatId: string;
+  readonly reason: TelegramRecipientUnreachableReason;
+
+  constructor(chatId: string, reason: TelegramRecipientUnreachableReason) {
+    super(
+      "failed",
+      TELEGRAM_RECIPIENT_UNREACHABLE_CODE,
+      "Telegram не доставляет сообщения в этот чат: бот заблокирован, удалён из группы или чат недоступен",
+    );
+    this.chatId = chatId;
+    this.reason = reason;
+    this.name = "TelegramRecipientUnreachableError";
+  }
+}
+
 interface MemoryReviewOwnerAlertTransportDependencies {
   botToken: string;
   fetch: typeof fetch;
   timeoutMilliseconds: number;
+  /** The reason a bot-started message must skip this chat; absent for answers to a person's action. */
+  unreachableRecipient?: (chatId: string) => Promise<TelegramRecipientUnreachableReason | null>;
 }
 
 /** Formatting by offsets (Bot API `MessageEntity`): the text itself stays plain. */
@@ -72,6 +104,18 @@ export function createMemoryReviewOwnerAlertTransport(
     signal: AbortSignal.timeout(dependencies.timeoutMilliseconds),
   });
   const post = async (input: TelegramPlainMessage): Promise<unknown> => {
+    let known: TelegramRecipientUnreachableReason | null;
+    try {
+      known = await dependencies.unreachableRecipient?.(input.chatId) ?? null;
+    } catch {
+      // Nothing reached Telegram, so this is a definite failure: a dispatcher may try again.
+      throw new MemoryReviewOwnerAlertTransportError(
+        "failed",
+        "AGENT_TELEGRAM_REACHABILITY_UNAVAILABLE",
+        "Не удалось проверить, доступен ли чат; сообщение не отправлено",
+      );
+    }
+    if (known !== null) throw new TelegramRecipientUnreachableError(input.chatId, known);
     const response = await callTelegramApi({
       body: {
         chat_id: input.chatId, text: input.text,
@@ -82,11 +126,15 @@ export function createMemoryReviewOwnerAlertTransport(
       fetch: boundedFetch,
       method: "sendMessage",
     });
-    if (!response.ok) throw new MemoryReviewOwnerAlertTransportError(
-      "failed",
-      "AGENT_MEMORY_REVIEW_OWNER_ALERT_TELEGRAM_REJECTED",
-      "Telegram отклонил уведомление владельца о сбое проверки памяти",
-    );
+    if (!response.ok) {
+      const reason = classifyTelegramRecipientFailure(response.status, response.body);
+      if (reason !== null) throw new TelegramRecipientUnreachableError(input.chatId, reason);
+      throw new MemoryReviewOwnerAlertTransportError(
+        "failed",
+        "AGENT_MEMORY_REVIEW_OWNER_ALERT_TELEGRAM_REJECTED",
+        "Telegram отклонил уведомление владельца о сбое проверки памяти",
+      );
+    }
     return response.body;
   };
   return {
@@ -105,7 +153,7 @@ export function createMemoryReviewOwnerAlertTransport(
   };
 }
 
-function productionTransport(): MemoryReviewOwnerAlertTransport {
+function productionTransport(proactive: boolean): MemoryReviewOwnerAlertTransport {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) throw new AppError(
     "AGENT_TELEGRAM_CONFIG_MISSING",
@@ -115,11 +163,19 @@ function productionTransport(): MemoryReviewOwnerAlertTransport {
     botToken,
     fetch,
     timeoutMilliseconds: TELEGRAM_API_REQUEST_TIMEOUT_MS,
+    ...(proactive
+      ? { unreachableRecipient: (chatId: string) => unreachableTelegramRecipient(chatId, "proactive_message") }
+      : {}),
   });
 }
 
 // Runtime secrets stay lazy so Eve discovery and build remain deterministic.
 export const memoryReviewOwnerAlertTransport: MemoryReviewOwnerAlertTransport = {
-  deliver: (input) => productionTransport().deliver(input),
-  send: (input) => productionTransport().send(input),
+  deliver: (input) => productionTransport(true).deliver(input),
+  send: (input) => productionTransport(true).send(input),
+};
+
+export const telegramReplyTransport: MemoryReviewOwnerAlertTransport = {
+  deliver: (input) => productionTransport(false).deliver(input),
+  send: (input) => productionTransport(false).send(input),
 };

@@ -5,10 +5,14 @@
  * - A low or blocked balance reaches the owner once per UTC day through a claim; a healthy or
  *   unreadable balance sends nothing and takes no claim.
  * - Quiet hours postpone the alert; a Telegram refusal releases the claim, an unclear delivery does not.
+ * - An owner chat Telegram calls unreachable takes no claim, and one found unreachable at send releases it.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { MemoryReviewOwnerAlertTransportError } from "../memory-review/memory-review-owner-alert-transport.js";
+import {
+  MemoryReviewOwnerAlertTransportError,
+  TelegramRecipientUnreachableError,
+} from "../memory-review/memory-review-owner-alert-transport.js";
 import { createOwnerBalanceAlertDispatcher } from "./owner-balance-alert.js";
 
 const owner = { familyId: "family-1", ownerTelegramUserId: "101", quietEnd: null, quietStart: null, timezone: "UTC" };
@@ -41,6 +45,20 @@ describe("createOwnerBalanceAlertDispatcher", () => {
       text: "DeepSeek: баланс 1,20 $, ниже порога 2,00 $. Пополните счёт, иначе бот перестанет отвечать.",
     });
     expect(deps.complete).toHaveBeenCalledWith("family-1", "2026-09-14", now);
+  });
+
+  it("keeps the day's alert for an unreachable owner instead of spending it on a skip", async () => {
+    const skipped = dependencies({ unreachable: vi.fn().mockResolvedValue(true) });
+    await expect(createOwnerBalanceAlertDispatcher(skipped)(now)).resolves.toBe(0);
+    expect(skipped.unreachable).toHaveBeenCalledWith("101");
+    expect(skipped.claim).not.toHaveBeenCalled();
+
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const raced = dependencies({ deliver: vi.fn().mockRejectedValue(new TelegramRecipientUnreachableError("101", "blocked")) });
+    await expect(createOwnerBalanceAlertDispatcher(raced)(now)).resolves.toBe(0);
+    expect(raced.release).toHaveBeenCalledWith("family-1", "2026-09-14");
+    expect(raced.abandon).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
   });
 
   it("does nothing for a healthy or unreadable balance", async () => {

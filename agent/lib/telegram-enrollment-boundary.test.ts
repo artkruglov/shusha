@@ -5,10 +5,18 @@
  * - `handleTelegramEnrollmentBoundary`: accepts exact bootstrap commands without model dispatch.
  * - Ordinary private text cannot consume a bootstrap attempt.
  * - Existing identities cannot turn invitation deep links into conversation content.
+ * - A bot-started notice to the operator or owner skips a chat marked unreachable.
  */
 import { describe, expect, it, vi } from "vitest";
 
 import { handleTelegramEnrollmentBoundary } from "./telegram-enrollment-boundary.js";
+import { unreachableTelegramRecipient } from "./telegram-reachability/reachability-guard.js";
+
+// Notices read the reachability table before sending; these tests run without a database.
+vi.mock("./telegram-reachability/reachability-guard.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./telegram-reachability/reachability-guard.js")>(),
+  unreachableTelegramRecipient: vi.fn().mockResolvedValue(null),
+}));
 import {
   privateMessage,
   repositories,
@@ -228,6 +236,25 @@ describe("handleTelegramEnrollmentBoundary", () => {
     expect(sendMessage).toHaveBeenCalledWith(expect.stringContaining("Вы в семье"));
     expect(sendMessage).toHaveBeenLastCalledWith(expect.objectContaining({ text: "С чего начнём?" }));
     expect(notify).toHaveBeenCalled();
+    notify.mockRestore();
+  });
+
+  it("does not write to an owner who blocked the bot, and still welcomes the member", async () => {
+    const repository = repositories();
+    repository.telegram.hasOwner.mockResolvedValue(true);
+    repository.family.claimInvitation.mockResolvedValue({ joined: { familyId: "f1", ownerTelegramUserId: "9001" } });
+    const { context, sendMessage } = telegramContext();
+    const notify = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+    vi.mocked(unreachableTelegramRecipient).mockResolvedValueOnce("blocked");
+    process.env.TELEGRAM_BOT_TOKEN = "123:test";
+
+    await handleTelegramEnrollmentBoundary({
+      ctx: context, identity: null, invitationCode: "a".repeat(32), message: privateMessage(`/start ${"a".repeat(32)}`), repositories: repository,
+    });
+
+    expect(sendMessage).toHaveBeenCalledWith(expect.stringContaining("Вы в семье"));
+    expect(unreachableTelegramRecipient).toHaveBeenCalledWith("9001", "member_joined_notice");
+    expect(notify).not.toHaveBeenCalled();
     notify.mockRestore();
   });
 

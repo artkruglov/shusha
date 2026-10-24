@@ -16,7 +16,7 @@ import { currentTimeRepository } from "../current-time-repository.js";
 import { withFamilyDatabaseContext } from "../database-context.js";
 import type { MemoryAuthorization } from "../memory-context.js";
 import { MEMORY_REF_PATTERN } from "../model-memory.js";
-import { memoryReviewOwnerAlertTransport } from "../memory-review/memory-review-owner-alert-transport.js";
+import { telegramReplyTransport } from "../memory-review/memory-review-owner-alert-transport.js";
 import { shoppingRepository } from "../shopping/shopping-repository.js";
 import {
   authorizeWebApp, readWebAppJson, webAppApiDependencies, webAppBadRequest, webAppFailure, webAppJson,
@@ -265,7 +265,7 @@ export const webAppMoreDependencies: WebAppMoreDependencies = {
   },
   routines: (auth, now) => webAppRoutines.list(auth, now),
   saveSettings: (auth, change) => webAppSettings.save(auth, change),
-  sendHint: (input) => memoryReviewOwnerAlertTransport.deliver(input),
+  sendHint: (input) => telegramReplyTransport.deliver(input),
   settings: (auth) => webAppSettings.read(auth),
   async shop(auth, input, operationKey) {
     // A new item goes to «Продукты», the list the chat adds to when no list is named.

@@ -5,6 +5,7 @@
  * - `createTelegramDurableIngress`: verified Eve hook that persists before ACK and drains FIFO.
  * - `handleTelegramDurableIngress`: production hook with PostgreSQL and Groq dependencies.
  * - Application software-update callbacks complete before native Eve dispatch begins.
+ * - A verified message clears the unreachable mark of its chat: whoever writes can be written to.
  */
 import type {
   TelegramDrainContext,
@@ -53,6 +54,7 @@ import {
 } from "./telegram-ingress-update.js";
 import { withTelegramUpdateMarker } from "./telegram-update-marker.js";
 import { telegramRepository } from "./telegram-repository.js";
+import { noteInboundTelegramMessage } from "./telegram-reachability/reachability-guard.js";
 import { handleSoftwareUpdateCallback } from "./software-updates/callback.js";
 import { handleChatJoinRequest, handleGroupJoinCallback } from "./group-join/group-join.js";
 import { handleGuestReminderCallback } from "./guest/guest-reminder-callback.js";
@@ -117,6 +119,11 @@ interface DurableIngressDependencies {
     query: Extract<TelegramUpdate, { kind: "callback_query" }>["callbackQuery"],
   ): Promise<boolean>;
   leaseMilliseconds: number;
+  /**
+   * Records a message as proof that its chat reaches the bot and clears its unreachable mark
+   * (migration 199). Never throws: a failed write must not refuse the update.
+   */
+  noteInboundMessage?(input: { chatId: string; message: Record<string, unknown>; updateId: string }): Promise<void>;
   /**
    * Tells the person in a private chat that a message of theirs was not processed. Failure texts are
    * written for people; without this they only reached the log (ilkruglov 5d80240e).
@@ -584,6 +591,12 @@ export function createTelegramDurableIngress(dependencies: DurableIngressDepende
     const mediaAccepted = update.kind !== "message" || mediaKind === "none" ||
       await dependencies.acceptMedia(update.message, incomingUpdateId, mediaKind, rich.textFallback);
     const payload = richIngressPayload(context.raw, rich, mediaAccepted);
+    // Even a refused file proves the chat still reaches the bot.
+    if (update.kind === "message") {
+      await dependencies.noteInboundMessage?.({
+        chatId: update.message.chat.id, message: update.message.raw, updateId: incomingUpdateId,
+      });
+    }
     if (payload === null) return new Response("ok");
     const voice = telegramVoiceMetadata(context.raw);
     await dependencies.repository.enqueue({
@@ -648,6 +661,7 @@ export const handleTelegramDurableIngress = createTelegramDurableIngress({
   taskButtonTurn: staleTaskTurn,
   handleSoftwareUpdateCallback,
   leaseMilliseconds: TELEGRAM_INGRESS_LEASE_MS,
+  noteInboundMessage: noteInboundTelegramMessage,
   notifyFailure: sendTelegramFailureNotice,
   repository: telegramIngressRepository,
   async requestSessionRotation(eveSessionId) {
